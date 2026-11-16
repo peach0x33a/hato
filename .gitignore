@@ -1,0 +1,14 @@
+node_modules/
+dist/
+data/
+.env
+.env.*
+!.env.example
+config/hato.toml
+config/models.toml
+*.bak
+*.log
+*.db
+*.db-shm
+*.db-wal
+.DS_Store

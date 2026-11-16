@@ -1,0 +1,134 @@
+import { integer, real, sqliteTable, text } from "drizzle-orm/sqlite-core";
+
+export const owners = sqliteTable("owners", {
+  canonicalUserId: text("canonical_user_id").primaryKey(),
+  tgUserId: text("tg_user_id"),
+  qqOpenId: text("qq_open_id"),
+  timezone: text("timezone").notNull(),
+  proactiveChannel: text("proactive_channel").notNull(),
+  updatedAt: integer("updated_at").notNull(),
+});
+
+export const rawMessages = sqliteTable("raw_messages", {
+  id: text("id").primaryKey(),
+  canonicalUserId: text("canonical_user_id").notNull(),
+  channel: text("channel").notNull(),
+  platformMsgId: text("platform_msg_id"),
+  replyToId: text("reply_to_id"),
+  role: text("role").notNull(), // "user" | "assistant" | "executed_event"
+  content: text("content").notNull(),
+  attachmentsJson: text("attachments_json").notNull().default("[]"),
+  createdAt: integer("created_at").notNull(),
+});
+
+export const workingMemoryBlocks = sqliteTable("working_memory_blocks", {
+  canonicalUserId: text("canonical_user_id").primaryKey(),
+  summaryText: text("summary_text").notNull().default(""),
+  compactedUntilMsgId: text("compacted_until_msg_id"),
+  compactedUntilTs: integer("compacted_until_ts").notNull().default(0),
+  draftSummary: text("draft_summary"),
+  draftUntilMsgId: text("draft_until_msg_id"),
+  draftUntilTs: integer("draft_until_ts"),
+  retainedUntilMsgId: text("retained_until_msg_id"),
+  updatedAt: integer("updated_at").notNull(),
+});
+
+export const tickets = sqliteTable("tickets", {
+  id: text("id").primaryKey(),
+  canonicalUserId: text("canonical_user_id").notNull(),
+  status: text("status").notNull(),
+  backend: text("backend").notNull(),
+  briefTitle: text("brief_title").notNull(),
+  contextId: text("context_id"),
+  contextFromMsgId: text("context_from_msg_id"),
+  contextToMsgId: text("context_to_msg_id"),
+  maxLookbackMsgId: text("max_lookback_msg_id"),
+  externalSessionId: text("external_session_id"),
+  progressNote: text("progress_note"),
+  originChannel: text("origin_channel").notNull(),
+  mandateJson: text("mandate_json"),
+  modelSnapshotJson: text("model_snapshot_json"),
+  resultJson: text("result_json"),
+  workspaceExpiresAt: integer("workspace_expires_at"),
+  createdAt: integer("created_at").notNull(),
+  updatedAt: integer("updated_at").notNull(),
+});
+
+export const scriptRegistry = sqliteTable("script_registry", {
+  id: text("id").primaryKey(),
+  ticketId: text("ticket_id").notNull(),
+  name: text("name").notNull(),
+  scriptPath: text("script_path").notNull(),
+  cronExpr: text("cron_expr").notNull(),
+  notifyChannel: text("notify_channel").notNull(),
+  enabled: integer("enabled", { mode: "boolean" }).notNull().default(true),
+  requiredSecretsJson: text("required_secrets_json").notNull().default("[]"),
+  consecutiveFailures: integer("consecutive_failures").notNull().default(0),
+  createdAt: integer("created_at").notNull(),
+  updatedAt: integer("updated_at").notNull(),
+});
+
+export const jobRuns = sqliteTable("job_runs", {
+  id: text("id").primaryKey(),
+  scriptId: text("script_id").notNull(),
+  exitCode: integer("exit_code").notNull(),
+  stdoutTail: text("stdout_tail").notNull().default(""),
+  stderrTail: text("stderr_tail").notNull().default(""),
+  ranAt: integer("ran_at").notNull(),
+});
+
+export const openLoops = sqliteTable("open_loops", {
+  id: text("id").primaryKey(),
+  canonicalUserId: text("canonical_user_id").notNull(),
+  content: text("content").notNull(),
+  dueAt: integer("due_at").notNull(),
+  notifyChannel: text("notify_channel").notNull(),
+  status: text("status").notNull(),
+  unansweredStreak: integer("unanswered_streak").notNull().default(0),
+  sourceMsgId: text("source_msg_id"),
+  createdAt: integer("created_at").notNull(),
+});
+
+export const scheduleOverrides = sqliteTable("schedule_overrides", {
+  id: text("id").primaryKey(),
+  canonicalUserId: text("canonical_user_id").notNull(),
+  tempTimezone: text("temp_timezone"),
+  statusNote: text("status_note"),
+  expiresAt: integer("expires_at").notNull(),
+  createdAt: integer("created_at").notNull(),
+});
+
+export const relationshipFacts = sqliteTable("relationship_facts", {
+  key: text("key").primaryKey(),
+  value: text("value").notNull(),
+  sourceMsgId: text("source_msg_id"),
+  updatedAt: integer("updated_at").notNull(),
+});
+
+export const runtimeSettings = sqliteTable("runtime_settings", {
+  key: text("key").primaryKey(),
+  valueJson: text("value_json").notNull(),
+  updatedAt: integer("updated_at").notNull(),
+});
+
+export const turnTraces = sqliteTable("turn_traces", {
+  id: text("id").primaryKey(),
+  canonicalUserId: text("canonical_user_id").notNull(),
+  slot: text("slot").notNull(),
+  provider: text("provider").notNull(),
+  modelId: text("model_id").notNull(),
+  api: text("api").notNull(),
+  inputTokens: integer("input_tokens").notNull().default(0),
+  outputTokens: integer("output_tokens").notNull().default(0),
+  cacheReadTokens: integer("cache_read_tokens").notNull().default(0),
+  cacheWriteTokens: integer("cache_write_tokens").notNull().default(0),
+  cacheHitRate: real("cache_hit_rate").notNull().default(0),
+  ttftMs: integer("ttft_ms"),
+  tps: real("tps"),
+  userPreview: text("user_preview"),
+  recalledIdsJson: text("recalled_ids_json").notNull().default("[]"),
+  timeCardText: text("time_card_text").notNull().default(""),
+  toolCallsJson: text("tool_calls_json").notNull().default("[]"),
+  latencyMs: integer("latency_ms").notNull().default(0),
+  createdAt: integer("created_at").notNull(),
+});
