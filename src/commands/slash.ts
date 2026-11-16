@@ -26,7 +26,7 @@ export interface SlashCommandDeps {
   listModelSlots(): ModelSlotView[];
   listAvailableModels(): string[];
   setModelSlot(slot: string, target: string): ModelSlotView;
-  reloadAll(): Promise<{ slots: ModelSlotView[]; proxyCount: number }>;
+  reloadAll(): Promise<{ slots: ModelSlotView[]; proxyCount: number; changes?: string[] }>;
   forceCompact(canonicalUserId: string): Promise<boolean>;
   resetContext?(canonicalUserId: string): Promise<ResetContextResult>;
   setHomeChannel?(): Promise<SetHomeResult>;
@@ -136,7 +136,12 @@ export async function tryHandleSlashCommand(
     try {
       const res = await deps.reloadAll();
       const lines = res.slots.map((s) => `- ${s.slot}: ${s.target} (${s.api})`);
-      return `配置热重载成功（代理规则 ${res.proxyCount} 条）：\n${lines.join("\n")}`;
+      const diffSection = res.changes
+        ? res.changes.length > 0
+          ? `\n\n【本次变更差异 (${res.changes.length} 项)】\n${res.changes.map((c) => `• ${c}`).join("\n")}`
+          : "\n\n【本次变更差异】\n• 无变化（当前配置与重载前一致）"
+        : "";
+      return `配置热重载成功（代理规则 ${res.proxyCount} 条）：\n${lines.join("\n")}${diffSection}`;
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       return `配置热重载失败：${msg}`;

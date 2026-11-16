@@ -66,6 +66,7 @@ export function createPersonaReadOnlyTools(params: {
   getHatoConfig: () => HatoConfig;
   proxyRouter: ScopedProxyRouter;
   browserRuntime?: BrowserRuntime;
+  onBeforeToolExecute?: (toolName: string, input: unknown) => Promise<void>;
 }): AgentTool<any>[] {
   const calcTool: AgentTool<typeof CalcParams> = {
     name: "calc",
@@ -222,5 +223,16 @@ export function createPersonaReadOnlyTools(params: {
     tools.push(browserTaskTool);
   }
 
-  return tools;
+  if (!params.onBeforeToolExecute) {
+    return tools;
+  }
+
+  const hook = params.onBeforeToolExecute;
+  return tools.map((tool) => ({
+    ...tool,
+    execute: async (toolCallId, input, signal, onUpdate) => {
+      await hook(tool.name, input);
+      return tool.execute(toolCallId, input, signal, onUpdate);
+    },
+  }));
 }

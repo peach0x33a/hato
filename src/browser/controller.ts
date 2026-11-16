@@ -29,7 +29,7 @@ export interface BrowserPageSnapshot {
   bodyText: string;
 }
 
-const WEB_ACCESS_BROWSER_SCOPE = "web_access.browser";
+export const BROWSER_PROXY_SCOPE = "browser";
 const MAX_SNAPSHOT_ELEMENTS = 80;
 const MAX_SNAPSHOT_TEXT_CHARS = 3_500;
 
@@ -189,7 +189,7 @@ export class BrowserController {
 
   async ensurePage(config: ResolvedWebBrowserConfig): Promise<Page> {
     this.latestConfig = config;
-    const proxyRes = this.proxyRouter.resolveScope(WEB_ACCESS_BROWSER_SCOPE);
+    const proxyRes = this.proxyRouter.resolveScope(BROWSER_PROXY_SCOPE);
     const playwrightProxy = parsePlaywrightProxy(proxyRes);
     const nextProxyKey = playwrightProxy
       ? `${playwrightProxy.server}|${playwrightProxy.username ?? ""}`

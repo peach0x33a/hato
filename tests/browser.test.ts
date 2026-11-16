@@ -8,8 +8,12 @@ import {
   fauxProvider,
   fauxToolCall,
 } from "@earendil-works/pi-ai";
-import type { BrowserController, BrowserPageSnapshot } from "../src/browser/controller.js";
-import { formatBrowserSnapshotText } from "../src/browser/controller.js";
+import {
+  BROWSER_PROXY_SCOPE,
+  formatBrowserSnapshotText,
+  type BrowserController,
+  type BrowserPageSnapshot,
+} from "../src/browser/controller.js";
 import {
   buildBrowserLaunchArgs,
   parsePlaywrightProxy,
@@ -29,7 +33,7 @@ test("parsePlaywrightProxy parses direct, HTTP, and authenticated SOCKS5 proxy r
     parsePlaywrightProxy({
       mode: "proxy",
       url: "http://127.0.0.1:19270",
-      matchedScope: "web_access",
+      matchedScope: "browser",
     }),
     { server: "http://127.0.0.1:19270" },
   );
@@ -38,7 +42,7 @@ test("parsePlaywrightProxy parses direct, HTTP, and authenticated SOCKS5 proxy r
     parsePlaywrightProxy({
       mode: "proxy",
       url: "socks5://alice:s%40cret@proxy.example.com:1080",
-      matchedScope: "web_access.browser",
+      matchedScope: "browser",
     }),
     {
       server: "socks5://proxy.example.com:1080",
@@ -46,6 +50,22 @@ test("parsePlaywrightProxy parses direct, HTTP, and authenticated SOCKS5 proxy r
       password: "s@cret",
     },
   );
+
+  assert.equal(BROWSER_PROXY_SCOPE, "browser");
+  const isolatedRouter = new ScopedProxyRouter([
+    { name: "web-only", url: "http://127.0.0.1:19270", scope: ["web_access"] },
+  ]);
+  assert.equal(isolatedRouter.resolveScope(BROWSER_PROXY_SCOPE).mode, "direct");
+
+  const browserRouter = new ScopedProxyRouter([
+    { name: "web-only", url: "http://127.0.0.1:19270", scope: ["web_access"] },
+    { name: "browser-only", url: "socks5://127.0.0.1:1080", scope: ["browser"] },
+  ]);
+  assert.deepEqual(browserRouter.resolveScope(BROWSER_PROXY_SCOPE), {
+    mode: "proxy",
+    url: "socks5://127.0.0.1:1080",
+    matchedScope: "browser",
+  });
 });
 
 test("resolveBrowserLaunchCandidates and prepareDisplayAndHeadless support Windows, macOS, and Linux", async () => {

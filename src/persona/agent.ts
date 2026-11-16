@@ -30,6 +30,7 @@ import { computeTurnMetrics, formatLlmTelemetryLog } from "../stats/metrics.js";
 export interface PersonaTurnOutput {
   rawText: string;
   bubbles: string[];
+  earlyBubbles: string[];
   usage: Usage;
   toolCalls: string[];
   latencyMs: number;
@@ -47,6 +48,7 @@ export class PersonaRuntime {
   private basePersonaPrompt = "";
   private lastTimeCardSnapshot = "";
   private activeCallStartPerf: number | null = null;
+  private activeBeforeToolHook: ((toolName: string, input: unknown) => Promise<void>) | null = null;
 
   constructor(
     private hatoConfig: HatoConfig,
@@ -65,6 +67,11 @@ export class PersonaRuntime {
       getHatoConfig: () => this.hatoConfig,
       proxyRouter: this.proxyRouter,
       browserRuntime: this.browserRuntime,
+      onBeforeToolExecute: async (toolName, input) => {
+        if (this.activeBeforeToolHook) {
+          await this.activeBeforeToolHook(toolName, input);
+        }
+      },
     });
 
     this.agent = new Agent({
@@ -129,6 +136,10 @@ export class PersonaRuntime {
     this.basePersonaPrompt = readFileSync(promptPath, "utf8");
   }
 
+  getBasePersonaPrompt(): string {
+    return this.basePersonaPrompt;
+  }
+
   refreshTranscriptFromDb(): void {
     const canonicalUserId = this.hatoConfig.owner.canonical_user_id;
     const systemPromptText = buildStaticSystemPrompt(this.basePersonaPrompt, this.repo);
@@ -156,7 +167,10 @@ export class PersonaRuntime {
   async handleUserBatch(
     batch: InboundBatch,
     loadedImages: ImageContent[] = [],
-    options?: { sendPhotoToUser?: SendPhotoToUserFn },
+    options?: {
+      sendPhotoToUser?: SendPhotoToUserFn;
+      sendBubblesToUser?: (bubbles: string[]) => Promise<void>;
+    },
   ): Promise<PersonaTurnOutput> {
     const canonicalUserId = batch.canonicalUserId;
     const resolved = this.modelRegistry.resolveSlot("persona");
@@ -196,6 +210,18 @@ export class PersonaRuntime {
     let msgFirstDeltaPerf: number | null = null;
     let totalDecodeMs = 0;
 
+    const preReplyState: {
+      latestToolUseMsg: AssistantMessage | null;
+      flushedForCurrentMsg: boolean;
+      sentMessageRefs: Set<AssistantMessage>;
+      sentBubbles: string[];
+    } = {
+      latestToolUseMsg: null,
+      flushedForCurrentMsg: false,
+      sentMessageRefs: new Set(),
+      sentBubbles: [],
+    };
+
     const unsubscribe = this.agent.subscribe((ev) => {
       if (ev.type === "message_start" && ev.message.role === "assistant") {
         msgStartPerf = this.activeCallStartPerf ?? performance.now();
@@ -218,6 +244,12 @@ export class PersonaRuntime {
 
       if (ev.type === "message_end" && ev.message.role === "assistant") {
         const msg = ev.message;
+        if (msg.stopReason === "toolUse") {
+          preReplyState.latestToolUseMsg = msg;
+          preReplyState.flushedForCurrentMsg = false;
+        } else {
+          preReplyState.latestToolUseMsg = null;
+        }
         const nowPerf = performance.now();
         const callStart = this.activeCallStartPerf ?? msgStartPerf;
         const callTotalMs = Math.max(1, Math.round(nowPerf - callStart));
@@ -264,10 +296,36 @@ export class PersonaRuntime {
       }
     });
 
+    const sendBubblesToUser = options?.sendBubblesToUser;
+    this.activeBeforeToolHook = sendBubblesToUser
+      ? async (toolName, input) => {
+          if (preReplyState.flushedForCurrentMsg) return;
+          preReplyState.flushedForCurrentMsg = true;
+
+          const latestMsg = preReplyState.latestToolUseMsg;
+          const modelPreText = latestMsg ? extractAssistantText(latestMsg).trim() : "";
+          const replyText = modelPreText || buildDefaultPreToolAck(toolName, input);
+
+          const preBubbles = splitIntoBubbles(replyText, {
+            enabled: this.hatoConfig.gateway.bubbles.enabled,
+            maxPerTurn: this.hatoConfig.gateway.bubbles.max_per_turn,
+            delimiter: this.hatoConfig.gateway.bubbles.delimiter,
+          });
+          if (preBubbles.length === 0) return;
+
+          if (latestMsg && modelPreText) {
+            preReplyState.sentMessageRefs.add(latestMsg);
+          }
+          preReplyState.sentBubbles.push(...preBubbles);
+          await sendBubblesToUser(preBubbles);
+        }
+      : null;
+
     this.browserRuntime?.setPhotoSender(options?.sendPhotoToUser ?? null);
     try {
       await this.agent.prompt(userAgentMsg);
     } finally {
+      this.activeBeforeToolHook = null;
       this.browserRuntime?.setPhotoSender(null);
       unsubscribe();
       this.activeCallStartPerf = null;
@@ -282,7 +340,10 @@ export class PersonaRuntime {
     }
 
     const newMessages = this.agent.state.messages.slice(startIndex);
-    const { finalText, totalUsage, toolCalls } = extractTurnMetrics(newMessages);
+    const { finalText, totalUsage, toolCalls } = extractTurnMetrics(
+      newMessages,
+      preReplyState.sentMessageRefs,
+    );
     const turnMetrics = computeTurnMetrics({
       inputTokens: totalUsage.input,
       outputTokens: totalUsage.output,
@@ -292,14 +353,21 @@ export class PersonaRuntime {
       ttftMs,
       decodeMs: totalDecodeMs > 0 ? totalDecodeMs : undefined,
     });
-    const cleanReply = finalText.trim() || "嗯……刚刚走神了一下，你再说一遍？";
 
-    const bubbles = splitIntoBubbles(cleanReply, {
-      enabled: this.hatoConfig.gateway.bubbles.enabled,
-      maxPerTurn: this.hatoConfig.gateway.bubbles.max_per_turn,
-      delimiter: this.hatoConfig.gateway.bubbles.delimiter,
-    });
-    const persistedText = bubbles.join("\n\n");
+    const trimmedFinal = finalText.trim();
+    const trailingReply =
+      trimmedFinal ||
+      (preReplyState.sentBubbles.length > 0 ? "" : "嗯……刚刚走神了一下，你再说一遍？");
+
+    const bubbles = trailingReply
+      ? splitIntoBubbles(trailingReply, {
+          enabled: this.hatoConfig.gateway.bubbles.enabled,
+          maxPerTurn: this.hatoConfig.gateway.bubbles.max_per_turn,
+          delimiter: this.hatoConfig.gateway.bubbles.delimiter,
+        })
+      : [];
+    const allBubbles = [...preReplyState.sentBubbles, ...bubbles];
+    const persistedText = allBubbles.join("\n\n");
 
     this.repo.appendRawMessage({
       canonicalUserId,
@@ -337,6 +405,7 @@ export class PersonaRuntime {
     return {
       rawText: persistedText,
       bubbles,
+      earlyBubbles: preReplyState.sentBubbles,
       usage: totalUsage,
       toolCalls,
       latencyMs,
@@ -456,7 +525,32 @@ export class PersonaRuntime {
   }
 }
 
-function extractTurnMetrics(messages: AgentMessage[]): {
+function buildDefaultPreToolAck(toolName: string, input: unknown): string {
+  switch (toolName) {
+    case "browser_task": {
+      const rec = input && typeof input === "object" ? (input as { resume?: unknown }) : undefined;
+      return rec?.resume ? "好，那我接着去看" : "好，我去打开浏览器看看";
+    }
+    case "web_search":
+      return "等我一下，我帮你查查看";
+    case "web_fetch":
+      return "我先打开这个链接看看";
+    case "inspect_tickets":
+      return "等我一下，我看一眼工单状态";
+    case "list_schedules":
+      return "我帮你看一下定时安排";
+    case "calc":
+    case "date_math":
+      return "等我算一下";
+    default:
+      return "等我一下，我去处理看看";
+  }
+}
+
+function extractTurnMetrics(
+  messages: AgentMessage[],
+  skipTextMessages: ReadonlySet<AssistantMessage> = new Set(),
+): {
   finalText: string;
   totalUsage: Usage;
   toolCalls: string[];
@@ -490,8 +584,10 @@ function extractTurnMetrics(messages: AgentMessage[]): {
         toolCalls.push(block.name);
       }
     }
-    const text = extractAssistantText(msg);
-    if (text) finalText = text;
+    if (!skipTextMessages.has(msg)) {
+      const text = extractAssistantText(msg);
+      if (text) finalText = text;
+    }
   }
 
   return { finalText, totalUsage, toolCalls };

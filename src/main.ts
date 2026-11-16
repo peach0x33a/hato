@@ -1,7 +1,8 @@
 import { ActorLock, EventBus } from "./bus/actor-bus.js";
 import { BrowserRuntime } from "./browser/runtime.js";
 import { tryHandleSlashCommand } from "./commands/slash.js";
-import { loadHatoConfig } from "./config/app.js";
+import { loadHatoConfig, resolveTavilySearchConfig, type HatoConfig } from "./config/app.js";
+import { collectReloadDiff, fingerprintSecret, type ReloadSnapshot } from "./config/diff.js";
 import { ModelRegistry } from "./config/models.js";
 import { ScopedProxyRouter } from "./config/proxy.js";
 import { loadSecretEnv, reloadSecretEnv, requireSecret } from "./config/secrets.js";
@@ -73,9 +74,25 @@ async function main(): Promise<void> {
       await tgAdapter.sendTyping(tgTargetId).catch(() => undefined);
 
       let bubblesToSend: string[];
+      let repliedToTriggerMsg = false;
       try {
         const output = await personaRuntime.handleUserBatch(batch, batch.images ?? [], {
           sendPhotoToUser: (photo, caption) => tgAdapter!.sendPhoto(tgTargetId, photo, caption),
+          sendBubblesToUser: async (earlyBubbles) => {
+            if (earlyBubbles.length === 0) return;
+            const replyTo =
+              !repliedToTriggerMsg && batch.platformMsgIds.length === 1
+                ? batch.latestPlatformMsgId
+                : undefined;
+            await tgAdapter!.sendBubbles(
+              tgTargetId,
+              earlyBubbles,
+              hatoConfig.gateway.bubbles.delay_ms_range,
+              replyTo,
+            );
+            repliedToTriggerMsg = true;
+            await tgAdapter!.sendTyping(tgTargetId).catch(() => undefined);
+          },
         });
         bubblesToSend = output.bubbles;
       } catch (err) {
@@ -88,12 +105,18 @@ async function main(): Promise<void> {
       }
 
       try {
-        await tgAdapter.sendBubbles(
-          tgTargetId,
-          bubblesToSend,
-          hatoConfig.gateway.bubbles.delay_ms_range,
-          batch.platformMsgIds.length === 1 ? batch.latestPlatformMsgId : undefined,
-        );
+        if (bubblesToSend.length > 0) {
+          const replyTo =
+            !repliedToTriggerMsg && batch.platformMsgIds.length === 1
+              ? batch.latestPlatformMsgId
+              : undefined;
+          await tgAdapter.sendBubbles(
+            tgTargetId,
+            bubblesToSend,
+            hatoConfig.gateway.bubbles.delay_ms_range,
+            replyTo,
+          );
+        }
         compactionManager.recordInteraction(batch.canonicalUserId);
         void compactionManager.checkHighWatermark(batch.canonicalUserId).catch((err) => {
           logError("COMPACTION", "high-watermark check failed", err);
@@ -174,6 +197,8 @@ async function main(): Promise<void> {
               };
             },
             reloadAll: async () => {
+              const prevSnapshot = captureReloadSnapshot(hatoConfig, modelRegistry, personaRuntime);
+
               reloadSecretEnv();
               const nextConfig = loadHatoConfig(HATO_CONFIG_PATH);
               setLogTimezone(nextConfig.owner.timezone);
@@ -190,6 +215,10 @@ async function main(): Promise<void> {
               });
               personaRuntime.updateConfig(nextConfig);
               tgAdapter?.updateConfig(nextConfig);
+
+              const nextSnapshot = captureReloadSnapshot(nextConfig, modelRegistry, personaRuntime);
+              const changes = collectReloadDiff(prevSnapshot, nextSnapshot);
+
               return {
                 slots: modelRegistry.listSlots().map((s) => ({
                   slot: s.slot,
@@ -198,6 +227,7 @@ async function main(): Promise<void> {
                   baseUrl: s.model.baseUrl,
                 })),
                 proxyCount: nextConfig.network?.proxies?.length ?? 0,
+                changes,
               };
             },
             forceCompact: (uid) => compactionManager.runIdleCommit(uid),
@@ -256,6 +286,40 @@ async function main(): Promise<void> {
 
   process.once("SIGINT", () => void shutdown());
   process.once("SIGTERM", () => void shutdown());
+}
+
+function captureReloadSnapshot(
+  config: HatoConfig,
+  modelRegistry: ModelRegistry,
+  personaRuntime: PersonaRuntime,
+): ReloadSnapshot {
+  const envNames = new Set<string>([
+    config.gateway.telegram.bot_token_env,
+    config.gateway.qq.client_secret_env,
+    resolveTavilySearchConfig(config).apiKeyEnv,
+    ...modelRegistry.listProviders().map((p) => p.apiKeyEnv),
+  ]);
+  const secretFingerprints: Record<string, string> = {};
+  for (const name of envNames) {
+    if (name.trim()) {
+      secretFingerprints[name] = fingerprintSecret(process.env[name]);
+    }
+  }
+
+  return {
+    hatoConfig: config,
+    slots: modelRegistry.listSlots().map((s) => ({
+      slot: s.slot,
+      target: s.target,
+      api: String(s.model.api),
+      baseUrl: s.model.baseUrl,
+      reasoning: s.model.reasoning,
+      input: s.model.input,
+    })),
+    availableTargets: modelRegistry.listTargets(),
+    promptText: personaRuntime.getBasePersonaPrompt(),
+    secretFingerprints,
+  };
 }
 
 main().catch((err) => {

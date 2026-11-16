@@ -38,6 +38,7 @@ test("tryHandleSlashCommand handles /trace, /model, /reload, /compact, and ignor
       reloadAll: async () => ({
         slots: [{ slot: "persona", target: activeTarget, api: "openai-responses", baseUrl: "https://api.openai.com/v1" }],
         proxyCount: 2,
+        changes: ["network.proxies: (全部直连) -> local (http://127.0.0.1:7890 -> [browser])"],
       }),
       forceCompact: async () => true,
       resetContext: async () => ({
@@ -81,6 +82,8 @@ test("tryHandleSlashCommand handles /trace, /model, /reload, /compact, and ignor
 
     const reloadOut = await tryHandleSlashCommand("owner", "/reload", deps);
     assert.ok(reloadOut?.includes("代理规则 2 条"));
+    assert.ok(reloadOut?.includes("本次变更差异 (1 项)"));
+    assert.ok(reloadOut?.includes("network.proxies"));
 
     const compactOut = await tryHandleSlashCommand("owner", "/compact", deps);
     assert.ok(compactOut?.includes("已完成一次热区上下文压缩"));

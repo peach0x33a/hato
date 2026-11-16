@@ -433,8 +433,8 @@ async function promptSingleProxyRule(
       hint: `仅针对 Provider "${slug}"`,
     })),
     { value: "memory", label: "memory", hint: "记忆检索与云端向量服务" },
-    { value: "web_access", label: "web_access", hint: "联网搜索、网页抓取与浏览器访问" },
-    { value: "web_access.browser", label: "web_access.browser", hint: "仅浏览器任务（如指定家宽/独立出口）" },
+    { value: "web_access", label: "web_access", hint: "联网搜索与网页正文抓取（Tavily / web_fetch）" },
+    { value: "browser", label: "browser", hint: "浏览器任务独立作用域（如指定专属代理或直连）" },
     { value: "worker", label: "worker", hint: "Worker 允许出网工单" },
     { value: "all", label: "all", hint: "全局兜底" },
   ];

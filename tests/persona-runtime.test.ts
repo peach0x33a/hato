@@ -153,6 +153,68 @@ hindsight_llm = "faux-provider/faux-persona-1"
     assert.equal(afterNewOut.rawText, "开启全新对话啦");
     assert.equal(sawOldMessage, false);
     assert.deepEqual(newTurnRoles, ["system", "user"]);
+
+    // Verify pre-tool immediate reply behavior:
+    // 1) Model-provided text before toolUse is flushed before tool execution without duplication.
+    const timeline: string[] = [];
+    faux.setResponses([
+      () =>
+        fauxAssistantMessage(
+          [{ type: "text", text: "好~我去算算看" }, fauxToolCall("calc", { expression: "10 + 5" })],
+          { stopReason: "toolUse" },
+        ),
+      () => fauxAssistantMessage("算出来是 15 呀"),
+      () => fauxAssistantMessage([fauxToolCall("calc", { expression: "20 + 2" })], { stopReason: "toolUse" }),
+      () => fauxAssistantMessage("22 呀"),
+    ]);
+
+    const preReplyTurn1 = await runtime.handleUserBatch(
+      {
+        canonicalUserId: "owner",
+        originChannel: "tg",
+        originPlatformUserId: "123456789",
+        platformMsgIds: ["m102"],
+        latestPlatformMsgId: "m102",
+        combinedText: "10 加 5 等于几",
+        attachments: [],
+        firstTimestampMs: Date.now(),
+        lastTimestampMs: Date.now(),
+      },
+      [],
+      {
+        sendBubblesToUser: async (early) => {
+          timeline.push(`early:${early.join("|")}`);
+        },
+      },
+    );
+    assert.deepEqual(preReplyTurn1.earlyBubbles, ["好~我去算算看"]);
+    assert.deepEqual(preReplyTurn1.bubbles, ["算出来是 15 呀"]);
+    assert.deepEqual(timeline, ["early:好~我去算算看"]);
+
+    // 2) Bare toolCall without accompanying text triggers a clean default ack before tool execution.
+    const bareTimeline: string[] = [];
+    const preReplyTurn2 = await runtime.handleUserBatch(
+      {
+        canonicalUserId: "owner",
+        originChannel: "tg",
+        originPlatformUserId: "123456789",
+        platformMsgIds: ["m103"],
+        latestPlatformMsgId: "m103",
+        combinedText: "20 加 2 呢",
+        attachments: [],
+        firstTimestampMs: Date.now() + 10,
+        lastTimestampMs: Date.now() + 10,
+      },
+      [],
+      {
+        sendBubblesToUser: async (early) => {
+          bareTimeline.push(...early);
+        },
+      },
+    );
+    assert.deepEqual(bareTimeline, ["等我算一下"]);
+    assert.deepEqual(preReplyTurn2.earlyBubbles, ["等我算一下"]);
+    assert.deepEqual(preReplyTurn2.bubbles, ["22 呀"]);
   } finally {
     dbHandle.close();
     rmSync(tempDir, { recursive: true, force: true });
