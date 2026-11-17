@@ -54,6 +54,11 @@ export interface QqSendMessageRequest {
   msg_id?: string;
   msg_seq?: number;
   event_id?: string;
+  markdown?: {
+    content?: string;
+    custom_template_id?: string;
+    params?: Array<{ key: string; values: string[] }>;
+  };
   media?: {
     file_type: number;
     file_info?: string;

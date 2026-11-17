@@ -20,8 +20,10 @@ import {
   QQ_OP_INVALID_SESSION,
   QQ_OP_RECONNECT,
   QQ_OP_RESUME,
+  QqApiError,
   QqOpenApiClient,
   type QqSendMessageRequest,
+  type QqSendMessageResponse,
 } from "./qq-client.js";
 import type {
   ChannelAdapter,
@@ -94,6 +96,12 @@ interface PassiveReplyState {
 /**
  * QQ Official Bot C2C adapter using OpenAPI v2 + WebSocket Gateway.
  */
+export function containsQqMarkdownSyntax(text: string): boolean {
+  return /(^|\n)\s{0,3}(#{1,6}\s|[-*+]\s|\d+\.\s|>\s|```)|\*\*[^*\n]+\*\*|`[^`\n]+`|\[[^\]\n]+\]\([^)\n]+\)/.test(
+    text,
+  );
+}
+
 export class QqAdapter implements ChannelAdapter {
   readonly capabilities = QQ_CAPABILITIES;
 
@@ -109,6 +117,7 @@ export class QqAdapter implements ChannelAdapter {
   private loopPromise: Promise<void> | null = null;
   private sessionId = "";
   private seq = 0;
+  private markdownSupported: boolean | null = null;
 
   constructor(deps: QqAdapterDeps) {
     this.deps = deps;
@@ -206,16 +215,44 @@ export class QqAdapter implements ChannelAdapter {
     const chunks = splitQqText(text, QQ_MAX_MESSAGE_LENGTH);
     let lastMsgId: string | undefined;
     for (let i = 0; i < chunks.length; i++) {
-      const passive = this.resolvePassiveReply(
-        platformUserId,
-        i === 0 ? replyToPlatformMsgId : undefined,
-      );
-      const req: QqSendMessageRequest = {
-        content: chunks[i]!,
-        msg_type: 0,
-        ...(passive ? passive : {}),
-      };
-      const sent = await this.runWithRetry(() => this.client.sendC2CMessage(platformUserId, req));
+      const chunk = chunks[i]!;
+      const passiveId = i === 0 ? replyToPlatformMsgId : undefined;
+      let sent: QqSendMessageResponse | undefined;
+
+      if (this.markdownSupported !== false && containsQqMarkdownSyntax(chunk)) {
+        const mdPassive = this.resolvePassiveReply(platformUserId, passiveId);
+        const mdReq: QqSendMessageRequest = {
+          msg_type: 2,
+          markdown: { content: chunk },
+          ...(mdPassive ? mdPassive : {}),
+        };
+        try {
+          sent = await this.client.sendC2CMessage(platformUserId, mdReq);
+          this.markdownSupported = true;
+        } catch (err) {
+          if (err instanceof QqApiError) {
+            if (this.markdownSupported === null) {
+              logWarn(
+                "QQ",
+                `native markdown (msg_type=2) rejected (${summarizeError(err)}); falling back to plain text`,
+              );
+            }
+            this.markdownSupported = false;
+          } else {
+            throw err;
+          }
+        }
+      }
+
+      if (!sent) {
+        const passive = this.resolvePassiveReply(platformUserId, passiveId);
+        const req: QqSendMessageRequest = {
+          content: chunk,
+          msg_type: 0,
+          ...(passive ? passive : {}),
+        };
+        sent = await this.runWithRetry(() => this.client.sendC2CMessage(platformUserId, req));
+      }
       lastMsgId = sent.id;
     }
     console.log(
