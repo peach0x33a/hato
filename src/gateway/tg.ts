@@ -1,6 +1,12 @@
 import type { ImageContent } from "@earendil-works/pi-ai";
 import { Bot, GrammyError, HttpError, InputFile, InlineKeyboard, type Context } from "grammy";
-import { resolveGatewayRetryConfig, type HatoConfig } from "../config/app.js";
+import { buildTelegramBotCommands } from "../commands/slash.js";
+import {
+  resolveGatewayRetryConfig,
+  resolveMemoryEchoConfig,
+  resolveMemoryProvider,
+  type HatoConfig,
+} from "../config/app.js";
 import type { ScopedProxyRouter } from "../config/proxy.js";
 import { logError, logInfo, logWarn, summarizeError } from "../utils/logger.js";
 import { retryWithBackoff } from "../utils/retry.js";
@@ -65,6 +71,7 @@ export class TelegramAdapter implements ChannelAdapter {
   private readonly bot: Bot;
   private config: HatoConfig;
   private running = false;
+  private lastCommandSyncSignature: string | null = null;
 
   constructor(private readonly deps: TelegramAdapterDeps) {
     this.config = deps.config;
@@ -90,6 +97,74 @@ export class TelegramAdapter implements ChannelAdapter {
 
   updateConfig(next: HatoConfig): void {
     this.config = next;
+    if (this.running) {
+      void this.syncBotCommands().catch((err) => {
+        logWarn("TG", `dynamic command sync failed on config update: ${summarizeError(err)}`);
+      });
+    }
+  }
+
+  /**
+   * Dynamically register Telegram Bot slash commands via setMyCommands/deleteMyCommands
+   * based on whether owner is bound and which capabilities (e.g. long-term memory) are active.
+   */
+  async syncBotCommands(options?: { force?: boolean }): Promise<boolean> {
+    const provider = resolveMemoryProvider(this.config);
+    const memoryEnabled =
+      provider === "memoryecho" ? resolveMemoryEchoConfig(this.config).enabled : provider !== "none";
+
+    const ownerChatIds = [
+      ...new Set(
+        this.config.owner.channels.tg.user_ids
+          .map((id) => Number(id))
+          .filter((id) => Number.isSafeInteger(id) && id > 0),
+      ),
+    ].sort((a, b) => a - b);
+
+    const commands = buildTelegramBotCommands({
+      memoryEnabled,
+      unboundOnly: ownerChatIds.length === 0,
+    });
+
+    const signature = JSON.stringify({ ownerChatIds, commands });
+    if (!options?.force && signature === this.lastCommandSyncSignature) {
+      return false;
+    }
+
+    if (ownerChatIds.length === 0) {
+      await this.runWithTelegramRetry(() =>
+        this.bot.api.setMyCommands(commands, { scope: { type: "all_private_chats" } }),
+      );
+      await this.runWithTelegramRetry(() =>
+        this.bot.api.deleteMyCommands({ scope: { type: "all_group_chats" } }),
+      );
+      this.lastCommandSyncSignature = signature;
+      logInfo("TG", `synced ${commands.length} unbound pairing commands (all_private_chats)`);
+      return true;
+    }
+
+    await this.runWithTelegramRetry(() =>
+      this.bot.api.deleteMyCommands({ scope: { type: "default" } }),
+    );
+    await this.runWithTelegramRetry(() =>
+      this.bot.api.deleteMyCommands({ scope: { type: "all_private_chats" } }),
+    );
+    await this.runWithTelegramRetry(() =>
+      this.bot.api.deleteMyCommands({ scope: { type: "all_group_chats" } }),
+    );
+
+    for (const chatId of ownerChatIds) {
+      await this.runWithTelegramRetry(() =>
+        this.bot.api.setMyCommands(commands, { scope: { type: "chat", chat_id: chatId } }),
+      );
+    }
+
+    this.lastCommandSyncSignature = signature;
+    logInfo(
+      "TG",
+      `synced ${commands.length} bot commands for ${ownerChatIds.length} owner chat(s): /${commands.map((c) => c.command).join(", /")}`,
+    );
+    return true;
   }
 
   async start(): Promise<void> {
@@ -105,6 +180,9 @@ export class TelegramAdapter implements ChannelAdapter {
         onStart: (info) => {
           logInfo("TG", `connected as @${info.username} via ${this.config.gateway.telegram.base_url}`, {
             timeZone: this.config.owner.timezone,
+          });
+          void this.syncBotCommands().catch((err) => {
+            logWarn("TG", `failed to register Telegram bot commands: ${summarizeError(err)}`);
           });
         },
       })

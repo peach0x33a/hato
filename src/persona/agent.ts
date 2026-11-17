@@ -11,11 +11,14 @@ import {
   type Usage,
 } from "@earendil-works/pi-ai";
 import type { BrowserRuntime, SendPhotoToUserFn } from "../browser/runtime.js";
-import type { HatoConfig } from "../config/app.js";
+import { resolveMemoryRecallConfig, resolvePromptOrder, type HatoConfig } from "../config/app.js";
 import { supportsCustomFetchOption, type ModelRegistry } from "../config/models.js";
 import type { ScopedProxyRouter } from "../config/proxy.js";
 import type { HatoRepository, RawMessageRecord } from "../db/repo.js";
-import type { InboundBatch } from "../gateway/types.js";
+import type { InboundBatch, InboundMessage } from "../gateway/types.js";
+import { shouldAutoRecall, type MemoryRecallItem, type MemoryStore } from "../memory/store.js";
+import { computeTurnMetrics, extractTraceSteps, formatLlmTelemetryLog } from "../stats/metrics.js";
+import { logWarn } from "../utils/logger.js";
 import { splitIntoBubbles } from "./bubbles.js";
 import {
   buildEphemeralContextBlock,
@@ -24,13 +27,33 @@ import {
   hydrateTranscriptFromDb,
   rawRecordToAgentMessage,
 } from "./context.js";
+import { loadLayeredPrompts, type LoadedLayeredPrompts } from "./prompts.js";
 import { createPersonaReadOnlyTools } from "./tools.js";
-import { computeTurnMetrics, formatLlmTelemetryLog } from "../stats/metrics.js";
+
+export const NO_REPLY_SENTINEL = "[NO_REPLY]";
+
+export type ActiveTurnInterruptOutcome =
+  | { action: "none" }
+  | { action: "aborted" }
+  | { action: "steered"; shouldSendAck: boolean };
+
+interface ActivePersonaTurnState {
+  canonicalUserId: string;
+  hasToolActivity: boolean;
+  abortedForSupersede: boolean;
+  sentAnyBubble: boolean;
+  sentSteerAck: boolean;
+  promptSettled: boolean;
+  unsentStopMsgExists: boolean;
+  lastUserCreatedAt: number;
+}
 
 export interface PersonaTurnOutput {
   rawText: string;
   bubbles: string[];
   earlyBubbles: string[];
+  silent: boolean;
+  superseded: boolean;
   usage: Usage;
   toolCalls: string[];
   latencyMs: number;
@@ -46,9 +69,15 @@ export interface PersonaTurnOutput {
 export class PersonaRuntime {
   private readonly agent: Agent;
   private basePersonaPrompt = "";
+  private layeredPrompts: LoadedLayeredPrompts | null = null;
   private lastTimeCardSnapshot = "";
   private activeCallStartPerf: number | null = null;
   private activeBeforeToolHook: ((toolName: string, input: unknown) => Promise<void>) | null = null;
+  private activeTurnRecalledMemories: MemoryRecallItem[] = [];
+  private activeTurnRecalledIds = new Set<string>();
+  private activeTurn: ActivePersonaTurnState | null = null;
+  private readonly pendingSupersededImages = new Map<string, ImageContent[]>();
+  private reloadHandler: (() => Promise<void>) | null = null;
 
   constructor(
     private hatoConfig: HatoConfig,
@@ -56,6 +85,8 @@ export class PersonaRuntime {
     private readonly proxyRouter: ScopedProxyRouter,
     private readonly repo: HatoRepository,
     private readonly browserRuntime?: BrowserRuntime,
+    private memoryStore: MemoryStore | null = null,
+    private readonly hatoConfigPath = "config/hato.toml",
   ) {
     this.reloadPrompt();
     const resolved = this.modelRegistry.resolveSlot("persona");
@@ -67,6 +98,26 @@ export class PersonaRuntime {
       getHatoConfig: () => this.hatoConfig,
       proxyRouter: this.proxyRouter,
       browserRuntime: this.browserRuntime,
+      getMemoryStore: () => this.memoryStore,
+      selfConfigDeps: {
+        hatoConfigPath: this.hatoConfigPath,
+        getHatoConfig: () => this.hatoConfig,
+        getModelRegistry: () => this.modelRegistry,
+        repo: this.repo,
+        onReloadRuntime: async () => {
+          if (this.reloadHandler) {
+            await this.reloadHandler();
+          } else {
+            this.reloadPrompt();
+            if (!this.activeTurn) {
+              this.refreshTranscriptFromDb();
+            }
+          }
+        },
+      },
+      onMemoryRecalled: (ids) => {
+        for (const id of ids) this.activeTurnRecalledIds.add(id);
+      },
       onBeforeToolExecute: async (toolName, input) => {
         if (this.activeBeforeToolHook) {
           await this.activeBeforeToolHook(toolName, input);
@@ -82,6 +133,7 @@ export class PersonaRuntime {
         tools,
         messages: hydrateTranscriptFromDb(this.repo, canonicalUserId),
       },
+      steeringMode: "all",
       sessionId: canonicalUserId,
       getApiKey: (provider) => this.modelRegistry.resolveApiKeyForProvider(provider),
       streamFn: (model, context, options) => {
@@ -104,6 +156,7 @@ export class PersonaRuntime {
           canonicalUserId,
           baseTimezone: this.hatoConfig.owner.timezone,
           quietHours: this.hatoConfig.owner.quiet_hours,
+          recalledMemories: this.activeTurnRecalledMemories,
         });
         this.lastTimeCardSnapshot = timeCardText;
         return [
@@ -124,16 +177,37 @@ export class PersonaRuntime {
     });
   }
 
-  updateConfig(nextConfig: HatoConfig): void {
+  updateConfig(nextConfig: HatoConfig, nextMemoryStore?: MemoryStore | null): void {
     this.hatoConfig = nextConfig;
+    if (nextMemoryStore !== undefined) {
+      this.memoryStore = nextMemoryStore;
+    }
     this.browserRuntime?.updateConfig(nextConfig);
     this.reloadPrompt();
-    this.refreshTranscriptFromDb();
+    // Avoid clobbering in-flight agent.state.messages if triggered by self_config mid-turn.
+    if (!this.activeTurn) {
+      this.refreshTranscriptFromDb();
+    }
+  }
+
+  setReloadHandler(handler: (() => Promise<void>) | null): void {
+    this.reloadHandler = handler;
+  }
+
+  setMemoryStore(nextMemoryStore: MemoryStore | null): void {
+    this.memoryStore = nextMemoryStore;
   }
 
   reloadPrompt(): void {
-    const promptPath = resolve(this.hatoConfig.paths.prompts_dir, "persona.md");
-    this.basePersonaPrompt = readFileSync(promptPath, "utf8");
+    this.layeredPrompts = loadLayeredPrompts(
+      this.hatoConfig.paths.prompts_dir,
+      resolvePromptOrder(this.hatoConfig),
+    );
+    this.basePersonaPrompt = this.layeredPrompts.combinedText;
+  }
+
+  getLayeredPrompts(): LoadedLayeredPrompts | null {
+    return this.layeredPrompts;
   }
 
   getBasePersonaPrompt(): string {
@@ -156,7 +230,69 @@ export class PersonaRuntime {
    */
   resetSession(): void {
     this.lastTimeCardSnapshot = "";
+    this.pendingSupersededImages.clear();
+    this.agent.clearAllQueues();
     this.refreshTranscriptFromDb();
+  }
+
+  /**
+   * Handle a new user message arriving while a Persona turn is active:
+   * - Before any tool call or sent bubble: abort stale generation so messages merge & re-think.
+   * - During an active tool / long-task turn: preserve progress and steer the new message into
+   *   the live agent loop (sending "知道了" at most once per turn).
+   */
+  handleIncomingDuringActiveTurn(msg: InboundMessage): ActiveTurnInterruptOutcome {
+    const turn = this.activeTurn;
+    if (!turn || turn.canonicalUserId !== msg.canonicalUserId || turn.promptSettled) {
+      return { action: "none" };
+    }
+
+    if (!turn.hasToolActivity && !turn.sentAnyBubble) {
+      turn.abortedForSupersede = true;
+      this.agent.abort();
+      return { action: "aborted" };
+    }
+
+    const createdAt = Math.max(msg.timestampMs, Date.now(), turn.lastUserCreatedAt + 1);
+    turn.lastUserCreatedAt = createdAt;
+
+    const savedSteerMsg = this.repo.appendRawMessage({
+      canonicalUserId: msg.canonicalUserId,
+      channel: msg.channel,
+      platformMsgId: msg.platformMsgId,
+      replyToId: msg.replyToPlatformMsgId ?? null,
+      role: "user",
+      content: msg.text,
+      attachments: msg.attachments,
+      createdAt,
+    });
+
+    const steerAgentMsg = rawRecordToAgentMessage(savedSteerMsg, this.repo);
+    if (steerAgentMsg.role === "hato_user_batch") {
+      if (msg.images && msg.images.length > 0) {
+        steerAgentMsg.images = msg.images.slice(0, 4);
+      }
+      if (turn.unsentStopMsgExists) {
+        steerAgentMsg.text = `[补充消息（上一条草稿尚未发给用户，请结合已完成的结果与本次补充合并后一次性回复）]\n${steerAgentMsg.text}`;
+      }
+    }
+
+    this.agent.steer(steerAgentMsg);
+    const shouldSendAck = !turn.sentSteerAck;
+    turn.sentSteerAck = true;
+    return { action: "steered", shouldSendAck };
+  }
+
+  /**
+   * Abort the currently running Persona turn if no tool or reply bubble has started yet.
+   */
+  abortIfUnsent(canonicalUserId?: string): boolean {
+    if (!this.activeTurn) return false;
+    if (canonicalUserId && this.activeTurn.canonicalUserId !== canonicalUserId) return false;
+    if (this.activeTurn.hasToolActivity || this.activeTurn.sentAnyBubble) return false;
+    this.activeTurn.abortedForSupersede = true;
+    this.agent.abort();
+    return true;
   }
 
   getEffectiveTimezone(canonicalUserId: string): string {
@@ -170,6 +306,7 @@ export class PersonaRuntime {
     options?: {
       sendPhotoToUser?: SendPhotoToUserFn;
       sendBubblesToUser?: (bubbles: string[]) => Promise<void>;
+      shouldSuppressSend?: () => boolean;
     },
   ): Promise<PersonaTurnOutput> {
     const canonicalUserId = batch.canonicalUserId;
@@ -198,10 +335,26 @@ export class PersonaRuntime {
       createdAt: userCreatedAt,
     });
 
+    const priorImages = this.pendingSupersededImages.get(canonicalUserId) ?? [];
+    const effectiveImages = [...priorImages, ...loadedImages].slice(0, 4);
+
     const userAgentMsg = rawRecordToAgentMessage(savedUserMsg, this.repo);
-    if (userAgentMsg.role === "hato_user_batch" && loadedImages.length > 0) {
-      userAgentMsg.images = loadedImages;
+    if (userAgentMsg.role === "hato_user_batch" && effectiveImages.length > 0) {
+      userAgentMsg.images = effectiveImages;
     }
+
+    const turnState: ActivePersonaTurnState = {
+      canonicalUserId,
+      hasToolActivity: false,
+      abortedForSupersede: false,
+      sentAnyBubble: false,
+      sentSteerAck: false,
+      promptSettled: false,
+      unsentStopMsgExists: false,
+      lastUserCreatedAt: savedUserMsg.createdAt,
+    };
+    this.activeTurn = turnState;
+    this.agent.clearAllQueues();
 
     const startIndex = this.agent.state.messages.length;
     const turnStartPerf = performance.now();
@@ -212,12 +365,12 @@ export class PersonaRuntime {
 
     const preReplyState: {
       latestToolUseMsg: AssistantMessage | null;
-      flushedForCurrentMsg: boolean;
+      flushedInTurn: boolean;
       sentMessageRefs: Set<AssistantMessage>;
       sentBubbles: string[];
     } = {
       latestToolUseMsg: null,
-      flushedForCurrentMsg: false,
+      flushedInTurn: false,
       sentMessageRefs: new Set(),
       sentBubbles: [],
     };
@@ -242,13 +395,21 @@ export class PersonaRuntime {
         return;
       }
 
+      if (ev.type === "tool_execution_start") {
+        turnState.hasToolActivity = true;
+        return;
+      }
+
       if (ev.type === "message_end" && ev.message.role === "assistant") {
         const msg = ev.message;
         if (msg.stopReason === "toolUse") {
+          turnState.hasToolActivity = true;
           preReplyState.latestToolUseMsg = msg;
-          preReplyState.flushedForCurrentMsg = false;
         } else {
           preReplyState.latestToolUseMsg = null;
+          if (msg.stopReason === "stop" && extractAssistantText(msg).trim().length > 0) {
+            turnState.unsentStopMsgExists = true;
+          }
         }
         const nowPerf = performance.now();
         const callStart = this.activeCallStartPerf ?? msgStartPerf;
@@ -299,12 +460,18 @@ export class PersonaRuntime {
     const sendBubblesToUser = options?.sendBubblesToUser;
     this.activeBeforeToolHook = sendBubblesToUser
       ? async (toolName, input) => {
-          if (preReplyState.flushedForCurrentMsg) return;
-          preReplyState.flushedForCurrentMsg = true;
+          if (preReplyState.flushedInTurn) return;
+          if (turnState.abortedForSupersede || (!turnState.hasToolActivity && options?.shouldSuppressSend?.())) {
+            turnState.abortedForSupersede = true;
+            this.agent.abort();
+            return;
+          }
 
           const latestMsg = preReplyState.latestToolUseMsg;
-          const modelPreText = latestMsg ? extractAssistantText(latestMsg).trim() : "";
-          const replyText = modelPreText || buildDefaultPreToolAck(toolName, input);
+          const rawModelPreText = latestMsg ? extractAssistantText(latestMsg).trim() : "";
+          const modelPreText = isNoReplyOutput(rawModelPreText) ? "" : rawModelPreText;
+          const replyText = modelPreText || buildSlowToolPreAck(toolName, input);
+          if (!replyText) return;
 
           const preBubbles = splitIntoBubbles(replyText, {
             enabled: this.hatoConfig.gateway.bubbles.enabled,
@@ -313,6 +480,8 @@ export class PersonaRuntime {
           });
           if (preBubbles.length === 0) return;
 
+          preReplyState.flushedInTurn = true;
+          turnState.sentAnyBubble = true;
           if (latestMsg && modelPreText) {
             preReplyState.sentMessageRefs.add(latestMsg);
           }
@@ -321,19 +490,97 @@ export class PersonaRuntime {
         }
       : null;
 
+    this.activeTurnRecalledMemories = [];
+    this.activeTurnRecalledIds.clear();
+
+    const recallCfg = resolveMemoryRecallConfig(this.hatoConfig);
+    if (
+      (recallCfg.mode === "auto" || recallCfg.mode === "hybrid") &&
+      this.memoryStore?.isConfigured() &&
+      shouldAutoRecall(batch.combinedText, recallCfg.minQueryChars)
+    ) {
+      try {
+        const recallRes = await this.memoryStore.recall(canonicalUserId, {
+          bank: "persona",
+          query: batch.combinedText,
+          limit: recallCfg.maxResults,
+        });
+        if (!recallRes.ok && recallRes.errorCode) {
+          logWarn("MEMORY", `auto recall denied (${recallRes.errorCode}): ${recallRes.errorMessage ?? ""}`);
+        } else if (recallRes.items.length > 0) {
+          this.activeTurnRecalledMemories = recallRes.items;
+          for (const item of recallRes.items) {
+            this.activeTurnRecalledIds.add(`${item.bank}:${item.id}`);
+          }
+        }
+      } catch (err) {
+        logWarn(
+          "MEMORY",
+          `auto recall exception: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    }
+
     this.browserRuntime?.setPhotoSender(options?.sendPhotoToUser ?? null);
     try {
-      await this.agent.prompt(userAgentMsg);
+      if (!turnState.abortedForSupersede && !options?.shouldSuppressSend?.()) {
+        await this.agent.prompt(userAgentMsg);
+        while (!turnState.abortedForSupersede && this.agent.hasQueuedMessages()) {
+          await this.agent.continue();
+        }
+      } else {
+        turnState.abortedForSupersede = true;
+      }
     } finally {
+      turnState.promptSettled = true;
       this.activeBeforeToolHook = null;
       this.browserRuntime?.setPhotoSender(null);
       unsubscribe();
       this.activeCallStartPerf = null;
+      this.activeTurnRecalledMemories = [];
+      if (this.activeTurn === turnState) {
+        this.activeTurn = null;
+      }
     }
 
     const latencyMs = Math.max(1, Math.round(performance.now() - turnStartPerf));
     const ttftMs =
       turnFirstDeltaPerf !== null ? Math.max(0, Math.round(turnFirstDeltaPerf - turnStartPerf)) : latencyMs;
+
+    const superseded =
+      !turnState.hasToolActivity &&
+      !turnState.sentAnyBubble &&
+      (turnState.abortedForSupersede || Boolean(options?.shouldSuppressSend?.()));
+
+    if (superseded) {
+      if (effectiveImages.length > 0) {
+        this.pendingSupersededImages.set(canonicalUserId, effectiveImages);
+      }
+      this.activeTurnRecalledIds.clear();
+      this.refreshTranscriptFromDb();
+      return {
+        rawText: "",
+        bubbles: [],
+        earlyBubbles: [],
+        silent: true,
+        superseded: true,
+        usage: {
+          input: 0,
+          output: 0,
+          cacheRead: 0,
+          cacheWrite: 0,
+          totalTokens: 0,
+          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+        },
+        toolCalls: [],
+        latencyMs,
+        ttftMs,
+        cacheHitRate: 0,
+        tps: null,
+      };
+    }
+
+    this.pendingSupersededImages.delete(canonicalUserId);
 
     if (this.agent.state.errorMessage) {
       throw new Error(this.agent.state.errorMessage);
@@ -355,9 +602,11 @@ export class PersonaRuntime {
     });
 
     const trimmedFinal = finalText.trim();
-    const trailingReply =
-      trimmedFinal ||
-      (preReplyState.sentBubbles.length > 0 ? "" : "嗯……刚刚走神了一下，你再说一遍？");
+    const isSilentNoReply = isNoReplyOutput(trimmedFinal) && preReplyState.sentBubbles.length === 0;
+    const trailingReply = isSilentNoReply
+      ? ""
+      : trimmedFinal ||
+        (preReplyState.sentBubbles.length > 0 ? "" : "嗯……刚刚走神了一下，你再说一遍？");
 
     const bubbles = trailingReply
       ? splitIntoBubbles(trailingReply, {
@@ -369,18 +618,23 @@ export class PersonaRuntime {
     const allBubbles = [...preReplyState.sentBubbles, ...bubbles];
     const persistedText = allBubbles.join("\n\n");
 
-    this.repo.appendRawMessage({
-      canonicalUserId,
-      channel: batch.originChannel,
-      role: "assistant",
-      content: persistedText,
-      createdAt: Math.max(Date.now(), savedUserMsg.createdAt + 1),
-    });
+    if (!isSilentNoReply && persistedText.length > 0) {
+      this.repo.appendRawMessage({
+        canonicalUserId,
+        channel: batch.originChannel,
+        role: "assistant",
+        content: persistedText,
+        createdAt: Math.max(Date.now(), savedUserMsg.createdAt + 1),
+      });
+    }
 
     // Re-sync transcript with clean hato_* turn blocks so subsequent turns keep stable prefixes.
     this.refreshTranscriptFromDb();
 
     const userPreview = batch.combinedText.replace(/\s+/g, " ").trim().slice(0, 60) || null;
+
+    const recalledIds = [...this.activeTurnRecalledIds];
+    this.activeTurnRecalledIds.clear();
 
     this.repo.insertTurnTrace({
       canonicalUserId,
@@ -396,9 +650,12 @@ export class PersonaRuntime {
       ttftMs,
       tps: turnMetrics.decodeTps,
       userPreview,
-      recalledIds: [],
-      timeCardText: this.lastTimeCardSnapshot,
+      recalledIds,
+      timeCardText: isSilentNoReply
+        ? `${this.lastTimeCardSnapshot}\n[silent: NO_REPLY]`
+        : this.lastTimeCardSnapshot,
       toolCalls,
+      steps: extractTraceSteps(newMessages),
       latencyMs,
     });
 
@@ -406,6 +663,8 @@ export class PersonaRuntime {
       rawText: persistedText,
       bubbles,
       earlyBubbles: preReplyState.sentBubbles,
+      silent: isSilentNoReply,
+      superseded: false,
       usage: totalUsage,
       toolCalls,
       latencyMs,
@@ -521,11 +780,41 @@ export class PersonaRuntime {
       throw new Error(result.errorMessage || "Compaction summary generation failed");
     }
 
+    const curatorMetrics = computeTurnMetrics({
+      inputTokens: result.usage.input,
+      outputTokens: result.usage.output,
+      cacheReadTokens: result.usage.cacheRead,
+      cacheWriteTokens: result.usage.cacheWrite,
+      latencyMs,
+      ttftMs,
+      decodeMs,
+    });
+    this.repo.insertTurnTrace({
+      canonicalUserId: params.canonicalUserId,
+      slot: "curator",
+      provider: resolved.providerSlug,
+      modelId: result.model,
+      api: String(result.api),
+      inputTokens: result.usage.input,
+      outputTokens: result.usage.output,
+      cacheReadTokens: result.usage.cacheRead,
+      cacheWriteTokens: result.usage.cacheWrite,
+      cacheHitRate: curatorMetrics.cacheHitRate,
+      ttftMs,
+      tps: curatorMetrics.decodeTps,
+      userPreview: `[记忆整理] 压缩 ${params.messagesToSummarize.length} 条历史对话`,
+      recalledIds: [],
+      timeCardText: `compacted_messages: ${params.messagesToSummarize.length}\nwarm_prefix_slot: persona`,
+      toolCalls: [],
+      steps: extractTraceSteps([result]),
+      latencyMs,
+    });
+
     return extractAssistantText(result).trim();
   }
 }
 
-function buildDefaultPreToolAck(toolName: string, input: unknown): string {
+function buildSlowToolPreAck(toolName: string, input: unknown): string {
   switch (toolName) {
     case "browser_task": {
       const rec = input && typeof input === "object" ? (input as { resume?: unknown }) : undefined;
@@ -535,15 +824,10 @@ function buildDefaultPreToolAck(toolName: string, input: unknown): string {
       return "等我一下，我帮你查查看";
     case "web_fetch":
       return "我先打开这个链接看看";
-    case "inspect_tickets":
-      return "等我一下，我看一眼工单状态";
-    case "list_schedules":
-      return "我帮你看一下定时安排";
-    case "calc":
-    case "date_math":
-      return "等我算一下";
     default:
-      return "等我一下，我去处理看看";
+      // Fast local/internal lookups (calc, date_math, recall_memory, search_past_sessions,
+      // inspect_tickets, list_schedules) should run silently without spamming a pre-tool ack.
+      return "";
   }
 }
 
@@ -598,4 +882,10 @@ function extractAssistantText(msg: AssistantMessage): string {
     .filter((block): block is Extract<AssistantMessage["content"][number], { type: "text" }> => block.type === "text")
     .map((block) => block.text)
     .join("");
+}
+
+function isNoReplyOutput(text: string): boolean {
+  if (!text) return false;
+  const normalized = text.replace(/[`\s]/g, "").toUpperCase();
+  return normalized === "[NO_REPLY]" || normalized === "NO_REPLY";
 }

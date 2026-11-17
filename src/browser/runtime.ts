@@ -1,11 +1,20 @@
 import { Agent, type AgentTool } from "@earendil-works/pi-agent-core";
-import { clampThinkingLevel, type AssistantMessage } from "@earendil-works/pi-ai";
+import { clampThinkingLevel, type AssistantMessage, type Usage } from "@earendil-works/pi-ai";
 import { bool, num, obj, oneOf, opt, str } from "@earendil-works/pi-schema";
 import { resolveWebBrowserConfig, type HatoConfig } from "../config/app.js";
 import { supportsCustomFetchOption, type ModelRegistry } from "../config/models.js";
 import type { ScopedProxyRouter } from "../config/proxy.js";
+import type { HatoRepository } from "../db/repo.js";
+import { computeTurnMetrics, extractTraceSteps } from "../stats/metrics.js";
 import { logInfo, summarizeError } from "../utils/logger.js";
-import { BrowserController, formatBrowserSnapshotText } from "./controller.js";
+import {
+  BrowserController,
+  formatBrowserSnapshotText,
+  type BrowserKeyboardInput,
+  type BrowserMouseInput,
+  type BrowserStatus,
+  type BrowserStreamEvent,
+} from "./controller.js";
 
 export type SendPhotoToUserFn = (photo: Buffer, caption?: string) => Promise<void>;
 
@@ -76,12 +85,14 @@ export class BrowserRuntime {
   private readonly controller: BrowserController;
   private serialQueue: Promise<unknown> = Promise.resolve();
   private activePhotoSender: SendPhotoToUserFn | null = null;
+  private activeTaskCount = 0;
 
   constructor(
     private hatoConfig: HatoConfig,
     private readonly modelRegistry: ModelRegistry,
     private readonly proxyRouter: ScopedProxyRouter,
     controller?: BrowserController,
+    private readonly repo?: HatoRepository,
   ) {
     this.controller = controller ?? new BrowserController(proxyRouter);
   }
@@ -98,11 +109,122 @@ export class BrowserRuntime {
     return this.controller.isPendingTakeover();
   }
 
+  isBusy(): boolean {
+    return this.activeTaskCount > 0;
+  }
+
+  async getInteractiveStatus(): Promise<BrowserStatus & { busy: boolean }> {
+    const status = await this.controller.getStatus();
+    return { ...status, busy: this.isBusy() };
+  }
+
+  async openBrowser(): Promise<BrowserStatus & { busy: boolean }> {
+    const cfg = resolveWebBrowserConfig(this.hatoConfig);
+    await this.controller.ensurePage(cfg);
+    return this.getInteractiveStatus();
+  }
+
+  async closeBrowser(): Promise<BrowserStatus & { busy: boolean }> {
+    await this.controller.dispose();
+    return this.getInteractiveStatus();
+  }
+
+  async navigateManual(url: string): Promise<BrowserStatus & { busy: boolean }> {
+    const cfg = resolveWebBrowserConfig(this.hatoConfig);
+    const status = await this.controller.navigateManual(cfg, url);
+    return { ...status, busy: this.isBusy() };
+  }
+
+  async goBackManual(): Promise<BrowserStatus & { busy: boolean }> {
+    const cfg = resolveWebBrowserConfig(this.hatoConfig);
+    await this.controller.back(cfg);
+    return this.getInteractiveStatus();
+  }
+
+  async goForwardManual(): Promise<BrowserStatus & { busy: boolean }> {
+    const cfg = resolveWebBrowserConfig(this.hatoConfig);
+    const status = await this.controller.forward(cfg);
+    return { ...status, busy: this.isBusy() };
+  }
+
+  async reloadManual(): Promise<BrowserStatus & { busy: boolean }> {
+    const cfg = resolveWebBrowserConfig(this.hatoConfig);
+    const status = await this.controller.reloadPage(cfg);
+    return { ...status, busy: this.isBusy() };
+  }
+
+  async newTabManual(url?: string): Promise<BrowserStatus & { busy: boolean }> {
+    const cfg = resolveWebBrowserConfig(this.hatoConfig);
+    const status = await this.controller.newTab(cfg, url);
+    return { ...status, busy: this.isBusy() };
+  }
+
+  async switchTabManual(index: number): Promise<BrowserStatus & { busy: boolean }> {
+    const cfg = resolveWebBrowserConfig(this.hatoConfig);
+    const status = await this.controller.switchTab(cfg, index);
+    return { ...status, busy: this.isBusy() };
+  }
+
+  async closeTabManual(index: number): Promise<BrowserStatus & { busy: boolean }> {
+    const cfg = resolveWebBrowserConfig(this.hatoConfig);
+    const status = await this.controller.closeTab(cfg, index);
+    return { ...status, busy: this.isBusy() };
+  }
+
+  async resumeTakeover(): Promise<BrowserStatus & { busy: boolean }> {
+    this.controller.clearPendingTakeover();
+    this.controller.setManualControl(false);
+    return this.getInteractiveStatus();
+  }
+
+  async beginManualControl(): Promise<BrowserStatus & { busy: boolean }> {
+    const cfg = resolveWebBrowserConfig(this.hatoConfig);
+    await this.controller.ensurePage(cfg);
+    this.controller.setManualControl(true);
+    return this.getInteractiveStatus();
+  }
+
+  async endManualControl(): Promise<BrowserStatus & { busy: boolean }> {
+    this.controller.setManualControl(false);
+    return this.getInteractiveStatus();
+  }
+
+  async resizeViewportManual(width: number, height: number): Promise<BrowserStatus & { busy: boolean }> {
+    const cfg = resolveWebBrowserConfig(this.hatoConfig);
+    const status = await this.controller.resizeViewport(cfg, width, height);
+    return { ...status, busy: this.isBusy() };
+  }
+
+  async dispatchMouse(input: BrowserMouseInput): Promise<void> {
+    const cfg = resolveWebBrowserConfig(this.hatoConfig);
+    await this.controller.dispatchMouse(cfg, input);
+  }
+
+  async dispatchKeyboard(input: BrowserKeyboardInput): Promise<void> {
+    const cfg = resolveWebBrowserConfig(this.hatoConfig);
+    await this.controller.dispatchKeyboard(cfg, input);
+  }
+
+  async captureScreenshot(): Promise<Buffer | null> {
+    return this.controller.screenshotJpeg(78);
+  }
+
+  subscribeStream(listener: (event: BrowserStreamEvent) => void): () => void {
+    return this.controller.subscribeStream(listener);
+  }
+
   async runTask(
     input: BrowserTaskInput,
     options?: { sendPhotoToUser?: SendPhotoToUserFn },
   ): Promise<BrowserTaskOutput> {
-    const run = async (): Promise<BrowserTaskOutput> => this.runTaskInternal(input, options);
+    const run = async (): Promise<BrowserTaskOutput> => {
+      this.activeTaskCount += 1;
+      try {
+        return await this.runTaskInternal(input, options);
+      } finally {
+        this.activeTaskCount = Math.max(0, this.activeTaskCount - 1);
+      }
+    };
     const chained = this.serialQueue.then(run, run);
     this.serialQueue = chained.catch(() => undefined);
     return chained;
@@ -314,6 +436,11 @@ export class BrowserRuntime {
       },
     ];
 
+    const taskStartPerf = performance.now();
+    let activeCallStartPerf: number | null = null;
+    let firstDeltaPerf: number | null = null;
+    let totalDecodeMs = 0;
+
     const agent = new Agent({
       initialState: {
         systemPrompt: BROWSER_WORKER_SYSTEM_PROMPT,
@@ -324,6 +451,7 @@ export class BrowserRuntime {
       },
       getApiKey: (provider) => this.modelRegistry.resolveApiKeyForProvider(provider),
       streamFn: (model, context, streamOpts) => {
+        activeCallStartPerf = performance.now();
         const scopedFetch: typeof globalThis.fetch = (reqInput, reqInit) =>
           this.proxyRouter.scopedFetch(reqInput, reqInit, `llm-calling.${model.provider}`);
         return this.proxyRouter.runWithScope(`llm-calling.${model.provider}`, () =>
@@ -337,6 +465,27 @@ export class BrowserRuntime {
       },
     });
 
+    const unsubscribe = agent.subscribe((event) => {
+      if (event.type === "message_update" && firstDeltaPerf === null) {
+        const ae = event.assistantMessageEvent;
+        if (
+          ae &&
+          (ae.type === "text_delta" || ae.type === "thinking_delta" || ae.type === "toolcall_delta") &&
+          ae.delta.length > 0
+        ) {
+          firstDeltaPerf = performance.now();
+        }
+      } else if (
+        event.type === "message_end" &&
+        event.message.role === "assistant" &&
+        activeCallStartPerf !== null
+      ) {
+        const startPerf = activeCallStartPerf;
+        activeCallStartPerf = null;
+        totalDecodeMs += Math.max(1, performance.now() - Math.max(startPerf, firstDeltaPerf ?? startPerf));
+      }
+    });
+
     const promptLines = [`任务目标: ${goal}`];
     if (input.startUrl?.trim()) {
       promptLines.push(`起始网址: ${input.startUrl.trim()}`);
@@ -346,6 +495,9 @@ export class BrowserRuntime {
     }
 
     logInfo("BROWSER", `task started (model=${resolvedSlot.target}, maxSteps=${browserCfg.maxSteps})`);
+
+    let outcomeStatus: BrowserTaskOutput["status"] = "failed";
+    let outcomeUrl: string | undefined;
 
     try {
       await agent.prompt(promptLines.join("\n"));
@@ -357,8 +509,10 @@ export class BrowserRuntime {
       const pageInfo = await this.controller.getCurrentPageInfo();
       const takeover = taskState.takeover;
       const currentUrl = takeover?.url ?? pageInfo?.url;
+      outcomeUrl = currentUrl;
 
       if (takeover) {
+        outcomeStatus = "needs_takeover";
         const summary = finalText || `页面已挂起等待人工接管：${takeover.reason}`;
         return {
           status: "needs_takeover",
@@ -375,6 +529,7 @@ export class BrowserRuntime {
         };
       }
 
+      outcomeStatus = "completed";
       const summary =
         finalText ||
         (taskState.stepLimitReached
@@ -394,8 +549,10 @@ export class BrowserRuntime {
         }),
       };
     } catch (err) {
+      outcomeStatus = "failed";
       const summary = `浏览器任务执行失败: ${summarizeError(err)}`;
       const pageInfo = await this.controller.getCurrentPageInfo();
+      outcomeUrl = pageInfo?.url;
       return {
         status: "failed",
         currentUrl: pageInfo?.url,
@@ -408,6 +565,56 @@ export class BrowserRuntime {
           summary,
         }),
       };
+    } finally {
+      unsubscribe();
+      if (this.repo) {
+        try {
+          const latencyMs = Math.max(1, Math.round(performance.now() - taskStartPerf));
+          const ttftMs =
+            firstDeltaPerf !== null ? Math.max(0, Math.round(firstDeltaPerf - taskStartPerf)) : latencyMs;
+          const { totalUsage, toolCalls } = extractBrowserTurnMetrics(agent.state.messages);
+          const computed = computeTurnMetrics({
+            inputTokens: totalUsage.input,
+            outputTokens: totalUsage.output,
+            cacheReadTokens: totalUsage.cacheRead,
+            cacheWriteTokens: totalUsage.cacheWrite,
+            latencyMs,
+            ttftMs,
+            decodeMs: totalDecodeMs > 0 ? totalDecodeMs : undefined,
+          });
+          const snapshotLines = [
+            `slot: ${browserCfg.modelSlot} (browser_worker)`,
+            `goal: ${goal}`,
+            `status: ${outcomeStatus}`,
+          ];
+          if (input.startUrl?.trim()) snapshotLines.push(`start_url: ${input.startUrl.trim()}`);
+          if (outcomeUrl) snapshotLines.push(`final_url: ${outcomeUrl}`);
+          if (input.resume) snapshotLines.push("resume: true");
+
+          this.repo.insertTurnTrace({
+            canonicalUserId: this.hatoConfig.owner.canonical_user_id,
+            slot: browserCfg.modelSlot,
+            provider: resolvedSlot.providerSlug,
+            modelId: resolvedSlot.model.id,
+            api: String(resolvedSlot.model.api),
+            inputTokens: totalUsage.input,
+            outputTokens: totalUsage.output,
+            cacheReadTokens: totalUsage.cacheRead,
+            cacheWriteTokens: totalUsage.cacheWrite,
+            cacheHitRate: computed.cacheHitRate,
+            ttftMs,
+            tps: computed.decodeTps,
+            userPreview: `[浏览器] ${goal}`.slice(0, 60),
+            recalledIds: [],
+            timeCardText: snapshotLines.join("\n"),
+            toolCalls,
+            steps: extractTraceSteps(agent.state.messages),
+            latencyMs,
+          });
+        } catch {
+          // Trace recording must never break browser execution.
+        }
+      }
     }
   }
 }
@@ -449,4 +656,44 @@ function extractLastAssistantText(messages: readonly { role: string; content?: u
     if (text.trim()) return text.trim();
   }
   return "";
+}
+
+function extractBrowserTurnMetrics(messages: readonly { role: string; content?: unknown; usage?: Usage }[]): {
+  totalUsage: Usage;
+  toolCalls: string[];
+} {
+  const totalUsage: Usage = {
+    input: 0,
+    output: 0,
+    cacheRead: 0,
+    cacheWrite: 0,
+    totalTokens: 0,
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+  };
+  const toolCalls: string[] = [];
+
+  for (const msg of messages) {
+    if (msg.role !== "assistant") continue;
+    if (msg.usage) {
+      totalUsage.input += msg.usage.input;
+      totalUsage.output += msg.usage.output;
+      totalUsage.cacheRead += msg.usage.cacheRead;
+      totalUsage.cacheWrite += msg.usage.cacheWrite;
+      totalUsage.totalTokens += msg.usage.totalTokens;
+      totalUsage.cost.input += msg.usage.cost.input;
+      totalUsage.cost.output += msg.usage.cost.output;
+      totalUsage.cost.cacheRead += msg.usage.cost.cacheRead;
+      totalUsage.cost.cacheWrite += msg.usage.cost.cacheWrite;
+      totalUsage.cost.total += msg.usage.cost.total;
+    }
+    if (Array.isArray(msg.content)) {
+      for (const block of (msg as AssistantMessage).content) {
+        if (block.type === "toolCall") {
+          toolCalls.push(block.name);
+        }
+      }
+    }
+  }
+
+  return { totalUsage, toolCalls };
 }

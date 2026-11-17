@@ -2,6 +2,7 @@ import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { ImageContent, Message, TextContent, UserMessage } from "@earendil-works/pi-ai";
 import type { HatoRepository, RawMessageRecord } from "../db/repo.js";
 import type { ChannelName } from "../gateway/types.js";
+import { formatRecalledMemoriesBlock, type MemoryRecallItem } from "../memory/store.js";
 import { formatLocalDateTime } from "../time/clock.js";
 import { formatGapMarker, renderTimeCard } from "../time/timecard.js";
 
@@ -59,6 +60,7 @@ export interface EphemeralTailBuilderInput {
   canonicalUserId: string;
   baseTimezone: string;
   quietHours: { start: string; end: string };
+  recalledMemories?: readonly MemoryRecallItem[];
 }
 
 /**
@@ -166,6 +168,13 @@ export function buildEphemeralContextBlock(input: EphemeralTailBuilderInput): {
   });
 
   const sections: string[] = [];
+
+  if (input.recalledMemories && input.recalledMemories.length > 0) {
+    const recalledBlock = formatRecalledMemoriesBlock(input.recalledMemories);
+    if (recalledBlock) {
+      sections.push(recalledBlock);
+    }
+  }
 
   const loops = input.repo
     .listOpenLoops(input.canonicalUserId, 10)

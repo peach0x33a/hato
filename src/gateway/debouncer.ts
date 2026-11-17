@@ -136,3 +136,53 @@ function mergeMessages(messages: InboundMessage[]): InboundBatch {
     lastTimestampMs: last.timestampMs,
   };
 }
+
+/**
+ * Coalesce multiple InboundBatches queued for the same user into a single turn batch.
+ */
+export function mergeInboundBatches(batches: readonly InboundBatch[]): InboundBatch {
+  if (batches.length === 0) {
+    throw new Error("mergeInboundBatches requires at least one batch");
+  }
+  if (batches.length === 1) {
+    return batches[0]!;
+  }
+  const first = batches[0]!;
+  const last = batches[batches.length - 1]!;
+  const texts: string[] = [];
+  const attachments: InboundAttachment[] = [];
+  const images: ImageContent[] = [];
+  const platformMsgIds: string[] = [];
+  let replyToPlatformMsgId: string | undefined;
+
+  for (const batch of batches) {
+    platformMsgIds.push(...batch.platformMsgIds);
+    if (batch.replyToPlatformMsgId) {
+      replyToPlatformMsgId = batch.replyToPlatformMsgId;
+    }
+    if (batch.combinedText.trim()) {
+      texts.push(batch.combinedText.trim());
+    }
+    attachments.push(...batch.attachments);
+    if (batch.images && images.length < MAX_BATCH_IMAGES) {
+      for (const img of batch.images) {
+        if (images.length >= MAX_BATCH_IMAGES) break;
+        images.push(img);
+      }
+    }
+  }
+
+  return {
+    canonicalUserId: first.canonicalUserId,
+    originChannel: last.originChannel,
+    originPlatformUserId: last.originPlatformUserId,
+    platformMsgIds,
+    latestPlatformMsgId: last.latestPlatformMsgId,
+    replyToPlatformMsgId,
+    combinedText: texts.join("\n"),
+    attachments,
+    images: images.length > 0 ? images : undefined,
+    firstTimestampMs: first.firstTimestampMs,
+    lastTimestampMs: last.lastTimestampMs,
+  };
+}

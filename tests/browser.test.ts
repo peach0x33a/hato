@@ -24,6 +24,8 @@ import { BrowserRuntime } from "../src/browser/runtime.js";
 import { resolveWebBrowserConfig } from "../src/config/app.js";
 import { ModelRegistry } from "../src/config/models.js";
 import { ScopedProxyRouter } from "../src/config/proxy.js";
+import { openDatabase } from "../src/db/client.js";
+import { HatoRepository } from "../src/db/repo.js";
 import { createDefaultHatoConfig } from "../src/setup/presets.js";
 
 test("parsePlaywrightProxy parses direct, HTTP, and authenticated SOCKS5 proxy rules", () => {
@@ -214,7 +216,15 @@ name = "Unused"
       dispose: async () => undefined,
     } as unknown as BrowserController;
 
-    const runtime = new BrowserRuntime(hatoCfg, registry, proxyRouter, fakeController);
+    const dbHandle = openDatabase(":memory:");
+    const repo = new HatoRepository(dbHandle.db);
+    repo.ensureOwner({
+      canonicalUserId: hatoCfg.owner.canonical_user_id,
+      timezone: hatoCfg.owner.timezone,
+      proactiveChannel: hatoCfg.owner.proactive_channel,
+    });
+
+    const runtime = new BrowserRuntime(hatoCfg, registry, proxyRouter, fakeController, repo);
 
     // 1. Hits takeover and pushes screenshot to Telegram callback.
     const res1 = await runtime.runTask(
@@ -237,6 +247,13 @@ name = "Unused"
     assert.equal(res2.status, "completed");
     assert.equal(runtime.isPendingTakeover(), false);
     assert.ok(res2.summary.includes("100"));
+
+    // Verify browser task calls are recorded in turn_traces.
+    const browserTraces = repo.listTurnTraces({ slot: resolveWebBrowserConfig(hatoCfg).modelSlot, limit: 10 });
+    assert.equal(browserTraces.length, 2);
+    assert.ok(browserTraces.some((tr) => JSON.parse(tr.toolCallsJson).includes("browser_navigate")));
+    assert.ok(browserTraces.some((tr) => JSON.parse(tr.toolCallsJson).includes("browser_snapshot")));
+    dbHandle.close();
 
     // Verify default resolved browser config values.
     assert.equal(resolveWebBrowserConfig(hatoCfg).idleTimeoutMinutes, 5);

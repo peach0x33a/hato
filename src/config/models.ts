@@ -559,6 +559,10 @@ export class ModelRegistry {
   listTargets(): string[] {
     return [...this.modelsByTarget.keys()].sort();
   }
+
+  getFileConfig(): ModelsFileConfig {
+    return structuredClone(this.fileConfig);
+  }
 }
 
 function resolveTargetFromMap(

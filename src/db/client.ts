@@ -145,10 +145,42 @@ CREATE TABLE IF NOT EXISTS turn_traces (
   recalled_ids_json TEXT NOT NULL DEFAULT '[]',
   time_card_text TEXT NOT NULL DEFAULT '',
   tool_calls_json TEXT NOT NULL DEFAULT '[]',
+  steps_json TEXT NOT NULL DEFAULT '[]',
   latency_ms INTEGER NOT NULL DEFAULT 0,
   created_at INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_turn_traces_user_time ON turn_traces (canonical_user_id, created_at);
+
+CREATE TABLE IF NOT EXISTS chat_sessions (
+  id TEXT PRIMARY KEY,
+  canonical_user_id TEXT NOT NULL,
+  title TEXT NOT NULL,
+  summary_text TEXT NOT NULL DEFAULT '',
+  started_at INTEGER NOT NULL,
+  ended_at INTEGER NOT NULL,
+  message_count INTEGER NOT NULL DEFAULT 0,
+  trace_count INTEGER NOT NULL DEFAULT 0,
+  created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_chat_sessions_user_time ON chat_sessions (canonical_user_id, ended_at);
+
+CREATE TABLE IF NOT EXISTS memory_sync_records (
+  id TEXT PRIMARY KEY,
+  canonical_user_id TEXT NOT NULL,
+  provider TEXT NOT NULL,
+  bank TEXT NOT NULL,
+  vault_id TEXT,
+  source_msg_ids_json TEXT NOT NULL DEFAULT '[]',
+  content TEXT NOT NULL,
+  external_memory_id TEXT,
+  status TEXT NOT NULL,
+  error_code TEXT,
+  error_message TEXT,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_memory_sync_user_bank ON memory_sync_records (canonical_user_id, bank, created_at);
+CREATE INDEX IF NOT EXISTS idx_memory_sync_status ON memory_sync_records (canonical_user_id, status, updated_at);
 `;
 
 export function openDatabase(sqlitePath: string): DbHandle {
@@ -190,6 +222,9 @@ function migrateTurnTracesTable(sqlite: Database.Database): void {
   }
   if (!existingCols.has("user_preview")) {
     sqlite.exec("ALTER TABLE turn_traces ADD COLUMN user_preview TEXT");
+  }
+  if (!existingCols.has("steps_json")) {
+    sqlite.exec("ALTER TABLE turn_traces ADD COLUMN steps_json TEXT NOT NULL DEFAULT '[]'");
   }
 
   sqlite.exec(`

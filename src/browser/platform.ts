@@ -209,7 +209,7 @@ async function startXvfbSession(xvfbBin: string): Promise<XvfbSession> {
 
   const child: ChildProcess = spawn(
     xvfbBin,
-    [display, "-screen", "0", "1280x800x24", "-nolisten", "tcp"],
+    [display, "-screen", "0", "1920x1080x24", "-nolisten", "tcp"],
     {
       stdio: "ignore",
       detached: false,

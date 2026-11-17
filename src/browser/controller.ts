@@ -1,6 +1,6 @@
 import { mkdirSync } from "node:fs";
 import { resolve } from "node:path";
-import { chromium, type BrowserContext, type Page } from "playwright-core";
+import { chromium, type BrowserContext, type CDPSession, type Page } from "playwright-core";
 import type { ResolvedWebBrowserConfig } from "../config/app.js";
 import type { ScopedProxyRouter } from "../config/proxy.js";
 import { logInfo, logWarn, summarizeError } from "../utils/logger.js";
@@ -28,6 +28,47 @@ export interface BrowserPageSnapshot {
   elements: BrowserElementEntry[];
   bodyText: string;
 }
+
+export interface BrowserTabInfo {
+  index: number;
+  title: string;
+  url: string;
+  active: boolean;
+}
+
+export interface BrowserStatus {
+  open: boolean;
+  pendingTakeover: boolean;
+  takeoverReason: string | null;
+  displayMode: "xvfb" | "headed" | "headless" | "closed";
+  xvfbDisplay: string | null;
+  proxyKey: string | null;
+  url: string | null;
+  title: string | null;
+  viewport: { width: number; height: number };
+  tabs: BrowserTabInfo[];
+}
+
+export interface BrowserMouseInput {
+  action: "move" | "down" | "up" | "click" | "dblclick" | "wheel";
+  x?: number;
+  y?: number;
+  button?: "left" | "right" | "middle";
+  deltaX?: number;
+  deltaY?: number;
+}
+
+export interface BrowserKeyboardInput {
+  action: "press" | "down" | "up" | "insertText";
+  key?: string;
+  text?: string;
+}
+
+export type BrowserStreamEvent =
+  | { type: "status"; status: BrowserStatus }
+  | { type: "frame"; dataUrl: string; width: number; height: number };
+
+const DEFAULT_VIEWPORT = { width: 1280, height: 800 };
 
 export const BROWSER_PROXY_SCOPE = "browser";
 const MAX_SNAPSHOT_ELEMENTS = 80;
@@ -161,9 +202,18 @@ export class BrowserController {
   private activePage: Page | null = null;
   private xvfbSession: XvfbSession | null = null;
   private activeProxyKey = "";
+  private activeDisplayMode: "xvfb" | "headed" | "headless" | "closed" = "closed";
+  private activeDisplayEnv: string | null = null;
   private idleTimer: NodeJS.Timeout | null = null;
   private pendingTakeoverReason: string | null = null;
+  private manualControl = false;
   private latestConfig: ResolvedWebBrowserConfig | null = null;
+  private readonly streamListeners = new Set<(event: BrowserStreamEvent) => void>();
+  private screencastSession: CDPSession | null = null;
+  private screencastPage: Page | null = null;
+  private screencastPollTimer: NodeJS.Timeout | null = null;
+  private statusPollTimer: NodeJS.Timeout | null = null;
+  private lastStatusJson = "";
 
   constructor(private readonly proxyRouter: ScopedProxyRouter) {}
 
@@ -178,13 +228,25 @@ export class BrowserController {
   setPendingTakeover(reason: string): void {
     this.pendingTakeoverReason = reason.trim() || "等待用户接管";
     this.clearIdleTimer();
+    void this.emitStatusUpdate();
   }
 
   clearPendingTakeover(): void {
     this.pendingTakeoverReason = null;
-    if (this.latestConfig) {
+    if (this.latestConfig && !this.manualControl) {
       this.scheduleIdleReap(this.latestConfig);
     }
+    void this.emitStatusUpdate();
+  }
+
+  setManualControl(active: boolean): void {
+    this.manualControl = active;
+    if (active) {
+      this.clearIdleTimer();
+    } else if (this.latestConfig && !this.isPendingTakeover()) {
+      this.scheduleIdleReap(this.latestConfig);
+    }
+    void this.emitStatusUpdate();
   }
 
   async ensurePage(config: ResolvedWebBrowserConfig): Promise<Page> {
@@ -302,6 +364,64 @@ export class BrowserController {
     return page.screenshot({ type: "png", fullPage: false });
   }
 
+  async screenshotJpeg(quality = 75): Promise<Buffer | null> {
+    if (!this.context) return null;
+    try {
+      const page = await this.resolveActivePage();
+      if (this.latestConfig) this.touchActivity(this.latestConfig);
+      return await page.screenshot({
+        type: "jpeg",
+        quality: Math.max(20, Math.min(95, Math.round(quality))),
+        fullPage: false,
+      });
+    } catch {
+      return null;
+    }
+  }
+
+  async getStatus(): Promise<BrowserStatus> {
+    if (!this.context) {
+      return {
+        open: false,
+        pendingTakeover: this.isPendingTakeover(),
+        takeoverReason: this.pendingTakeoverReason,
+        displayMode: "closed",
+        xvfbDisplay: null,
+        proxyKey: null,
+        url: null,
+        title: null,
+        viewport: { ...DEFAULT_VIEWPORT },
+        tabs: [],
+      };
+    }
+
+    const active = await this.resolveActivePage().catch(() => null);
+    const pages = this.context.pages().filter((p) => !p.isClosed());
+    const tabs: BrowserTabInfo[] = await Promise.all(
+      pages.map(async (p, index) => ({
+        index,
+        url: p.url(),
+        title: await p.title().catch(() => ""),
+        active: active ? p === active : index === pages.length - 1,
+      })),
+    );
+    const activeTab = tabs.find((t) => t.active) ?? tabs[tabs.length - 1] ?? null;
+    const viewport = active?.viewportSize() ?? { ...DEFAULT_VIEWPORT };
+
+    return {
+      open: true,
+      pendingTakeover: this.isPendingTakeover(),
+      takeoverReason: this.pendingTakeoverReason,
+      displayMode: this.activeDisplayMode,
+      xvfbDisplay: this.xvfbSession?.display ?? this.activeDisplayEnv,
+      proxyKey: this.activeProxyKey || null,
+      url: activeTab?.url ?? null,
+      title: activeTab?.title ?? null,
+      viewport,
+      tabs,
+    };
+  }
+
   async getCurrentPageInfo(): Promise<{ url: string; title: string } | null> {
     if (!this.context) return null;
     try {
@@ -315,14 +435,188 @@ export class BrowserController {
     }
   }
 
+  async navigateManual(config: ResolvedWebBrowserConfig, rawUrl: string): Promise<BrowserStatus> {
+    const url = normalizeNavigationUrl(rawUrl);
+    const page = await this.ensurePage(config);
+    await page.goto(url, { waitUntil: "domcontentloaded", timeout: config.actionTimeoutMs });
+    this.touchActivity(config);
+    await this.emitStatusUpdate();
+    return this.getStatus();
+  }
+
+  async forward(config: ResolvedWebBrowserConfig): Promise<BrowserStatus> {
+    const page = await this.ensurePage(config);
+    await page.goForward({ waitUntil: "domcontentloaded", timeout: config.actionTimeoutMs }).catch(() => undefined);
+    this.touchActivity(config);
+    await this.emitStatusUpdate();
+    return this.getStatus();
+  }
+
+  async reloadPage(config: ResolvedWebBrowserConfig): Promise<BrowserStatus> {
+    const page = await this.ensurePage(config);
+    await page.reload({ waitUntil: "domcontentloaded", timeout: config.actionTimeoutMs }).catch(() => undefined);
+    this.touchActivity(config);
+    await this.emitStatusUpdate();
+    return this.getStatus();
+  }
+
+  async newTab(config: ResolvedWebBrowserConfig, rawUrl?: string): Promise<BrowserStatus> {
+    await this.ensurePage(config);
+    const ctx = this.context;
+    if (!ctx) throw new Error("BrowserContext is not open");
+    const page = await ctx.newPage();
+    this.activePage = page;
+    await this.syncScreencastTarget();
+    if (rawUrl?.trim()) {
+      const url = normalizeNavigationUrl(rawUrl);
+      await page.goto(url, { waitUntil: "domcontentloaded", timeout: config.actionTimeoutMs });
+    }
+    this.touchActivity(config);
+    await this.emitStatusUpdate();
+    return this.getStatus();
+  }
+
+  async switchTab(config: ResolvedWebBrowserConfig, index: number): Promise<BrowserStatus> {
+    await this.ensurePage(config);
+    if (!this.context) return this.getStatus();
+    const pages = this.context.pages().filter((p) => !p.isClosed());
+    const target = pages[index];
+    if (!target) {
+      throw new Error(`标签页索引 #${index} 不存在`);
+    }
+    this.activePage = target;
+    await target.bringToFront().catch(() => undefined);
+    await this.syncScreencastTarget();
+    this.touchActivity(config);
+    await this.emitStatusUpdate();
+    return this.getStatus();
+  }
+
+  async closeTab(config: ResolvedWebBrowserConfig, index: number): Promise<BrowserStatus> {
+    if (!this.context) return this.getStatus();
+    const pages = this.context.pages().filter((p) => !p.isClosed());
+    const target = pages[index];
+    if (!target) return this.getStatus();
+    if (pages.length <= 1) {
+      await target.goto("about:blank").catch(() => undefined);
+    } else {
+      await target.close().catch(() => undefined);
+      await this.resolveActivePage().catch(() => undefined);
+    }
+    await this.syncScreencastTarget();
+    this.touchActivity(config);
+    await this.emitStatusUpdate();
+    return this.getStatus();
+  }
+
+  async dispatchMouse(config: ResolvedWebBrowserConfig, input: BrowserMouseInput): Promise<void> {
+    if (!this.context) {
+      throw new Error("浏览器尚未打开，请先打开浏览器");
+    }
+    const page = await this.resolveActivePage();
+    const viewport = page.viewportSize() ?? DEFAULT_VIEWPORT;
+    const clamp = (n: number | undefined, max: number) =>
+      Math.max(0, Math.min(max, Number.isFinite(n) ? Number(n) : 0));
+    const x = clamp(input.x, viewport.width);
+    const y = clamp(input.y, viewport.height);
+    const button = input.button ?? "left";
+
+    switch (input.action) {
+      case "move":
+        await page.mouse.move(x, y);
+        break;
+      case "down":
+        await page.mouse.move(x, y);
+        await page.mouse.down({ button });
+        break;
+      case "up":
+        await page.mouse.move(x, y);
+        await page.mouse.up({ button });
+        break;
+      case "click":
+        await page.mouse.click(x, y, { button });
+        break;
+      case "dblclick":
+        await page.mouse.dblclick(x, y, { button });
+        break;
+      case "wheel":
+        await page.mouse.move(x, y);
+        await page.mouse.wheel(Number(input.deltaX) || 0, Number(input.deltaY) || 0);
+        break;
+    }
+    this.touchActivity(config);
+    void this.emitStatusUpdate();
+  }
+
+  async dispatchKeyboard(config: ResolvedWebBrowserConfig, input: BrowserKeyboardInput): Promise<void> {
+    if (!this.context) {
+      throw new Error("浏览器尚未打开，请先打开浏览器");
+    }
+    const page = await this.resolveActivePage();
+    switch (input.action) {
+      case "press":
+        if (input.key) await page.keyboard.press(input.key);
+        break;
+      case "down":
+        if (input.key) await page.keyboard.down(input.key);
+        break;
+      case "up":
+        if (input.key) await page.keyboard.up(input.key);
+        break;
+      case "insertText":
+        if (input.text) await page.keyboard.insertText(input.text);
+        break;
+    }
+    this.touchActivity(config);
+    void this.emitStatusUpdate();
+  }
+
+  async resizeViewport(
+    config: ResolvedWebBrowserConfig,
+    width: number,
+    height: number,
+  ): Promise<BrowserStatus> {
+    const page = await this.ensurePage(config);
+    const boundedW = Math.max(640, Math.min(1920, Math.round(width)));
+    const boundedH = Math.max(480, Math.min(1080, Math.round(height)));
+    await page.setViewportSize({ width: boundedW, height: boundedH });
+    await this.detachScreencast();
+    await this.syncScreencastTarget();
+    this.touchActivity(config);
+    await this.emitStatusUpdate();
+    return this.getStatus();
+  }
+
+  subscribeStream(listener: (event: BrowserStreamEvent) => void): () => void {
+    this.streamListeners.add(listener);
+    if (this.streamListeners.size === 1) {
+      this.startStreamPump();
+    }
+    void this.getStatus().then((status) => {
+      if (this.streamListeners.has(listener)) {
+        listener({ type: "status", status });
+      }
+    });
+    return () => {
+      this.streamListeners.delete(listener);
+      if (this.streamListeners.size === 0) {
+        this.stopStreamPump();
+      }
+    };
+  }
+
   async dispose(): Promise<void> {
     this.clearIdleTimer();
     this.pendingTakeoverReason = null;
+    this.manualControl = false;
+    await this.detachScreencast();
 
     const ctx = this.context;
     this.context = null;
     this.activePage = null;
     this.activeProxyKey = "";
+    this.activeDisplayMode = "closed";
+    this.activeDisplayEnv = null;
 
     if (ctx) {
       await ctx.close().catch(() => undefined);
@@ -333,6 +627,7 @@ export class BrowserController {
     if (xvfb) {
       await xvfb.dispose().catch(() => undefined);
     }
+    await this.emitStatusUpdate();
   }
 
   private async launchContext(
@@ -364,7 +659,7 @@ export class BrowserController {
           ...(launchEnv ? { env: launchEnv } : {}),
           ignoreDefaultArgs: ["--enable-automation"],
           args: launchArgs,
-          viewport: { width: 1280, height: 800 },
+          viewport: { ...DEFAULT_VIEWPORT },
         });
         usedLabel = candidate.label;
         break;
@@ -385,25 +680,39 @@ export class BrowserController {
     await openedContext.addInitScript(INIT_STEALTH_SCRIPT);
     openedContext.on("page", (newPage) => {
       this.activePage = newPage;
+      void this.syncScreencastTarget();
+      void this.emitStatusUpdate();
       newPage.once("close", () => {
         if (this.activePage === newPage) {
           const remaining = openedContext.pages();
           this.activePage = remaining[remaining.length - 1] ?? null;
+          void this.syncScreencastTarget();
         }
+        void this.emitStatusUpdate();
       });
     });
     openedContext.once("close", () => {
       if (this.context === openedContext) {
         this.context = null;
         this.activePage = null;
+        this.activeDisplayMode = "closed";
+        this.activeDisplayEnv = null;
         this.pendingTakeoverReason = null;
         this.clearIdleTimer();
+        void this.detachScreencast();
+        void this.emitStatusUpdate();
       }
     });
 
     this.context = openedContext;
     this.xvfbSession = displayPlan.xvfbSession ?? null;
     this.activeProxyKey = proxyKey;
+    this.activeDisplayMode = displayPlan.headless
+      ? "headless"
+      : displayPlan.xvfbSession || displayPlan.displayEnv
+        ? "xvfb"
+        : "headed";
+    this.activeDisplayEnv = displayPlan.displayEnv ?? null;
 
     const existingPages = openedContext.pages();
     this.activePage = existingPages[existingPages.length - 1] ?? (await openedContext.newPage());
@@ -412,6 +721,8 @@ export class BrowserController {
       "BROWSER",
       `started (${usedLabel}, ${displayPlan.headless ? "headless" : displayPlan.displayEnv ? `headed Xvfb ${displayPlan.displayEnv}` : "headed"}, proxy=${proxyKey})`,
     );
+    await this.syncScreencastTarget();
+    void this.emitStatusUpdate();
   }
 
   private async resolveActivePage(): Promise<Page> {
@@ -438,19 +749,19 @@ export class BrowserController {
   }
 
   private touchActivity(config: ResolvedWebBrowserConfig): void {
-    if (!this.isPendingTakeover()) {
+    if (!this.isPendingTakeover() && !this.manualControl) {
       this.scheduleIdleReap(config);
     }
   }
 
   private scheduleIdleReap(config: ResolvedWebBrowserConfig): void {
     this.clearIdleTimer();
-    if (config.idleTimeoutMinutes <= 0 || this.isPendingTakeover()) {
+    if (config.idleTimeoutMinutes <= 0 || this.isPendingTakeover() || this.manualControl) {
       return;
     }
     const ms = Math.max(10_000, config.idleTimeoutMinutes * 60_000);
     this.idleTimer = setTimeout(() => {
-      if (this.isPendingTakeover()) return;
+      if (this.isPendingTakeover() || this.manualControl) return;
       logInfo("BROWSER", `idle for ${config.idleTimeoutMinutes}m, closing browser process to release memory`);
       void this.dispose().catch((err) => {
         logWarn("BROWSER", `idle dispose error: ${summarizeError(err)}`);
@@ -463,6 +774,143 @@ export class BrowserController {
     if (this.idleTimer) {
       clearTimeout(this.idleTimer);
       this.idleTimer = null;
+    }
+  }
+
+  private startStreamPump(): void {
+    void this.syncScreencastTarget();
+    if (!this.statusPollTimer) {
+      this.statusPollTimer = setInterval(() => {
+        void this.emitStatusUpdate(false);
+      }, 1_000);
+      this.statusPollTimer.unref();
+    }
+  }
+
+  private stopStreamPump(): void {
+    if (this.statusPollTimer) {
+      clearInterval(this.statusPollTimer);
+      this.statusPollTimer = null;
+    }
+    this.lastStatusJson = "";
+    void this.detachScreencast();
+  }
+
+  private async emitStatusUpdate(force = true): Promise<void> {
+    if (this.streamListeners.size === 0) return;
+    const status = await this.getStatus();
+    const serialized = JSON.stringify(status);
+    if (!force && serialized === this.lastStatusJson) return;
+    this.lastStatusJson = serialized;
+    this.broadcastStream({ type: "status", status });
+  }
+
+  private broadcastStream(event: BrowserStreamEvent): void {
+    for (const listener of this.streamListeners) {
+      try {
+        listener(event);
+      } catch {
+        // ignore listener failure
+      }
+    }
+  }
+
+  private async syncScreencastTarget(): Promise<void> {
+    if (this.streamListeners.size === 0 || !this.context) {
+      await this.detachScreencast();
+      return;
+    }
+
+    const targetPage = await this.resolveActivePage().catch(() => null);
+    if (!targetPage || targetPage.isClosed()) {
+      await this.detachScreencast();
+      return;
+    }
+    if (this.screencastPage === targetPage && (this.screencastSession || this.screencastPollTimer)) {
+      return;
+    }
+
+    await this.detachScreencast();
+    this.screencastPage = targetPage;
+
+    // Push an immediate initial frame before CDP delta frames arrive.
+    const initial = await targetPage
+      .screenshot({ type: "jpeg", quality: 72, fullPage: false })
+      .catch(() => null);
+    if (initial && this.streamListeners.size > 0) {
+      const vp = targetPage.viewportSize() ?? DEFAULT_VIEWPORT;
+      this.broadcastStream({
+        type: "frame",
+        dataUrl: `data:image/jpeg;base64,${initial.toString("base64")}`,
+        width: vp.width,
+        height: vp.height,
+      });
+    }
+
+    try {
+      const cdp = await this.context.newCDPSession(targetPage);
+      if (this.streamListeners.size === 0 || this.screencastPage !== targetPage) {
+        await cdp.detach().catch(() => undefined);
+        return;
+      }
+      this.screencastSession = cdp;
+      cdp.on("Page.screencastFrame", (payload: { data: string; sessionId: number; metadata?: { deviceWidth?: number; deviceHeight?: number } }) => {
+        if (this.streamListeners.size > 0) {
+          const vp = targetPage.viewportSize() ?? DEFAULT_VIEWPORT;
+          this.broadcastStream({
+            type: "frame",
+            dataUrl: `data:image/jpeg;base64,${payload.data}`,
+            width: payload.metadata?.deviceWidth || vp.width,
+            height: payload.metadata?.deviceHeight || vp.height,
+          });
+        }
+        void cdp.send("Page.screencastFrameAck", { sessionId: payload.sessionId }).catch(() => undefined);
+      });
+      const activeVp = targetPage.viewportSize() ?? DEFAULT_VIEWPORT;
+      await cdp.send("Page.startScreencast", {
+        format: "jpeg",
+        quality: 74,
+        maxWidth: Math.max(activeVp.width, DEFAULT_VIEWPORT.width),
+        maxHeight: Math.max(activeVp.height, DEFAULT_VIEWPORT.height),
+        everyNthFrame: 1,
+      });
+      return;
+    } catch {
+      await this.detachScreencast();
+      this.screencastPage = targetPage;
+    }
+
+    // Fallback frame poll if CDP screencast is unsupported on the active page.
+    this.screencastPollTimer = setInterval(() => {
+      if (!this.context || !this.screencastPage || this.screencastPage.isClosed()) return;
+      void this.screencastPage
+        .screenshot({ type: "jpeg", quality: 72, fullPage: false })
+        .then((buf) => {
+          if (this.streamListeners.size === 0 || !this.screencastPage) return;
+          const vp = this.screencastPage.viewportSize() ?? DEFAULT_VIEWPORT;
+          this.broadcastStream({
+            type: "frame",
+            dataUrl: `data:image/jpeg;base64,${buf.toString("base64")}`,
+            width: vp.width,
+            height: vp.height,
+          });
+        })
+        .catch(() => undefined);
+    }, 450);
+    this.screencastPollTimer.unref();
+  }
+
+  private async detachScreencast(): Promise<void> {
+    if (this.screencastPollTimer) {
+      clearInterval(this.screencastPollTimer);
+      this.screencastPollTimer = null;
+    }
+    const cdp = this.screencastSession;
+    this.screencastSession = null;
+    this.screencastPage = null;
+    if (cdp) {
+      await cdp.send("Page.stopScreencast").catch(() => undefined);
+      await cdp.detach().catch(() => undefined);
     }
   }
 }

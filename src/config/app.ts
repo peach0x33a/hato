@@ -56,12 +56,24 @@ export const WebBrowserConfigSchema = Type.Object({
   novnc_hint: Type.Optional(Type.String({ minLength: 1 })),
 });
 
+export const WebConsoleConfigSchema = Type.Object({
+  enabled: Type.Boolean(),
+  host: Type.String({ minLength: 1 }),
+  port: Type.Number({ minimum: 0, maximum: 65535 }),
+  auth_token_env: Type.Optional(Type.String({ minLength: 1 })),
+});
+
 export const HatoConfigSchema = Type.Object({
   paths: Type.Object({
     sqlite: Type.String({ minLength: 1 }),
     workspaces_dir: Type.String({ minLength: 1 }),
     prompts_dir: Type.String({ minLength: 1 }),
   }),
+  prompts: Type.Optional(
+    Type.Object({
+      order: Type.Array(Type.String({ minLength: 1 })),
+    }),
+  ),
   owner: Type.Object({
     canonical_user_id: Type.String({ minLength: 1 }),
     timezone: Type.String({ minLength: 1 }),
@@ -89,6 +101,7 @@ export const HatoConfigSchema = Type.Object({
       search: Type.Optional(TavilySearchConfigSchema),
       fetch: Type.Optional(WebFetchConfigSchema),
       browser: Type.Optional(WebBrowserConfigSchema),
+      console: Type.Optional(WebConsoleConfigSchema),
     }),
   ),
   gateway: Type.Object({
@@ -128,14 +141,52 @@ export const HatoConfigSchema = Type.Object({
     }),
   }),
   memory: Type.Object({
-    hindsight: Type.Object({
-      base_url: Type.String({ minLength: 1 }),
-      embedding_dimensions: Type.Number({ minimum: 1 }),
-      banks: Type.Object({
-        persona: Type.String({ minLength: 1 }),
-        tech: Type.String({ minLength: 1 }),
+    provider: Type.Optional(
+      Type.Union([Type.Literal("none"), Type.Literal("memoryecho"), Type.Literal("hindsight")]),
+    ),
+    recall: Type.Optional(
+      Type.Object({
+        mode: Type.Union([
+          Type.Literal("hybrid"),
+          Type.Literal("auto"),
+          Type.Literal("tool"),
+          Type.Literal("off"),
+        ]),
+        max_results: Type.Number({ minimum: 1, maximum: 20 }),
+        min_query_chars: Type.Number({ minimum: 1, maximum: 50 }),
       }),
-    }),
+    ),
+    curator: Type.Optional(
+      Type.Object({
+        enabled: Type.Boolean(),
+        idle_retain_after_minutes: Type.Number({ minimum: 1 }),
+        batch_message_threshold: Type.Number({ minimum: 2 }),
+        max_batch_messages: Type.Number({ minimum: 2, maximum: 100 }),
+      }),
+    ),
+    memoryecho: Type.Optional(
+      Type.Object({
+        enabled: Type.Boolean(),
+        base_url: Type.String({ minLength: 1 }),
+        api_key_env: Type.String({ minLength: 1 }),
+        timeout_ms: Type.Number({ minimum: 1000 }),
+        auto_create_vaults: Type.Boolean(),
+        vaults: Type.Object({
+          persona: Type.String(),
+          tech: Type.String(),
+        }),
+      }),
+    ),
+    hindsight: Type.Optional(
+      Type.Object({
+        base_url: Type.String({ minLength: 1 }),
+        embedding_dimensions: Type.Number({ minimum: 1 }),
+        banks: Type.Object({
+          persona: Type.String({ minLength: 1 }),
+          tech: Type.String({ minLength: 1 }),
+        }),
+      }),
+    ),
     open_loops: Type.Object({
       defer_after_chat_minutes: Type.Number({ minimum: 0 }),
       max_unanswered_streak: Type.Number({ minimum: 1 }),
@@ -165,7 +216,28 @@ export type RetryPolicyTomlConfig = Static<typeof RetryPolicySchema>;
 export type TavilySearchConfig = Static<typeof TavilySearchConfigSchema>;
 export type WebFetchConfig = Static<typeof WebFetchConfigSchema>;
 export type WebBrowserConfig = Static<typeof WebBrowserConfigSchema>;
+export type WebConsoleConfig = Static<typeof WebConsoleConfigSchema>;
 export type HatoConfig = Static<typeof HatoConfigSchema>;
+
+export interface ResolvedWebConsoleConfig {
+  enabled: boolean;
+  host: string;
+  port: number;
+  authTokenEnv?: string;
+}
+
+/**
+ * Resolve effective web console HTTP server config with loopback defaults.
+ */
+export function resolveWebConsoleConfig(config: HatoConfig): ResolvedWebConsoleConfig {
+  const c = config.web?.console;
+  return {
+    enabled: c?.enabled ?? true,
+    host: c?.host ?? "127.0.0.1",
+    port: c?.port ?? 3820,
+    authTokenEnv: c?.auth_token_env,
+  };
+}
 
 export interface ResolvedWebFetchConfig {
   enabled: boolean;
@@ -242,6 +314,102 @@ export interface ResolvedTavilySearchConfig {
   baseUrl: string;
   maxResults: number;
   searchDepth: "basic" | "advanced";
+}
+
+export type MemoryProviderName = "none" | "memoryecho" | "hindsight";
+export type MemoryRecallMode = "hybrid" | "auto" | "tool" | "off";
+
+export interface ResolvedMemoryEchoConfig {
+  enabled: boolean;
+  baseUrl: string;
+  apiKeyEnv: string;
+  timeoutMs: number;
+  autoCreateVaults: boolean;
+  vaults: {
+    persona: string;
+    tech: string;
+  };
+}
+
+export interface ResolvedMemoryRecallConfig {
+  mode: MemoryRecallMode;
+  maxResults: number;
+  minQueryChars: number;
+}
+
+export interface ResolvedMemoryCuratorConfig {
+  enabled: boolean;
+  idleRetainAfterMinutes: number;
+  batchMessageThreshold: number;
+  maxBatchMessages: number;
+}
+
+/**
+ * Resolve effective long-term memory provider from explicit `memory.provider`
+ * or `memory.memoryecho.enabled`.
+ */
+export function resolveMemoryProvider(config: HatoConfig): MemoryProviderName {
+  if (config.memory.provider) return config.memory.provider;
+  if (config.memory.memoryecho?.enabled) return "memoryecho";
+  return "none";
+}
+
+/**
+ * Resolve effective MemoryEcho provider config with safe defaults.
+ */
+export function resolveMemoryEchoConfig(config: HatoConfig): ResolvedMemoryEchoConfig {
+  const me = config.memory.memoryecho;
+  const provider = resolveMemoryProvider(config);
+  return {
+    enabled: provider === "memoryecho" && (me?.enabled ?? true),
+    baseUrl: me?.base_url ?? "https://api.artific.social",
+    apiKeyEnv: me?.api_key_env ?? "MEMORYECHO_API_KEY",
+    timeoutMs: me?.timeout_ms ?? 15_000,
+    autoCreateVaults: me?.auto_create_vaults ?? true,
+    vaults: {
+      persona: me?.vaults?.persona?.trim() ?? "",
+      tech: me?.vaults?.tech?.trim() ?? "",
+    },
+  };
+}
+
+export const DEFAULT_PROMPT_ORDER = ["blocks", "system", "soul"] as const;
+
+/**
+ * Resolve Layer 1 static prompt assembly order from `[prompts].order`
+ * (defaults to `["blocks", "system", "soul"]`).
+ */
+export function resolvePromptOrder(config: HatoConfig): string[] {
+  const configured = config.prompts?.order;
+  if (!configured || configured.length === 0) {
+    return [...DEFAULT_PROMPT_ORDER];
+  }
+  return configured.map((item) => item.trim()).filter(Boolean);
+}
+
+/**
+ * Resolve effective memory recall strategy (hybrid = auto pre-recall + active recall_memory tool).
+ */
+export function resolveMemoryRecallConfig(config: HatoConfig): ResolvedMemoryRecallConfig {
+  const r = config.memory.recall;
+  return {
+    mode: r?.mode ?? "hybrid",
+    maxResults: r?.max_results ?? 6,
+    minQueryChars: r?.min_query_chars ?? 4,
+  };
+}
+
+/**
+ * Resolve effective Memory Curator distillation and batching config.
+ */
+export function resolveMemoryCuratorConfig(config: HatoConfig): ResolvedMemoryCuratorConfig {
+  const c = config.memory.curator;
+  return {
+    enabled: c?.enabled ?? true,
+    idleRetainAfterMinutes: c?.idle_retain_after_minutes ?? 10,
+    batchMessageThreshold: c?.batch_message_threshold ?? 12,
+    maxBatchMessages: c?.max_batch_messages ?? 24,
+  };
 }
 
 /**

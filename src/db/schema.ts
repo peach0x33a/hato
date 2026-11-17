@@ -129,6 +129,35 @@ export const turnTraces = sqliteTable("turn_traces", {
   recalledIdsJson: text("recalled_ids_json").notNull().default("[]"),
   timeCardText: text("time_card_text").notNull().default(""),
   toolCallsJson: text("tool_calls_json").notNull().default("[]"),
+  stepsJson: text("steps_json").notNull().default("[]"),
   latencyMs: integer("latency_ms").notNull().default(0),
   createdAt: integer("created_at").notNull(),
+});
+
+export const chatSessions = sqliteTable("chat_sessions", {
+  id: text("id").primaryKey(),
+  canonicalUserId: text("canonical_user_id").notNull(),
+  title: text("title").notNull(),
+  summaryText: text("summary_text").notNull().default(""),
+  startedAt: integer("started_at").notNull(),
+  endedAt: integer("ended_at").notNull(),
+  messageCount: integer("message_count").notNull().default(0),
+  traceCount: integer("trace_count").notNull().default(0),
+  createdAt: integer("created_at").notNull(),
+});
+
+export const memorySyncRecords = sqliteTable("memory_sync_records", {
+  id: text("id").primaryKey(),
+  canonicalUserId: text("canonical_user_id").notNull(),
+  provider: text("provider").notNull(),
+  bank: text("bank").notNull(), // "persona" | "tech"
+  vaultId: text("vault_id"),
+  sourceMsgIdsJson: text("source_msg_ids_json").notNull().default("[]"),
+  content: text("content").notNull(),
+  externalMemoryId: text("external_memory_id"),
+  status: text("status").notNull(), // "synced" | "degraded" | "denied" | "error" | "erased"
+  errorCode: text("error_code"),
+  errorMessage: text("error_message"),
+  createdAt: integer("created_at").notNull(),
+  updatedAt: integer("updated_at").notNull(),
 });

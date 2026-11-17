@@ -1,6 +1,6 @@
 import type { ImageContent } from "@earendil-works/pi-ai";
 
-export type ChannelName = "tg" | "qq";
+export type ChannelName = "tg" | "qq" | "web";
 
 export interface ChannelCapabilities {
   channel: ChannelName;

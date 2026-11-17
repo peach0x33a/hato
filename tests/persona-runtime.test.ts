@@ -122,6 +122,7 @@ hindsight_llm = "faux-provider/faux-persona-1"
     const resetResult = repo.resetWorkingContext("owner");
     assert.equal(resetResult.clearedHotMessages, 1);
     assert.equal(resetResult.hadSummary, true);
+    assert.ok(resetResult.archivedSessionId);
     runtime.resetSession();
 
     assert.equal(repo.getWorkingMemory("owner").summaryText, "");
@@ -154,8 +155,38 @@ hindsight_llm = "faux-provider/faux-persona-1"
     assert.equal(sawOldMessage, false);
     assert.deepEqual(newTurnRoles, ["system", "user"]);
 
+    // Verify LLM can explicitly recall archived messages from past sessions using search_past_sessions
+    let recalledSessionSnippet = "";
+    faux.setResponses([
+      () => fauxAssistantMessage([fauxToolCall("search_past_sessions", { query: "356 * 24" })], { stopReason: "toolUse" }),
+      (ctx) => {
+        const toolRes = ctx.messages.find((m) => m.role === "toolResult");
+        if (toolRes && Array.isArray(toolRes.content)) {
+          recalledSessionSnippet = toolRes.content
+            .map((b) => (b.type === "text" ? b.text : ""))
+            .join("\n");
+        }
+        return fauxAssistantMessage("我在上次归档会话里找到了，当时算过 356 * 24 = 8544");
+      },
+    ]);
+
+    const recallOut = await runtime.handleUserBatch({
+      canonicalUserId: "owner",
+      originChannel: "tg",
+      originPlatformUserId: "123456789",
+      platformMsgIds: ["m101b"],
+      latestPlatformMsgId: "m101b",
+      combinedText: "我上个会话问过啥乘法来着",
+      attachments: [],
+      firstTimestampMs: Date.now() - 800,
+      lastTimestampMs: Date.now() - 800,
+    });
+    assert.ok(recallOut.toolCalls.includes("search_past_sessions"));
+    assert.match(recalledSessionSnippet, /356 \* 24/);
+    assert.match(recalledSessionSnippet, new RegExp(resetResult.archivedSessionId!));
+
     // Verify pre-tool immediate reply behavior:
-    // 1) Model-provided text before toolUse is flushed before tool execution without duplication.
+    // 1) Model-provided text before toolUse is flushed once per turn, even across chained tool calls.
     const timeline: string[] = [];
     faux.setResponses([
       () =>
@@ -163,7 +194,9 @@ hindsight_llm = "faux-provider/faux-persona-1"
           [{ type: "text", text: "好~我去算算看" }, fauxToolCall("calc", { expression: "10 + 5" })],
           { stopReason: "toolUse" },
         ),
-      () => fauxAssistantMessage("算出来是 15 呀"),
+      () => fauxAssistantMessage([fauxToolCall("calc", { expression: "15 + 1" })], { stopReason: "toolUse" }),
+      () => fauxAssistantMessage("算出来是 16 呀"),
+      // 2) Bare fast toolCall (calc) does not spam a synthetic pre-tool ack.
       () => fauxAssistantMessage([fauxToolCall("calc", { expression: "20 + 2" })], { stopReason: "toolUse" }),
       () => fauxAssistantMessage("22 呀"),
     ]);
@@ -175,7 +208,7 @@ hindsight_llm = "faux-provider/faux-persona-1"
         originPlatformUserId: "123456789",
         platformMsgIds: ["m102"],
         latestPlatformMsgId: "m102",
-        combinedText: "10 加 5 等于几",
+        combinedText: "10 加 5 再加 1 等于几",
         attachments: [],
         firstTimestampMs: Date.now(),
         lastTimestampMs: Date.now(),
@@ -188,10 +221,9 @@ hindsight_llm = "faux-provider/faux-persona-1"
       },
     );
     assert.deepEqual(preReplyTurn1.earlyBubbles, ["好~我去算算看"]);
-    assert.deepEqual(preReplyTurn1.bubbles, ["算出来是 15 呀"]);
+    assert.deepEqual(preReplyTurn1.bubbles, ["算出来是 16 呀"]);
     assert.deepEqual(timeline, ["early:好~我去算算看"]);
 
-    // 2) Bare toolCall without accompanying text triggers a clean default ack before tool execution.
     const bareTimeline: string[] = [];
     const preReplyTurn2 = await runtime.handleUserBatch(
       {
@@ -212,9 +244,149 @@ hindsight_llm = "faux-provider/faux-persona-1"
         },
       },
     );
-    assert.deepEqual(bareTimeline, ["等我算一下"]);
-    assert.deepEqual(preReplyTurn2.earlyBubbles, ["等我算一下"]);
+    assert.deepEqual(bareTimeline, []);
+    assert.deepEqual(preReplyTurn2.earlyBubbles, []);
     assert.deepEqual(preReplyTurn2.bubbles, ["22 呀"]);
+
+    // 3) Supersede behavior: if a newer user message arrives while LLM is generating (before reply is sent),
+    // keep the earlier user message, suppress the stale reply, and re-think with both messages.
+    let newerPending = false;
+    let rethoughtPromptText = "";
+    const sentFollowup: string[] = [];
+    faux.setResponses([
+      () => {
+        newerPending = true;
+        return fauxAssistantMessage("这是会被拦截的旧回复");
+      },
+      (ctx) => {
+        const lastUser = [...ctx.messages].reverse().find((m) => m.role === "user");
+        if (lastUser && typeof lastUser.content === "string") {
+          rethoughtPromptText = lastUser.content;
+        }
+        return fauxAssistantMessage("收到啦，明天早上八点准时睡");
+      },
+    ]);
+
+    const supersededTurn = await runtime.handleUserBatch(
+      {
+        canonicalUserId: "owner",
+        originChannel: "tg",
+        originPlatformUserId: "123456789",
+        platformMsgIds: ["m104"],
+        latestPlatformMsgId: "m104",
+        combinedText: "明天八点提醒我睡觉",
+        attachments: [],
+        firstTimestampMs: Date.now() + 20,
+        lastTimestampMs: Date.now() + 20,
+      },
+      [],
+      {
+        shouldSuppressSend: () => newerPending,
+        sendBubblesToUser: async (early) => {
+          sentFollowup.push(...early);
+        },
+      },
+    );
+    assert.equal(supersededTurn.superseded, true);
+    assert.deepEqual(supersededTurn.bubbles, []);
+    assert.deepEqual(sentFollowup, []);
+
+    // Now the newer message arrives after debounce; LLM sees BOTH user messages merged without stale assistant reply.
+    newerPending = false;
+    const rethoughtTurn = await runtime.handleUserBatch(
+      {
+        canonicalUserId: "owner",
+        originChannel: "tg",
+        originPlatformUserId: "123456789",
+        platformMsgIds: ["m105"],
+        latestPlatformMsgId: "m105",
+        combinedText: "早上",
+        attachments: [],
+        firstTimestampMs: Date.now() + 30,
+        lastTimestampMs: Date.now() + 30,
+      },
+      [],
+      {
+        shouldSuppressSend: () => newerPending,
+      },
+    );
+    assert.equal(rethoughtTurn.superseded, false);
+    assert.deepEqual(rethoughtTurn.bubbles, ["收到啦，明天早上八点准时睡"]);
+    assert.match(rethoughtPromptText, /明天八点提醒我睡觉/);
+    assert.match(rethoughtPromptText, /早上/);
+    assert.equal(rethoughtPromptText.includes("这是会被拦截的旧回复"), false);
+
+    // 4) Long-task steer behavior: during an active tool turn, new user messages steer into the live loop
+    // without aborting the tool, and shouldSendAck ("知道了") is true only once per turn.
+    let steerAckCount = 0;
+    let sawSteeredMessagesInSecondLlmStep = false;
+    faux.setResponses([
+      () =>
+        fauxAssistantMessage(
+          [{ type: "text", text: "好，我算一下" }, fauxToolCall("calc", { expression: "100 + 20" })],
+          { stopReason: "toolUse" },
+        ),
+      (ctx) => {
+        const joinedUserText = ctx.messages
+          .filter((m) => m.role === "user")
+          .map((m) => (typeof m.content === "string" ? m.content : ""))
+          .join("\n");
+        sawSteeredMessagesInSecondLlmStep =
+          joinedUserText.includes("顺便加 10") && joinedUserText.includes("还要再加 5");
+        return fauxAssistantMessage("100+20=120，加上10和5总共是135");
+      },
+    ]);
+
+    const hotBeforeSteer = repo.getHotMessages("owner", 0).length;
+    const steerTurn = await runtime.handleUserBatch(
+      {
+        canonicalUserId: "owner",
+        originChannel: "tg",
+        originPlatformUserId: "123456789",
+        platformMsgIds: ["m106"],
+        latestPlatformMsgId: "m106",
+        combinedText: "帮我算 100 + 20",
+        attachments: [],
+        firstTimestampMs: Date.now() + 40,
+        lastTimestampMs: Date.now() + 40,
+      },
+      [],
+      {
+        sendBubblesToUser: async () => {
+          // Simulate user sending two follow-up messages during the active tool step.
+          const r1 = runtime.handleIncomingDuringActiveTurn({
+            channel: "tg",
+            platformUserId: "123456789",
+            platformMsgId: "m107",
+            canonicalUserId: "owner",
+            text: "顺便加 10",
+            attachments: [],
+            timestampMs: Date.now() + 45,
+          });
+          assert.equal(r1.action, "steered");
+          if (r1.action === "steered" && r1.shouldSendAck) steerAckCount++;
+
+          const r2 = runtime.handleIncomingDuringActiveTurn({
+            channel: "tg",
+            platformUserId: "123456789",
+            platformMsgId: "m108",
+            canonicalUserId: "owner",
+            text: "还要再加 5",
+            attachments: [],
+            timestampMs: Date.now() + 46,
+          });
+          assert.equal(r2.action, "steered");
+          assert.equal(r2.shouldSendAck, false);
+          if (r2.action === "steered" && r2.shouldSendAck) steerAckCount++;
+        },
+      },
+    );
+    assert.equal(steerTurn.superseded, false);
+    assert.equal(steerAckCount, 1);
+    assert.equal(sawSteeredMessagesInSecondLlmStep, true);
+    assert.deepEqual(steerTurn.bubbles, ["100+20=120，加上10和5总共是135"]);
+    // M1 ("帮我算 100 + 20") + M2 ("顺便加 10") + M3 ("还要再加 5") + unified assistant reply = +4 rows
+    assert.equal(repo.getHotMessages("owner", 0).length, hotBeforeSteer + 4);
   } finally {
     dbHandle.close();
     rmSync(tempDir, { recursive: true, force: true });

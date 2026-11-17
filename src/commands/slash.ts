@@ -1,5 +1,7 @@
 import type { HatoRepository } from "../db/repo.js";
 import type { ChannelName } from "../gateway/types.js";
+import type { ForgetRunSummary, RetainRunSummary } from "../memory/curator.js";
+import type { MemoryUsageSummary, MemoryVaultInfo } from "../memory/store.js";
 import { computeTurnMetrics, formatCacheHitRate } from "../stats/metrics.js";
 
 export interface ModelSlotView {
@@ -21,6 +23,100 @@ export interface ResetContextResult {
   hadSummary: boolean;
 }
 
+export interface MemoryStatusView {
+  provider: string;
+  configured: boolean;
+  recallMode: string;
+  curatorEnabled: boolean;
+  vaultIds: { persona: string | null; tech: string | null };
+  vaults?: MemoryVaultInfo[];
+  usage?: MemoryUsageSummary | null;
+}
+
+export interface TelegramBotCommandSpec {
+  command: string;
+  description: string;
+}
+
+export interface SlashCommandSpec {
+  command: string;
+  description: string;
+  helpLine: string;
+  requiresMemory?: boolean;
+  availableWhenUnbound?: boolean;
+}
+
+export const SLASH_COMMAND_SPECS: readonly SlashCommandSpec[] = [
+  {
+    command: "help",
+    description: "查看可用系统指令说明",
+    helpLine: "- `/help`：查看可用系统指令说明",
+    availableWhenUnbound: true,
+  },
+  {
+    command: "new",
+    description: "清空当前对话上下文，开启新会话",
+    helpLine: "- `/new`：清空当前对话上下文，开启新会话",
+  },
+  {
+    command: "sethome",
+    description: "将当前私聊设为 Home Channel",
+    helpLine: "- `/sethome`：将当前对话设为 Home Channel（主动关怀与定时通知默认入口）",
+    availableWhenUnbound: true,
+  },
+  {
+    command: "trace",
+    description: "查看上一轮上下文、时间卡与缓存命中",
+    helpLine: "- `/trace`：查看上一轮上下文、时间卡、协议与 Prompt Cache 命中",
+  },
+  {
+    command: "model",
+    description: "查看或热切换 5 个角色槽位模型",
+    helpLine: "- `/model list` / `/model set <slot> <provider/model>`：查看或热切换槽位模型",
+  },
+  {
+    command: "reload",
+    description: "热重载 hato.toml 与 models.toml",
+    helpLine: "- `/reload`：热重载 `config/hato.toml` 与 `config/models.toml`",
+  },
+  {
+    command: "compact",
+    description: "手动触发一次热区上下文压缩",
+    helpLine: "- `/compact`：手动触发一次热区上下文压缩",
+  },
+  {
+    command: "memory",
+    description: "查看长期记忆状态或立即同步",
+    helpLine: "- `/memory [sync|retry]`：查看长期记忆状态/配额，或立即提炼同步",
+    requiresMemory: true,
+  },
+  {
+    command: "forget",
+    description: "按关键词级联遗忘长期记忆",
+    helpLine: "- `/forget <关键词>`：级联删除匹配到的长期记忆",
+    requiresMemory: true,
+  },
+];
+
+/**
+ * Build Telegram Bot API `setMyCommands` payload dynamically from runtime capabilities.
+ */
+export function buildTelegramBotCommands(options?: {
+  memoryEnabled?: boolean;
+  unboundOnly?: boolean;
+}): TelegramBotCommandSpec[] {
+  const memoryEnabled = options?.memoryEnabled ?? false;
+  const unboundOnly = options?.unboundOnly ?? false;
+  return SLASH_COMMAND_SPECS.filter((spec) => {
+    if (unboundOnly && !spec.availableWhenUnbound) return false;
+    if (spec.requiresMemory && !memoryEnabled) return false;
+    return true;
+  }).map((spec) => ({
+    command: spec.command,
+    description: spec.description,
+  }));
+}
+
 export interface SlashCommandDeps {
   repo: HatoRepository;
   listModelSlots(): ModelSlotView[];
@@ -30,6 +126,9 @@ export interface SlashCommandDeps {
   forceCompact(canonicalUserId: string): Promise<boolean>;
   resetContext?(canonicalUserId: string): Promise<ResetContextResult>;
   setHomeChannel?(): Promise<SetHomeResult>;
+  getMemoryStatus?(canonicalUserId: string): Promise<MemoryStatusView>;
+  syncMemory?(canonicalUserId: string, opts?: { includeDenied?: boolean }): Promise<RetainRunSummary>;
+  forgetMemory?(canonicalUserId: string, query: string): Promise<ForgetRunSummary>;
 }
 
 /**
@@ -50,13 +149,7 @@ export async function tryHandleSlashCommand(
   if (cmd === "/help") {
     return [
       "可用系统指令（不进入对话历史）：",
-      "- `/new`：清空当前对话上下文，开启新会话",
-      "- `/sethome`：将当前对话设为 Home Channel（主动关怀与定时通知默认入口）",
-      "- `/trace`：查看上一轮上下文、时间卡、协议与 Prompt Cache 命中",
-      "- `/model list`：查看当前 5 个槽位与可用模型",
-      "- `/model set <slot> <provider/model>`：热切换槽位模型",
-      "- `/reload`：热重载 `config/hato.toml` 与 `config/models.toml`",
-      "- `/compact`：手动触发一次热区上下文压缩",
+      ...SLASH_COMMAND_SPECS.map((spec) => spec.helpLine),
     ].join("\n");
   }
 
@@ -171,7 +264,8 @@ export async function tryHandleSlashCommand(
     }
     try {
       const res = await deps.setHomeChannel();
-      const channelLabel = res.channel === "tg" ? "Telegram" : "QQ";
+      const channelLabel =
+        res.channel === "tg" ? "Telegram" : res.channel === "qq" ? "QQ" : "Web";
       const extras = [
         res.addedToWhitelist ? "已加入主人白名单" : null,
         res.savedToConfig ? "并已持久化到 `config/hato.toml`" : "（已写入数据库运行态）",
@@ -183,6 +277,89 @@ export async function tryHandleSlashCommand(
       const msg = err instanceof Error ? err.message : String(err);
       return `设置 Home Channel 失败：${msg}`;
     }
+  }
+
+  if (cmd === "/memory") {
+    const sub = (args[0] ?? "status").toLowerCase();
+    if (sub === "sync" || sub === "retry") {
+      if (!deps.syncMemory) {
+        return "当前运行时暂未接入长期记忆同步能力。";
+      }
+      const res = await deps.syncMemory(canonicalUserId, { includeDenied: true });
+      const parts = [
+        `处理消息 ${res.processedMessages} 条`,
+        `提炼 ${res.extractedCount} 条`,
+        `重试 ${res.retriedCount} 条`,
+        `成功入库 ${res.syncedCount} 条`,
+      ];
+      if (res.degradedCount > 0) parts.push(`降级待补 ${res.degradedCount} 条`);
+      if (res.deniedCount > 0) parts.push(`配额受限 ${res.deniedCount} 条`);
+      if (res.errorCount > 0) parts.push(`失败 ${res.errorCount} 条`);
+      const errSuffix = res.lastErrorCode
+        ? `\n最近错误码: \`${res.lastErrorCode}\`${res.lastErrorMessage ? ` (${res.lastErrorMessage})` : ""}`
+        : res.lastErrorMessage
+          ? `\n最近错误: ${res.lastErrorMessage}`
+          : "";
+      return `记忆同步完成：${parts.join(" · ")}。${errSuffix}`;
+    }
+
+    const stats = deps.repo.getMemorySyncStats(canonicalUserId);
+    const recent = deps.repo.listMemorySyncRecords(canonicalUserId, { limit: 6 });
+    const statusView = deps.getMemoryStatus ? await deps.getMemoryStatus(canonicalUserId) : null;
+
+    const lines: string[] = ["【长期记忆状态】"];
+    if (statusView) {
+      lines.push(
+        `- 提供商: ${statusView.provider} (${statusView.configured ? "已就绪" : "未就绪/未启用"}) · 召回模式=${statusView.recallMode} · Curator=${statusView.curatorEnabled ? "开启" : "关闭"}`,
+      );
+      lines.push(
+        `- Vaults: persona=${statusView.vaultIds.persona ?? "(未绑定)"} · tech=${statusView.vaultIds.tech ?? "(未绑定)"}`,
+      );
+      if (statusView.usage) {
+        lines.push(
+          `- 本月用量: 建库 ${statusView.usage.createCredits.toFixed(1)} (${statusView.usage.createCount} 次) · 管线 ${statusView.usage.queryCredits.toFixed(1)} (${statusView.usage.queryCount} 次) · 余额扣费 ${statusView.usage.userPaidCredits.toFixed(1)}`,
+        );
+      }
+    }
+    lines.push(
+      `- 同步台账: synced=${stats.synced} · degraded=${stats.degraded} · denied=${stats.denied} · error=${stats.error} · erased=${stats.erased} · 待提炼消息=${stats.pendingRawMessages}`,
+    );
+
+    if (recent.length > 0) {
+      lines.push("", "【近期提炼记忆】");
+      for (const r of recent) {
+        const normalized = r.content.replace(/\s+/g, " ").trim();
+        const preview = normalized.length > 240 ? `${normalized.slice(0, 240)}…` : normalized;
+        lines.push(`- [${r.bank}/${r.status}] ${preview}`);
+      }
+    }
+    return lines.join("\n");
+  }
+
+  if (cmd === "/forget") {
+    const query = args.join(" ").trim();
+    if (!query) {
+      return "用法: `/forget <关键词或记忆ID>`";
+    }
+    if (!deps.forgetMemory) {
+      return "当前运行时暂未接入 `/forget` 级联遗忘能力。";
+    }
+    const res = await deps.forgetMemory(canonicalUserId, query);
+    if (res.matchedCount === 0) {
+      return `未在记忆台账中找到包含 "${query}" 的记录。`;
+    }
+    const detail = [
+      `匹配 ${res.matchedCount} 条`,
+      `本地清除 ${res.erasedLocalCount} 条`,
+      `远程删除 ${res.erasedRemoteCount} 条`,
+    ];
+    if (res.alreadyErasedCount > 0) detail.push(`远程已删 ${res.alreadyErasedCount} 条`);
+    if (res.missingRemoteCount > 0) detail.push(`远程缺失 ${res.missingRemoteCount} 条`);
+    if (res.unmappedCount > 0) detail.push(`历史未映射 ${res.unmappedCount} 条`);
+    if (res.failedCount > 0) detail.push(`失败 ${res.failedCount} 条`);
+
+    const errSuffix = res.errors.length > 0 ? `\n异常提示: ${res.errors.join("; ")}` : "";
+    return `遗忘处理完成：${detail.join(" · ")}。${errSuffix}`;
   }
 
   return null;

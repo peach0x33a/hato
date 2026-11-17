@@ -17,6 +17,142 @@ export interface ComputedTurnMetrics {
   e2eTps: number | null;
 }
 
+export type TraceStepRecord =
+  | {
+      kind: "assistant";
+      step: number;
+      text: string;
+      thinking?: string;
+      toolCalls: Array<{ id: string; name: string; args: unknown }>;
+      stopReason?: string;
+      tokens?: {
+        input: number;
+        output: number;
+        cacheRead: number;
+        cacheWrite: number;
+      };
+    }
+  | {
+      kind: "tool";
+      step: number;
+      toolCallId?: string;
+      name: string;
+      args?: unknown;
+      output: string;
+      isError?: boolean;
+    };
+
+function clipTraceText(text: string, maxChars: number): string {
+  if (text.length <= maxChars) return text;
+  return `${text.slice(0, maxChars)}\n…(已截断，共 ${text.length} 字符)`;
+}
+
+function formatToolContent(content: unknown): string {
+  if (typeof content === "string") return clipTraceText(content.trim(), 4000);
+  if (!Array.isArray(content)) return "";
+  const parts: string[] = [];
+  for (const item of content) {
+    if (!item || typeof item !== "object") continue;
+    const rec = item as { type?: unknown; text?: unknown };
+    if (rec.type === "text" && typeof rec.text === "string" && rec.text.trim()) {
+      parts.push(rec.text.trim());
+    } else if (rec.type === "image") {
+      parts.push("[截图/图片内容]");
+    }
+  }
+  return clipTraceText(parts.join("\n"), 4000);
+}
+
+/**
+ * Extracts chronological assistant outputs (thinking + text + requested tools) and tool results
+ * from an Agent message sequence for DSH-style trajectory inspection.
+ */
+export function extractTraceSteps(messages: readonly unknown[]): TraceStepRecord[] {
+  const steps: TraceStepRecord[] = [];
+  const pendingArgsById = new Map<string, unknown>();
+  let stepNo = 0;
+
+  for (const raw of messages) {
+    if (!raw || typeof raw !== "object") continue;
+    const msg = raw as {
+      role?: unknown;
+      content?: unknown;
+      stopReason?: unknown;
+      usage?: { input?: number; output?: number; cacheRead?: number; cacheWrite?: number };
+      toolCallId?: unknown;
+      toolName?: unknown;
+      isError?: unknown;
+    };
+
+    if (msg.role === "assistant" && Array.isArray(msg.content)) {
+      const textParts: string[] = [];
+      const thinkingParts: string[] = [];
+      const toolCalls: Array<{ id: string; name: string; args: unknown }> = [];
+
+      for (const block of msg.content) {
+        if (!block || typeof block !== "object") continue;
+        const b = block as {
+          type?: unknown;
+          text?: unknown;
+          thinking?: unknown;
+          id?: unknown;
+          name?: unknown;
+          arguments?: unknown;
+        };
+        if (b.type === "text" && typeof b.text === "string" && b.text) {
+          textParts.push(b.text);
+        } else if (b.type === "thinking" && typeof b.thinking === "string" && b.thinking) {
+          thinkingParts.push(b.thinking);
+        } else if (b.type === "toolCall" && typeof b.name === "string") {
+          const id = typeof b.id === "string" ? b.id : "";
+          const args = b.arguments ?? {};
+          if (id) pendingArgsById.set(id, args);
+          toolCalls.push({ id, name: b.name, args });
+        }
+      }
+
+      stepNo += 1;
+      steps.push({
+        kind: "assistant",
+        step: stepNo,
+        text: clipTraceText(textParts.join("").trim(), 12000),
+        ...(thinkingParts.length > 0
+          ? { thinking: clipTraceText(thinkingParts.join("\n").trim(), 8000) }
+          : {}),
+        toolCalls,
+        ...(typeof msg.stopReason === "string" ? { stopReason: msg.stopReason } : {}),
+        ...(msg.usage
+          ? {
+              tokens: {
+                input: Number(msg.usage.input ?? 0),
+                output: Number(msg.usage.output ?? 0),
+                cacheRead: Number(msg.usage.cacheRead ?? 0),
+                cacheWrite: Number(msg.usage.cacheWrite ?? 0),
+              },
+            }
+          : {}),
+      });
+    } else if (msg.role === "toolResult") {
+      const toolCallId = typeof msg.toolCallId === "string" ? msg.toolCallId : undefined;
+      const name = typeof msg.toolName === "string" ? msg.toolName : "tool";
+      const output = formatToolContent(msg.content);
+      const args = toolCallId ? pendingArgsById.get(toolCallId) : undefined;
+      stepNo += 1;
+      steps.push({
+        kind: "tool",
+        step: stepNo,
+        ...(toolCallId ? { toolCallId } : {}),
+        name,
+        ...(args !== undefined ? { args } : {}),
+        output,
+        ...(msg.isError ? { isError: true } : {}),
+      });
+    }
+  }
+
+  return steps;
+}
+
 export interface TurnTraceStatRow {
   id: string;
   canonicalUserId: string;

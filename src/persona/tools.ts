@@ -1,15 +1,27 @@
 import type { AgentTool } from "@earendil-works/pi-agent-core";
 import { arr, bool, num, obj, oneOf, opt, str } from "@earendil-works/pi-schema";
 import type { BrowserRuntime } from "../browser/runtime.js";
-import { resolveTavilySearchConfig, resolveWebFetchConfig, type HatoConfig } from "../config/app.js";
+import {
+  resolveMemoryRecallConfig,
+  resolveTavilySearchConfig,
+  resolveWebFetchConfig,
+  type HatoConfig,
+} from "../config/app.js";
 import type { ScopedProxyRouter } from "../config/proxy.js";
 import type { HatoRepository } from "../db/repo.js";
+import type { MemoryRecallItem, MemoryStore } from "../memory/store.js";
+import { formatLocalDateTime } from "../time/clock.js";
 import {
   evaluateSafeMath,
   runDateMath,
   runInspectTickets,
   runListSchedules,
 } from "./microtools-core.js";
+import {
+  runSelfConfigAction,
+  type SelfConfigAction,
+  type SelfConfigDeps,
+} from "./self-config.js";
 import { runWebFetch } from "./web-fetch.js";
 import { runTavilySearch } from "./web-search.js";
 
@@ -56,8 +68,50 @@ const BrowserTaskParams = obj({
   resume: opt(bool({ description: "Set true when continuing after user takeover/login/captcha" })),
 });
 
+const SearchPastSessionsParams = obj({
+  query: opt(str({ description: "Optional keyword to match in archived session titles, summaries, or messages" })),
+  session_id: opt(str({ description: "Optional archived session ID to read messages from" })),
+  limit: opt(num({ description: "Maximum number of sessions or matching messages to return (1-30)" })),
+});
+
+const RecallMemoryParams = obj({
+  query: str({ description: "Semantic query or question to recall from long-term memory" }),
+  bank: opt(
+    oneOf(["persona", "tech", "all"], {
+      description: "Which memory bank to search: persona (life/preferences), tech (dev/env), or all",
+    }),
+  ),
+  limit: opt(num({ description: "Maximum number of memories per bank (1-20)" })),
+});
+
+const SelfConfigParams = obj({
+  action: oneOf([
+    "inspect",
+    "patch_hato",
+    "set_model_slot",
+    "edit_soul",
+    "upsert_prompt_block",
+    "delete_prompt_block",
+    "set_relationship_fact",
+    "delete_relationship_fact",
+  ]),
+  config_patch_json: opt(
+    str({
+      description:
+        "JSON object string for patch_hato, e.g. '{\"gateway\":{\"debounce_ms\":2500}}' or '{\"prompts\":{\"order\":[\"soul\",\"system\",\"blocks\"]}}'",
+    }),
+  ),
+  slot: opt(str({ description: "Model slot name for set_model_slot (persona/router/curator/worker/hindsight_llm)" })),
+  target: opt(str({ description: "Qualified model target <provider>/<model_id> for set_model_slot" })),
+  content: opt(str({ description: "Full text content for edit_soul or upsert_prompt_block" })),
+  append_note: opt(str({ description: "Single new rule/note line to append to soul.md in edit_soul" })),
+  block_name: opt(str({ description: "Block filename under blocks/ for upsert_prompt_block or delete_prompt_block (e.g. 02-rules.md)" })),
+  fact_key: opt(str({ description: "Key name for set_relationship_fact or delete_relationship_fact" })),
+  fact_value: opt(str({ description: "Value text for set_relationship_fact" })),
+});
+
 /**
- * Zero-side-effect, read-only micro-tools + isolated web/browser capabilities exposed to Persona.
+ * Zero-side-effect, read-only micro-tools + isolated web/browser + guarded self-config capabilities exposed to Persona.
  */
 export function createPersonaReadOnlyTools(params: {
   repo: HatoRepository;
@@ -66,6 +120,9 @@ export function createPersonaReadOnlyTools(params: {
   getHatoConfig: () => HatoConfig;
   proxyRouter: ScopedProxyRouter;
   browserRuntime?: BrowserRuntime;
+  getMemoryStore?: () => MemoryStore | null;
+  selfConfigDeps?: SelfConfigDeps;
+  onMemoryRecalled?: (ids: string[]) => void;
   onBeforeToolExecute?: (toolName: string, input: unknown) => Promise<void>;
 }): AgentTool<any>[] {
   const calcTool: AgentTool<typeof CalcParams> = {
@@ -122,6 +179,71 @@ export function createPersonaReadOnlyTools(params: {
       return {
         content: [{ type: "text", text }],
         details: { text },
+      };
+    },
+  };
+
+  const searchPastSessionsTool: AgentTool<typeof SearchPastSessionsParams> = {
+    name: "search_past_sessions",
+    label: "检索历史会话",
+    description:
+      "只读检索或查看已经被 /new 清空归档的历史会话（Session）及其对话内容。当用户提及之前清空前的讨论、往日聊天信息或要求翻看旧会话时调用；日常闲聊不要主动推销此工具。",
+    parameters: SearchPastSessionsParams,
+    async execute(_toolCallId, input) {
+      const tz = params.getTimezone();
+      const result = params.repo.searchPastSessions(params.canonicalUserId, {
+        query: input.query,
+        sessionId: input.session_id,
+        limit: input.limit,
+      });
+
+      if (result.sessions.length === 0 && result.matches.length === 0) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: input.session_id
+                ? `未找到 ID 为 ${input.session_id} 的已归档历史会话或匹配消息。`
+                : input.query
+                  ? `未在已归档历史会话中找到包含 "${input.query}" 的消息或会话。`
+                  : "目前尚无通过 /new 归档的历史会话记录。",
+            },
+          ],
+          details: { sessionCount: 0, matchCount: 0 },
+        };
+      }
+
+      const lines: string[] = [];
+      if (result.sessions.length > 0) {
+        lines.push(`【历史会话列表 (${result.sessions.length})】`);
+        for (const s of result.sessions) {
+          const startStr = formatLocalDateTime(s.startedAt, tz).compactStamp;
+          const endStr = formatLocalDateTime(s.endedAt, tz).compactStamp;
+          const summarySuffix = s.summaryText ? ` | 摘要: ${s.summaryText.slice(0, 140)}` : "";
+          lines.push(
+            `- [${s.id}] ${s.title} (${startStr} ~ ${endStr}, 消息 ${s.messageCount} 条)${summarySuffix}`,
+          );
+        }
+      }
+
+      if (result.matches.length > 0) {
+        lines.push(`【匹配历史消息 (${result.matches.length})】`);
+        for (const m of result.matches) {
+          const stamp = formatLocalDateTime(m.createdAt, tz).compactStamp;
+          const roleLabel =
+            m.role === "user" ? "用户" : m.role === "assistant" ? "助手" : "事件";
+          const clipped = m.content.replace(/\s+/g, " ").trim().slice(0, 260);
+          lines.push(`- [${m.sessionId} · ${stamp}] ${roleLabel}: ${clipped}`);
+        }
+      }
+
+      const text = lines.join("\n");
+      return {
+        content: [{ type: "text", text }],
+        details: {
+          sessionCount: result.sessions.length,
+          matchCount: result.matches.length,
+        },
       };
     },
   };
@@ -192,9 +314,107 @@ export function createPersonaReadOnlyTools(params: {
     dateMathTool,
     inspectTicketsTool,
     listSchedulesTool,
+    searchPastSessionsTool,
     webSearchTool,
     webFetchTool,
   ];
+
+  if (params.getMemoryStore) {
+    const getStore = params.getMemoryStore;
+    const recallMemoryTool: AgentTool<typeof RecallMemoryParams> = {
+      name: "recall_memory",
+      label: "检索长期记忆",
+      description:
+        "只读检索用户的长期记忆（支持 persona 生活偏好记忆与 tech 技术环境记忆）。当需要回忆往事、个人习惯、历史约定或过往技术背景时主动调用；日常普通闲聊无需强行调用。",
+      parameters: RecallMemoryParams,
+      async execute(_toolCallId, input) {
+        const recallCfg = resolveMemoryRecallConfig(params.getHatoConfig());
+        if (recallCfg.mode === "off") {
+          return {
+            content: [{ type: "text", text: "长期记忆召回当前已在配置中关闭（memory.recall.mode = off）。" }],
+            details: { ok: false, count: 0 },
+          };
+        }
+
+        const store = getStore();
+        if (!store || !store.isConfigured()) {
+          return {
+            content: [{ type: "text", text: "长期记忆服务当前未配置或未启用。" }],
+            details: { ok: false, count: 0 },
+          };
+        }
+
+        const query = input.query.trim();
+        if (!query) {
+          return {
+            content: [{ type: "text", text: "检索问题不能为空。" }],
+            details: { ok: false, count: 0 },
+          };
+        }
+
+        const limit = Math.max(1, Math.min(20, Math.round(input.limit ?? recallCfg.maxResults)));
+        const bankChoice = input.bank ?? "persona";
+        const banks = bankChoice === "all" ? (["persona", "tech"] as const) : ([bankChoice] as const);
+
+        const responses = await Promise.all(
+          banks.map((bank) => store.recall(params.canonicalUserId, { bank, query, limit })),
+        );
+
+        const errorNotices: string[] = [];
+        const recalledItems: MemoryRecallItem[] = [];
+        const fallbackItems: MemoryRecallItem[] = [];
+        let degraded = false;
+
+        for (const res of responses) {
+          if (res.degraded) degraded = true;
+          if (!res.ok && res.errorCode) {
+            errorNotices.push(`[${res.bank}] 配额受限 (${res.errorCode}): ${res.errorMessage ?? "请检查余额或地区配置"}`);
+          } else if (!res.ok && res.errorMessage) {
+            errorNotices.push(`[${res.bank}] 召回异常: ${res.errorMessage}`);
+          }
+          recalledItems.push(...res.items);
+          if (res.fallbackMessages) {
+            fallbackItems.push(...res.fallbackMessages);
+          }
+        }
+
+        const deduped = dedupeMemoryItems(recalledItems).slice(0, limit * banks.length);
+        if (deduped.length > 0) {
+          params.onMemoryRecalled?.(deduped.map((i) => `${i.bank}:${i.id}`));
+        }
+
+        const lines: string[] = [];
+        if (errorNotices.length > 0) {
+          lines.push(`【记忆服务状态提示】\n${errorNotices.join("\n")}`);
+        }
+        if (deduped.length > 0) {
+          lines.push(`【召回记忆 (${deduped.length})】`);
+          for (const item of deduped) {
+            const stamp = item.createdAt ? ` · ${item.createdAt.slice(0, 10)}` : "";
+            lines.push(`- [${item.bank}:${item.id}${stamp}] ${item.content}`);
+          }
+        } else if (degraded && fallbackItems.length > 0) {
+          lines.push("【记忆引擎处于降级模式，返回近期原始消息兜底】");
+          for (const item of dedupeMemoryItems(fallbackItems).slice(0, limit)) {
+            lines.push(`- [${item.bank}:fallback] ${item.content}`);
+          }
+        } else if (errorNotices.length === 0) {
+          lines.push(`未在 ${bankChoice} 记忆库中检索到与 "${query}" 相关的长期记忆。`);
+        }
+
+        return {
+          content: [{ type: "text", text: lines.join("\n") }],
+          details: {
+            ok: errorNotices.length === 0,
+            degraded,
+            count: deduped.length,
+            recalledIds: deduped.map((i) => `${i.bank}:${i.id}`),
+          },
+        };
+      },
+    };
+    tools.push(recallMemoryTool);
+  }
 
   if (params.browserRuntime) {
     const runtime = params.browserRuntime;
@@ -223,6 +443,71 @@ export function createPersonaReadOnlyTools(params: {
     tools.push(browserTaskTool);
   }
 
+  if (params.selfConfigDeps) {
+    const scDeps = params.selfConfigDeps;
+    const selfConfigTool: AgentTool<typeof SelfConfigParams> = {
+      name: "self_config",
+      label: "自我配置管理",
+      description:
+        "安全查看或修改 Hato 自身的运行配置（hato.toml 白名单项、prompts.order 提示词顺序、模型槽位、人设 soul.md、自定义提示词块 blocks/*.md 与固定关系约定）。仅在用户明确要求调整配置或你的设定时调用。",
+      parameters: SelfConfigParams,
+      async execute(_toolCallId, input) {
+        let parsedPatch: Record<string, unknown> | undefined;
+        if (input.config_patch_json !== undefined) {
+          try {
+            const raw = JSON.parse(input.config_patch_json) as unknown;
+            if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+              return {
+                content: [{ type: "text", text: "config_patch_json 必须是合法的 JSON 对象。" }],
+                details: { ok: false },
+              };
+            }
+            parsedPatch = raw as Record<string, unknown>;
+          } catch (err) {
+            return {
+              content: [
+                {
+                  type: "text",
+                  text: `config_patch_json JSON 解析失败: ${err instanceof Error ? err.message : String(err)}`,
+                },
+              ],
+              details: { ok: false },
+            };
+          }
+        }
+
+        try {
+          const out = await runSelfConfigAction(scDeps, {
+            action: input.action as SelfConfigAction,
+            config_patch: parsedPatch,
+            slot: input.slot,
+            target: input.target,
+            content: input.content,
+            append_note: input.append_note,
+            block_name: input.block_name,
+            fact_key: input.fact_key,
+            fact_value: input.fact_value,
+          });
+          return {
+            content: [{ type: "text", text: out.summary }],
+            details: out.details,
+          };
+        } catch (err) {
+          return {
+            content: [
+              {
+                type: "text",
+                text: `自我配置执行失败: ${err instanceof Error ? err.message : String(err)}`,
+              },
+            ],
+            details: { ok: false },
+          };
+        }
+      },
+    };
+    tools.push(selfConfigTool);
+  }
+
   if (!params.onBeforeToolExecute) {
     return tools;
   }
@@ -235,4 +520,16 @@ export function createPersonaReadOnlyTools(params: {
       return tool.execute(toolCallId, input, signal, onUpdate);
     },
   }));
+}
+
+function dedupeMemoryItems(items: readonly MemoryRecallItem[]): MemoryRecallItem[] {
+  const seen = new Set<string>();
+  const out: MemoryRecallItem[] = [];
+  for (const item of items) {
+    const key = `${item.bank}:${item.id}:${item.content}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(item);
+  }
+  return out;
 }

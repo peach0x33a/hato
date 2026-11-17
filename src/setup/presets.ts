@@ -79,6 +79,9 @@ export function createDefaultHatoConfig(): HatoConfig {
       workspaces_dir: "./data/workspaces",
       prompts_dir: "./prompts",
     },
+    prompts: {
+      order: ["blocks", "system", "soul"],
+    },
     owner: {
       canonical_user_id: "owner",
       timezone: getSystemTimezone(),
@@ -124,9 +127,14 @@ export function createDefaultHatoConfig(): HatoConfig {
         xvfb: "auto",
         model_slot: "persona",
       },
+      console: {
+        enabled: true,
+        host: "127.0.0.1",
+        port: 3820,
+      },
     },
     gateway: {
-      debounce_ms: 2000,
+      debounce_ms: 3000,
       retry: {
         max_retries: 3,
         initial_delay_ms: 500,
@@ -168,6 +176,29 @@ export function createDefaultHatoConfig(): HatoConfig {
       },
     },
     memory: {
+      provider: "none",
+      recall: {
+        mode: "hybrid",
+        max_results: 6,
+        min_query_chars: 4,
+      },
+      curator: {
+        enabled: true,
+        idle_retain_after_minutes: 10,
+        batch_message_threshold: 12,
+        max_batch_messages: 24,
+      },
+      memoryecho: {
+        enabled: false,
+        base_url: "https://api.artific.social",
+        api_key_env: "MEMORYECHO_API_KEY",
+        timeout_ms: 15_000,
+        auto_create_vaults: true,
+        vaults: {
+          persona: "",
+          tech: "",
+        },
+      },
       hindsight: {
         base_url: "http://127.0.0.1:8888",
         embedding_dimensions: 1024,

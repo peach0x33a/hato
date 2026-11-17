@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { MessageDebouncer } from "../src/gateway/debouncer.js";
+import { MessageDebouncer, mergeInboundBatches } from "../src/gateway/debouncer.js";
 import type { InboundBatch } from "../src/gateway/types.js";
 
 test("MessageDebouncer coalesces rapid messages into one batch", async () => {
@@ -60,4 +60,37 @@ test("MessageDebouncer coalesces rapid messages into one batch", async () => {
   assert.equal(flushed.length, 1);
 
   debouncer.dispose();
+});
+
+test("mergeInboundBatches coalesces queued batches from the same user into one turn", () => {
+  const merged = mergeInboundBatches([
+    {
+      canonicalUserId: "owner",
+      originChannel: "tg",
+      originPlatformUserId: "1001",
+      platformMsgIds: ["m10"],
+      latestPlatformMsgId: "m10",
+      combinedText: "好",
+      attachments: [],
+      firstTimestampMs: 1000,
+      lastTimestampMs: 1000,
+    },
+    {
+      canonicalUserId: "owner",
+      originChannel: "tg",
+      originPlatformUserId: "1001",
+      platformMsgIds: ["m11"],
+      latestPlatformMsgId: "m11",
+      combinedText: "你别催了",
+      attachments: [],
+      firstTimestampMs: 3200,
+      lastTimestampMs: 3200,
+    },
+  ]);
+
+  assert.equal(merged.combinedText, "好\n你别催了");
+  assert.deepEqual(merged.platformMsgIds, ["m10", "m11"]);
+  assert.equal(merged.latestPlatformMsgId, "m11");
+  assert.equal(merged.firstTimestampMs, 1000);
+  assert.equal(merged.lastTimestampMs, 3200);
 });

@@ -1,8 +1,10 @@
 import { randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
-import { and, asc, desc, eq, gt, gte, type SQL } from "drizzle-orm";
+import { and, asc, desc, eq, gt, gte, inArray, lte, ne, or, type SQL } from "drizzle-orm";
 import type { HatoDb } from "./client.js";
-import { computeTurnMetrics } from "../stats/metrics.js";
+import { computeTurnMetrics, type TraceStepRecord } from "../stats/metrics.js";
 import {
+  chatSessions,
+  memorySyncRecords,
   openLoops,
   owners,
   rawMessages,
@@ -15,6 +17,18 @@ import {
   workingMemoryBlocks,
 } from "./schema.js";
 import type { ChannelName, InboundAttachment } from "../gateway/types.js";
+
+export interface ChatSessionRecord {
+  id: string;
+  canonicalUserId: string;
+  title: string;
+  summaryText: string;
+  startedAt: number;
+  endedAt: number;
+  messageCount: number;
+  traceCount: number;
+  createdAt: number;
+}
 
 export interface RawMessageRecord {
   id: string;
@@ -37,6 +51,35 @@ export interface WorkingMemoryState {
   draftUntilMsgId: string | null;
   draftUntilTs: number | null;
   retainedUntilMsgId: string | null;
+}
+
+export type MemorySyncBank = "persona" | "tech";
+export type MemorySyncStatus = "synced" | "degraded" | "denied" | "error" | "erased";
+
+export interface MemorySyncRecordView {
+  id: string;
+  canonicalUserId: string;
+  provider: string;
+  bank: MemorySyncBank;
+  vaultId: string | null;
+  sourceMsgIds: string[];
+  content: string;
+  externalMemoryId: string | null;
+  status: MemorySyncStatus;
+  errorCode: string | null;
+  errorMessage: string | null;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface MemorySyncStats {
+  total: number;
+  synced: number;
+  degraded: number;
+  denied: number;
+  error: number;
+  erased: number;
+  pendingRawMessages: number;
 }
 
 export class HatoRepository {
@@ -281,18 +324,91 @@ export class HatoRepository {
       .run();
   }
 
+  getSessionResetAt(canonicalUserId: string): number | null {
+    const resetMeta = this.getRuntimeSetting<{ resetAt?: number }>(
+      `session_reset_at:${canonicalUserId}`,
+    );
+    return typeof resetMeta?.resetAt === "number" ? resetMeta.resetAt : null;
+  }
+
   /**
-   * Clear current working context (/new): clears rolling summary and drafts and
-   * advances compactedUntilTs past existing messages while preserving audit history.
+   * Clear current working context (/new): archives the finished segment as a read-only
+   * session for history lookup, clears rolling summary and drafts, and advances
+   * compactedUntilTs past existing messages while preserving audit history.
    */
   resetWorkingContext(
     canonicalUserId: string,
     resetAtMs = Date.now(),
-  ): { clearedHotMessages: number; hadSummary: boolean } {
+  ): { clearedHotMessages: number; hadSummary: boolean; archivedSessionId: string | null } {
     const state = this.getWorkingMemory(canonicalUserId);
     const hot = this.getHotMessages(canonicalUserId, state.compactedUntilTs);
+    const prevResetAt = this.getSessionResetAt(canonicalUserId) ?? 0;
     const lastAny = this.getLastAnyMessage(canonicalUserId);
-    const cutoffTs = Math.max(resetAtMs, lastAny?.createdAt ?? 0, state.compactedUntilTs);
+    const lastTrace = this.getLatestTurnTrace(canonicalUserId);
+    const cutoffTs = Math.max(
+      resetAtMs,
+      lastAny?.createdAt ?? 0,
+      lastTrace?.createdAt ?? 0,
+      state.compactedUntilTs,
+    );
+
+    const sessionMsgs = this.db
+      .select()
+      .from(rawMessages)
+      .where(
+        and(
+          eq(rawMessages.canonicalUserId, canonicalUserId),
+          gt(rawMessages.createdAt, prevResetAt),
+          lte(rawMessages.createdAt, cutoffTs),
+        ),
+      )
+      .orderBy(asc(rawMessages.createdAt), asc(rawMessages.id))
+      .all();
+
+    const sessionTraces = this.db
+      .select()
+      .from(turnTraces)
+      .where(
+        and(
+          eq(turnTraces.canonicalUserId, canonicalUserId),
+          gt(turnTraces.createdAt, prevResetAt),
+          lte(turnTraces.createdAt, cutoffTs),
+        ),
+      )
+      .orderBy(asc(turnTraces.createdAt))
+      .all();
+
+    let archivedSessionId: string | null = null;
+    if (sessionMsgs.length > 0 || sessionTraces.length > 0 || state.summaryText.trim().length > 0) {
+      const firstUserMsg = sessionMsgs.find((m) => m.role === "user" && m.content.trim());
+      const rawTitle =
+        firstUserMsg?.content ??
+        sessionTraces.find((t) => t.userPreview)?.userPreview ??
+        state.summaryText ??
+        "历史会话";
+      const normalizedTitle = rawTitle.replace(/\s+/g, " ").trim().slice(0, 36) || "历史会话";
+      const minMsgTs = sessionMsgs[0]?.createdAt ?? Infinity;
+      const minTraceTs = sessionTraces[0]?.createdAt ?? Infinity;
+      const startedAt = Number.isFinite(Math.min(minMsgTs, minTraceTs))
+        ? Math.min(minMsgTs, minTraceTs)
+        : cutoffTs;
+
+      archivedSessionId = `sess_${cutoffTs}_${randomUUID().slice(0, 6)}`;
+      this.db
+        .insert(chatSessions)
+        .values({
+          id: archivedSessionId,
+          canonicalUserId,
+          title: normalizedTitle,
+          summaryText: state.summaryText.trim(),
+          startedAt,
+          endedAt: cutoffTs,
+          messageCount: sessionMsgs.length,
+          traceCount: sessionTraces.length,
+          createdAt: Date.now(),
+        })
+        .run();
+    }
 
     this.db
       .update(workingMemoryBlocks)
@@ -313,6 +429,150 @@ export class HatoRepository {
     return {
       clearedHotMessages: hot.length,
       hadSummary: state.summaryText.trim().length > 0,
+      archivedSessionId,
+    };
+  }
+
+  listChatSessions(canonicalUserId: string, limit = 40): ChatSessionRecord[] {
+    return this.db
+      .select()
+      .from(chatSessions)
+      .where(eq(chatSessions.canonicalUserId, canonicalUserId))
+      .orderBy(desc(chatSessions.endedAt), desc(chatSessions.createdAt))
+      .limit(limit)
+      .all();
+  }
+
+  getChatSession(sessionId: string): ChatSessionRecord | null {
+    return (
+      this.db.select().from(chatSessions).where(eq(chatSessions.id, sessionId)).get() ?? null
+    );
+  }
+
+  getSessionMessages(
+    canonicalUserId: string,
+    sessionId: string,
+  ): { session: ChatSessionRecord; messages: RawMessageRecord[] } | null {
+    const session = this.getChatSession(sessionId);
+    if (!session || session.canonicalUserId !== canonicalUserId) return null;
+
+    const rows = this.db
+      .select()
+      .from(rawMessages)
+      .where(
+        and(
+          eq(rawMessages.canonicalUserId, canonicalUserId),
+          gte(rawMessages.createdAt, session.startedAt),
+          lte(rawMessages.createdAt, session.endedAt),
+        ),
+      )
+      .orderBy(asc(rawMessages.createdAt), asc(rawMessages.id))
+      .all();
+
+    return {
+      session,
+      messages: rows.map(toRawMessageRecord),
+    };
+  }
+
+  searchPastSessions(
+    canonicalUserId: string,
+    opts?: { query?: string; sessionId?: string; limit?: number },
+  ): {
+    sessions: ChatSessionRecord[];
+    matches: Array<{
+      sessionId: string;
+      sessionTitle: string;
+      messageId: string;
+      role: RawMessageRecord["role"];
+      channel: ChannelName;
+      content: string;
+      createdAt: number;
+    }>;
+  } {
+    const limit = Math.min(30, Math.max(1, opts?.limit ?? 10));
+    const sessions = this.listChatSessions(canonicalUserId, 50);
+    if (sessions.length === 0) {
+      return { sessions: [], matches: [] };
+    }
+
+    const q = opts?.query?.trim().toLowerCase() ?? "";
+
+    if (opts?.sessionId?.trim()) {
+      const target = this.getSessionMessages(canonicalUserId, opts.sessionId.trim());
+      if (!target) {
+        return { sessions: [], matches: [] };
+      }
+      const filteredMsgs = (q
+        ? target.messages.filter((m) => m.content.toLowerCase().includes(q))
+        : target.messages
+      ).slice(0, limit);
+      return {
+        sessions: [target.session],
+        matches: filteredMsgs.map((m) => ({
+          sessionId: target.session.id,
+          sessionTitle: target.session.title,
+          messageId: m.id,
+          role: m.role,
+          channel: m.channel,
+          content: m.content,
+          createdAt: m.createdAt,
+        })),
+      };
+    }
+
+    if (!q) {
+      return { sessions: sessions.slice(0, limit), matches: [] };
+    }
+
+    const matchedSessions = sessions.filter(
+      (s) =>
+        s.title.toLowerCase().includes(q) || s.summaryText.toLowerCase().includes(q),
+    );
+    const maxArchivedEnd = Math.max(...sessions.map((s) => s.endedAt));
+    const archivedMsgs = this.db
+      .select()
+      .from(rawMessages)
+      .where(
+        and(
+          eq(rawMessages.canonicalUserId, canonicalUserId),
+          lte(rawMessages.createdAt, maxArchivedEnd),
+        ),
+      )
+      .orderBy(desc(rawMessages.createdAt))
+      .all();
+
+    const matches: Array<{
+      sessionId: string;
+      sessionTitle: string;
+      messageId: string;
+      role: RawMessageRecord["role"];
+      channel: ChannelName;
+      content: string;
+      createdAt: number;
+    }> = [];
+
+    for (const row of archivedMsgs) {
+      if (!row.content.toLowerCase().includes(q)) continue;
+      const owning = sessions.find(
+        (s) => row.createdAt >= s.startedAt && row.createdAt <= s.endedAt,
+      );
+      if (!owning) continue;
+      matches.push({
+        sessionId: owning.id,
+        sessionTitle: owning.title,
+        messageId: row.id,
+        role: row.role as RawMessageRecord["role"],
+        channel: row.channel as ChannelName,
+        content: row.content,
+        createdAt: row.createdAt,
+      });
+      if (matches.length >= limit) break;
+    }
+
+    return {
+      sessions: matchedSessions.slice(0, limit),
+      matches,
     };
   }
 
@@ -339,6 +599,41 @@ export class HatoRepository {
       .from(relationshipFacts)
       .orderBy(asc(relationshipFacts.key))
       .all();
+  }
+
+  upsertRelationshipFact(key: string, value: string, sourceMsgId?: string | null): void {
+    const cleanKey = key.trim();
+    const cleanValue = value.trim();
+    if (!cleanKey || !cleanValue) {
+      throw new Error("relationship_facts key and value cannot be empty");
+    }
+    this.db
+      .insert(relationshipFacts)
+      .values({
+        key: cleanKey,
+        value: cleanValue,
+        sourceMsgId: sourceMsgId ?? null,
+        updatedAt: Date.now(),
+      })
+      .onConflictDoUpdate({
+        target: relationshipFacts.key,
+        set: {
+          value: cleanValue,
+          sourceMsgId: sourceMsgId ?? null,
+          updatedAt: Date.now(),
+        },
+      })
+      .run();
+  }
+
+  deleteRelationshipFact(key: string): boolean {
+    const cleanKey = key.trim();
+    if (!cleanKey) return false;
+    const res = this.db
+      .delete(relationshipFacts)
+      .where(eq(relationshipFacts.key, cleanKey))
+      .run();
+    return res.changes > 0;
   }
 
   listOpenLoops(canonicalUserId: string, limit = 20) {
@@ -485,6 +780,7 @@ export class HatoRepository {
     recalledIds: string[];
     timeCardText: string;
     toolCalls: string[];
+    steps?: TraceStepRecord[];
     latencyMs: number;
   }): string {
     const id = `tr_${Date.now()}_${randomUUID().slice(0, 6)}`;
@@ -518,6 +814,7 @@ export class HatoRepository {
         recalledIdsJson: JSON.stringify(trace.recalledIds),
         timeCardText: trace.timeCardText,
         toolCallsJson: JSON.stringify(trace.toolCalls),
+        stepsJson: JSON.stringify(trace.steps ?? []),
         latencyMs: trace.latencyMs,
         createdAt: Date.now(),
       })
@@ -543,6 +840,8 @@ export class HatoRepository {
     provider?: string;
     modelId?: string;
     sinceMs?: number;
+    afterMs?: number;
+    untilMs?: number;
     limit?: number;
   }) {
     const conditions: SQL[] = [];
@@ -561,6 +860,12 @@ export class HatoRepository {
     if (typeof filter?.sinceMs === "number") {
       conditions.push(gte(turnTraces.createdAt, filter.sinceMs));
     }
+    if (typeof filter?.afterMs === "number") {
+      conditions.push(gt(turnTraces.createdAt, filter.afterMs));
+    }
+    if (typeof filter?.untilMs === "number") {
+      conditions.push(lte(turnTraces.createdAt, filter.untilMs));
+    }
 
     const base = this.db.select().from(turnTraces);
     const filtered = conditions.length > 0 ? base.where(and(...conditions)) : base;
@@ -571,6 +876,280 @@ export class HatoRepository {
     }
     return ordered.all();
   }
+
+  /**
+   * Fetch raw messages not yet retained by the Memory Curator in chronological order.
+   */
+  listMessagesPendingRetain(canonicalUserId: string, limit = 100): RawMessageRecord[] {
+    const state = this.getWorkingMemory(canonicalUserId);
+    let watermarkRow: { createdAt: number; id: string } | undefined;
+    if (state.retainedUntilMsgId) {
+      watermarkRow = this.db
+        .select({ createdAt: rawMessages.createdAt, id: rawMessages.id })
+        .from(rawMessages)
+        .where(
+          and(
+            eq(rawMessages.canonicalUserId, canonicalUserId),
+            eq(rawMessages.id, state.retainedUntilMsgId),
+          ),
+        )
+        .get();
+    }
+
+    const conditions: SQL[] = [eq(rawMessages.canonicalUserId, canonicalUserId)];
+    if (watermarkRow) {
+      conditions.push(
+        or(
+          gt(rawMessages.createdAt, watermarkRow.createdAt),
+          and(eq(rawMessages.createdAt, watermarkRow.createdAt), gt(rawMessages.id, watermarkRow.id)),
+        )!,
+      );
+    }
+
+    const rows = this.db
+      .select()
+      .from(rawMessages)
+      .where(and(...conditions))
+      .orderBy(asc(rawMessages.createdAt), asc(rawMessages.id))
+      .limit(Math.max(1, limit))
+      .all();
+
+    return rows.map(toRawMessageRecord);
+  }
+
+  markRetainedUntil(canonicalUserId: string, msgId: string): void {
+    this.getWorkingMemory(canonicalUserId);
+    this.db
+      .update(workingMemoryBlocks)
+      .set({
+        retainedUntilMsgId: msgId,
+        updatedAt: Date.now(),
+      })
+      .where(eq(workingMemoryBlocks.canonicalUserId, canonicalUserId))
+      .run();
+  }
+
+  insertMemorySyncRecord(params: {
+    canonicalUserId: string;
+    provider: string;
+    bank: MemorySyncBank;
+    vaultId?: string | null;
+    sourceMsgIds: string[];
+    content: string;
+    externalMemoryId?: string | null;
+    status: MemorySyncStatus;
+    errorCode?: string | null;
+    errorMessage?: string | null;
+  }): MemorySyncRecordView {
+    const now = Date.now();
+    const id = `mem_${now}_${randomUUID().slice(0, 8)}`;
+    this.db
+      .insert(memorySyncRecords)
+      .values({
+        id,
+        canonicalUserId: params.canonicalUserId,
+        provider: params.provider,
+        bank: params.bank,
+        vaultId: params.vaultId ?? null,
+        sourceMsgIdsJson: JSON.stringify(params.sourceMsgIds),
+        content: params.content,
+        externalMemoryId: params.externalMemoryId ?? null,
+        status: params.status,
+        errorCode: params.errorCode ?? null,
+        errorMessage: params.errorMessage ?? null,
+        createdAt: now,
+        updatedAt: now,
+      })
+      .run();
+
+    return {
+      id,
+      canonicalUserId: params.canonicalUserId,
+      provider: params.provider,
+      bank: params.bank,
+      vaultId: params.vaultId ?? null,
+      sourceMsgIds: params.sourceMsgIds,
+      content: params.content,
+      externalMemoryId: params.externalMemoryId ?? null,
+      status: params.status,
+      errorCode: params.errorCode ?? null,
+      errorMessage: params.errorMessage ?? null,
+      createdAt: now,
+      updatedAt: now,
+    };
+  }
+
+  updateMemorySyncRecord(
+    id: string,
+    patch: {
+      vaultId?: string | null;
+      externalMemoryId?: string | null;
+      status: MemorySyncStatus;
+      errorCode?: string | null;
+      errorMessage?: string | null;
+    },
+  ): void {
+    this.db
+      .update(memorySyncRecords)
+      .set({
+        ...(patch.vaultId !== undefined ? { vaultId: patch.vaultId } : {}),
+        ...(patch.externalMemoryId !== undefined ? { externalMemoryId: patch.externalMemoryId } : {}),
+        status: patch.status,
+        errorCode: patch.errorCode ?? null,
+        errorMessage: patch.errorMessage ?? null,
+        updatedAt: Date.now(),
+      })
+      .where(eq(memorySyncRecords.id, id))
+      .run();
+  }
+
+  listMemorySyncRecords(
+    canonicalUserId: string,
+    opts?: { bank?: MemorySyncBank; status?: MemorySyncStatus; includeErased?: boolean; limit?: number },
+  ): MemorySyncRecordView[] {
+    const conditions: SQL[] = [eq(memorySyncRecords.canonicalUserId, canonicalUserId)];
+    if (opts?.bank) {
+      conditions.push(eq(memorySyncRecords.bank, opts.bank));
+    }
+    if (opts?.status) {
+      conditions.push(eq(memorySyncRecords.status, opts.status));
+    } else if (!opts?.includeErased) {
+      conditions.push(ne(memorySyncRecords.status, "erased"));
+    }
+
+    const rows = this.db
+      .select()
+      .from(memorySyncRecords)
+      .where(and(...conditions))
+      .orderBy(desc(memorySyncRecords.createdAt))
+      .limit(Math.max(1, Math.min(200, opts?.limit ?? 30)))
+      .all();
+
+    return rows.map(toMemorySyncRecordView);
+  }
+
+  listRetryableMemorySyncRecords(
+    canonicalUserId: string,
+    opts?: { includeDenied?: boolean; limit?: number },
+  ): MemorySyncRecordView[] {
+    const statuses: MemorySyncStatus[] = opts?.includeDenied
+      ? ["degraded", "error", "denied"]
+      : ["degraded", "error"];
+    const rows = this.db
+      .select()
+      .from(memorySyncRecords)
+      .where(
+        and(
+          eq(memorySyncRecords.canonicalUserId, canonicalUserId),
+          inArray(memorySyncRecords.status, statuses),
+        ),
+      )
+      .orderBy(asc(memorySyncRecords.createdAt))
+      .limit(Math.max(1, Math.min(100, opts?.limit ?? 40)))
+      .all();
+
+    return rows.map(toMemorySyncRecordView);
+  }
+
+  searchMemorySyncRecords(
+    canonicalUserId: string,
+    query: string,
+    limit = 30,
+  ): MemorySyncRecordView[] {
+    const needle = query.trim().toLowerCase();
+    if (!needle) return [];
+    const rows = this.db
+      .select()
+      .from(memorySyncRecords)
+      .where(
+        and(
+          eq(memorySyncRecords.canonicalUserId, canonicalUserId),
+          ne(memorySyncRecords.status, "erased"),
+        ),
+      )
+      .orderBy(desc(memorySyncRecords.createdAt))
+      .limit(500)
+      .all();
+
+    const matched: MemorySyncRecordView[] = [];
+    for (const row of rows) {
+      const view = toMemorySyncRecordView(row);
+      const hitContent = view.content.toLowerCase().includes(needle);
+      const hitExtId = (view.externalMemoryId ?? "").toLowerCase().includes(needle);
+      const hitSrcId = view.sourceMsgIds.some((id) => id.toLowerCase().includes(needle));
+      if (hitContent || hitExtId || hitSrcId) {
+        matched.push(view);
+        if (matched.length >= limit) break;
+      }
+    }
+    return matched;
+  }
+
+  markMemoryRecordsErased(ids: string[]): void {
+    if (ids.length === 0) return;
+    this.db
+      .update(memorySyncRecords)
+      .set({
+        status: "erased",
+        errorCode: null,
+        errorMessage: null,
+        updatedAt: Date.now(),
+      })
+      .where(inArray(memorySyncRecords.id, ids))
+      .run();
+  }
+
+  getMemorySyncStats(canonicalUserId: string): MemorySyncStats {
+    const rows = this.db
+      .select({ status: memorySyncRecords.status })
+      .from(memorySyncRecords)
+      .where(eq(memorySyncRecords.canonicalUserId, canonicalUserId))
+      .all();
+
+    const stats: MemorySyncStats = {
+      total: rows.length,
+      synced: 0,
+      degraded: 0,
+      denied: 0,
+      error: 0,
+      erased: 0,
+      pendingRawMessages: this.listMessagesPendingRetain(canonicalUserId, 500).length,
+    };
+
+    for (const row of rows) {
+      if (row.status === "synced") stats.synced++;
+      else if (row.status === "degraded") stats.degraded++;
+      else if (row.status === "denied") stats.denied++;
+      else if (row.status === "error") stats.error++;
+      else if (row.status === "erased") stats.erased++;
+    }
+    return stats;
+  }
+}
+
+function toMemorySyncRecordView(row: typeof memorySyncRecords.$inferSelect): MemorySyncRecordView {
+  let sourceMsgIds: string[] = [];
+  try {
+    const parsed = JSON.parse(row.sourceMsgIdsJson);
+    if (Array.isArray(parsed)) sourceMsgIds = parsed.map(String);
+  } catch {
+    sourceMsgIds = [];
+  }
+  return {
+    id: row.id,
+    canonicalUserId: row.canonicalUserId,
+    provider: row.provider,
+    bank: row.bank as MemorySyncBank,
+    vaultId: row.vaultId,
+    sourceMsgIds,
+    content: row.content,
+    externalMemoryId: row.externalMemoryId,
+    status: row.status as MemorySyncStatus,
+    errorCode: row.errorCode,
+    errorMessage: row.errorMessage,
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
+  };
 }
 
 function toRawMessageRecord(row: typeof rawMessages.$inferSelect): RawMessageRecord {
