@@ -19,12 +19,12 @@ import { formatLocalDateTime } from "../time/clock.js";
 import { logInfo, logWarn } from "../utils/logger.js";
 import type { MemoryStore } from "./store.js";
 
-const DEFAULT_CURATOR_PROMPT = `你是 Hato 的中立异步记忆整理器（Memory Curator）。请从带绝对时间戳的对话日志中客观提炼值得长期记住的事实，并分流到 persona（生活/偏好/个人事件）与 tech（技术栈/环境/工程习惯）两个隔离库。
-规则：
-1. [CHAT_RELAY] 仅用于指代消解；绝对不要把助手自己的台词、建议或口嗨当成用户事实。
-2. 将相对时间（明天/下周等）结合对应消息的时间戳换算为具体日期 YYYY-MM-DD。
-3. 忽略无长期价值的寒暄与过程噪音；用第三人称客观陈述句输出。
-4. 只返回 JSON：{ "persona": [{ "fact": "...", "occurred_at": "YYYY-MM-DD HH:mm" }], "tech": [...] }。`;
+const DEFAULT_CURATOR_PROMPT = `You are Hato's neutral, asynchronous Memory Curator. Objectively extract facts worth retaining long-term from timestamped conversation logs and route them strictly into two isolated banks: persona (personal life, preferences, events) and tech (tech stack, environment, engineering habits).
+Rules:
+1. [CHAT_RELAY] lines are ONLY for coreference disambiguation; never record the assistant's own banter, suggestions, or unconfirmed claims as user facts.
+2. Resolve relative time expressions (tomorrow, next week, etc.) into explicit YYYY-MM-DD dates using each message's timestamp.
+3. Ignore low-value greetings/filler; write concise standalone third-person objective statements in the user's primary language.
+4. Output JSON only: { "persona": [{ "fact": "...", "occurred_at": "YYYY-MM-DD HH:mm" }], "tech": [...] }.`;
 
 export interface CuratorFactItem {
   fact: string;
