@@ -1,0 +1,38 @@
+# ==========================================
+# Hato MCP Server 配置文件（Personal / Worker 双区隔离）
+# 密钥（API Key / Token）一律存放于 .env，此处仅通过 env_refs / env_passthrough / bearer_token_env 引用。
+# 支持 /reload 热重载。
+# ==========================================
+
+# 示例 1：Personal 区（仅供 Persona 使用，建议保持低风险 / 只读工具白名单）
+# [servers.weather]
+# zone = "personal"
+# enabled = true
+# transport = "stdio"
+# description = "只读天气与空气质量查询"
+# command = "npx"
+# args = ["-y", "@example/mcp-weather"]
+# allowed_tools = ["get_forecast", "get_current_weather"]
+# timeout_ms = 10000
+
+# 示例 2：Personal 区远程 HTTP MCP（通过 ScopedProxyRouter 走 mcp.<name> 代理规则）
+# [servers.notion_ro]
+# zone = "personal"
+# enabled = false
+# transport = "http"
+# url = "https://mcp.example.com/notion"
+# bearer_token_env = "NOTION_MCP_TOKEN"
+# proxy_scope = "mcp.notion_ro"
+# allowed_tools = ["search_pages", "read_page"]
+
+# 示例 3：Worker 区（仅在 Router Mandate 授权后按工单注入，支持 confirm_tools 高危确认）
+# [servers.github]
+# zone = "worker"
+# enabled = false
+# transport = "stdio"
+# description = "GitHub Issue / PR 与代码仓库操作"
+# command = "npx"
+# args = ["-y", "@modelcontextprotocol/server-github"]
+# env_refs = { GITHUB_PERSONAL_ACCESS_TOKEN = "GITHUB_TOKEN" }
+# confirm_tools = ["create_pull_request", "merge_pull_request", "push_files"]
+# timeout_ms = 20000

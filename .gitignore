@@ -6,6 +6,7 @@ data/
 !.env.example
 config/hato.toml
 config/models.toml
+config/mcp.toml
 *.bak
 *.log
 *.db

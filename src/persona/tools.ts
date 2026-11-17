@@ -3,6 +3,7 @@ import { arr, bool, num, obj, oneOf, opt, str } from "@earendil-works/pi-schema"
 import type { BrowserRuntime } from "../browser/runtime.js";
 import {
   resolveMemoryRecallConfig,
+  resolveSkillsDir,
   resolveTavilySearchConfig,
   resolveWebFetchConfig,
   type HatoConfig,
@@ -10,6 +11,7 @@ import {
 import type { ScopedProxyRouter } from "../config/proxy.js";
 import type { HatoRepository } from "../db/repo.js";
 import type { MemoryRecallItem, MemoryStore } from "../memory/store.js";
+import { loadZoneSkills, readSkillContent } from "../skills/loader.js";
 import { formatLocalDateTime } from "../time/clock.js";
 import {
   evaluateSafeMath,
@@ -110,8 +112,15 @@ const SelfConfigParams = obj({
   fact_value: opt(str({ description: "Value text for set_relationship_fact" })),
 });
 
+const ReadSkillParams = obj({
+  name: str({ description: "Skill name from <available_skills> in the personal zone" }),
+  reference_path: opt(
+    str({ description: "Optional relative file inside that skill directory (e.g. references/guide.md)" }),
+  ),
+});
+
 /**
- * Zero-side-effect, read-only micro-tools + isolated web/browser + guarded self-config capabilities exposed to Persona.
+ * Zero-side-effect, read-only micro-tools + isolated web/browser + personal skills/MCP + guarded self-config capabilities exposed to Persona.
  */
 export function createPersonaReadOnlyTools(params: {
   repo: HatoRepository;
@@ -122,6 +131,8 @@ export function createPersonaReadOnlyTools(params: {
   browserRuntime?: BrowserRuntime;
   getMemoryStore?: () => MemoryStore | null;
   selfConfigDeps?: SelfConfigDeps;
+  enableReadSkillTool?: boolean;
+  extraTools?: readonly AgentTool<any>[];
   onMemoryRecalled?: (ids: string[]) => void;
   onBeforeToolExecute?: (toolName: string, input: unknown) => Promise<void>;
 }): AgentTool<any>[] {
@@ -506,6 +517,69 @@ export function createPersonaReadOnlyTools(params: {
       },
     };
     tools.push(selfConfigTool);
+  }
+
+  const skillsDir = resolveSkillsDir(params.getHatoConfig());
+  const shouldExposeReadSkill =
+    params.enableReadSkillTool ?? loadZoneSkills(skillsDir, "personal").length > 0;
+  if (shouldExposeReadSkill) {
+    const readSkillTool: AgentTool<typeof ReadSkillParams> = {
+      name: "read_skill",
+      label: "读取个人技能",
+      description:
+        "只读读取 personal 区某个 Skill 的完整 SKILL.md 指引或同目录下的参考文档（仅在 <available_skills> 匹配当前任务时调用）。",
+      parameters: ReadSkillParams,
+      async execute(_toolCallId, input) {
+        try {
+          const activeSkillsDir = resolveSkillsDir(params.getHatoConfig());
+          const loaded = readSkillContent(
+            activeSkillsDir,
+            "personal",
+            input.name,
+            input.reference_path,
+          );
+          const refFooter =
+            loaded.references.length > 0
+              ? `\n\n[同目录参考文件]: ${loaded.references.join(", ")}`
+              : "";
+          return {
+            content: [
+              {
+                type: "text",
+                text: `[skill: ${loaded.name} (${loaded.filePath})]\n${loaded.content}${refFooter}`,
+              },
+            ],
+            details: {
+              ok: true,
+              name: loaded.name,
+              filePath: loaded.filePath,
+              references: loaded.references,
+              truncated: loaded.truncated,
+            },
+          };
+        } catch (err) {
+          return {
+            content: [
+              {
+                type: "text",
+                text: `读取 Skill 失败: ${err instanceof Error ? err.message : String(err)}`,
+              },
+            ],
+            details: { ok: false },
+          };
+        }
+      },
+    };
+    tools.push(readSkillTool);
+  }
+
+  if (params.extraTools && params.extraTools.length > 0) {
+    const existingNames = new Set(tools.map((t) => t.name));
+    for (const extra of params.extraTools) {
+      if (existingNames.has(extra.name)) continue;
+      existingNames.add(extra.name);
+      tools.push(extra);
+    }
   }
 
   if (!params.onBeforeToolExecute) {

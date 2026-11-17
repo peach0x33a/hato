@@ -23,15 +23,15 @@ flowchart LR
     WD["Watchdog (工单超时 / 崩溃恢复)"] -.-> DB
 
     BUS --> P["Persona Agent (pi-agent-core)"]
-    P -- "4个只读微工具: calc/date_math/inspect/list" --> P
-    P -- "delegate() 轻量入队" --> COMP["Neutral Router (圈定区间 / 定边界)"]
-    BUS -. "带 msg_id 的近 K 轮对话 + 技术画像 + 注册表" .-> COMP
+    P -- "只读微工具 + read_skill + Personal MCP" --> P
+    P -- "delegate() 轻量入队" --> COMP["Neutral Router (圈定区间 / 定边界 / 选能力)"]
+    BUS -. "带 msg_id 的近 K 轮对话 + 技术画像 + 能力索引" .-> COMP
 
     COMP -- "调度管理操作" --> CRON
-    COMP -- "Ticket(context_id) + Mandate" --> DB[("SQLite (唯一事实源)")]
+    COMP -- "Ticket(context_id) + Mandate(skills/mcp)" --> DB[("SQLite (唯一事实源)")]
     DB --> W["Worker Dispatcher (ExecutionRunner)"]
     W -- "模式 1: builtin-pi (工具拉取 ctx)" --> BOX["工单容器 hato-t_xxx (无 API Key)"]
-    W -- "模式 2: external-cli (Scoped MCP 拉取 ctx)" --> EXT["Codex CLI / Claude Code (Headless)"]
+    W -- "模式 2: external-cli (Scoped MCP 拉取 ctx)" --> EXT["Codex / agy / OpenCode / external-pi / CC"]
     DB -. "context_id 受限只读切片" .-> W
     BOX -- "部署确认后" --> JOBS["常驻容器 hato-jobs"]
     EXT -- "产出的常驻脚本确认后" --> JOBS
@@ -45,7 +45,8 @@ flowchart LR
 ### 关键设计约束
 1. **1v1 私聊限定：** v1 不做群聊，只响应配置的 Owner 账号；TG 与 QQ 的 Home Channel 通过 `canonical_user_id` 归一化为同一个 Owner。
 2. **三道墙靠数据流而非 Prompt 祈祷：** Worker 永远看不到人设文件（`prompts/persona.md`）与情感记忆库；中立 Router 不转述需求正文，只圈定 `[from_msg_id .. to_msg_id]` 区间并签发 `context_id`，让 Worker 零损耗拉取该区间的原文切片（并可在有限步长内向前有限回溯）；Persona 永远拿不到宿主机执行权限。
-3. **QQ 官方 Bot 暂缓实施：** 作为预留 `ChannelAdapter` 接口保留在架构中，后续参考 Hermes / OpenClaw 等成熟框架的 C2C 适配实现（含 `msg_id`/`msg_seq` 窗口限制与跨端兜底）。
+3. **Personal 与 Worker 双区能力物理隔离：** Skills 与 MCP 按 `personal` / `worker` 分区注册与注入——Persona 仅见个人轻量化/只读能力（保 Prompt Cache 前缀且防越权），Worker 仅按 `Mandate` 按需注入工程能力；External CLI 复用本机登录态与中转站时通过 Overlay 剥离个人 MCP/Skills，且 Hato 模式配置仅对 Hato 拉起的子进程生效。
+4. **QQ 官方 Bot 暂缓实施：** 作为预留 `ChannelAdapter` 接口保留在架构中，后续参考 Hermes / OpenClaw 等成熟框架的 C2C 适配实现（含 `msg_id`/`msg_seq` 窗口限制与跨端兜底）。
 
 ---
 
@@ -88,25 +89,27 @@ IM 聊天天然存在连发碎片化消息（例如连续发出 3 句文字 + 1 
 ### 3.1 墙 1：Persona 轻量工具与中立轻路由器（零损耗传引用）
 
 #### Persona 工具权限边界
-Persona（`pi-agent-core` `Agent`）**禁止直接接触 shell、文件系统或敏感配置**，只暴露 **1 个派活工具 + 4 个零副作用只读微工具**：
+Persona（`pi-agent-core` `Agent`）**禁止直接接触 shell、文件系统或敏感配置**，只暴露 **1 个派活工具 + 只读/轻量个人区工具**（详见第 7 章）：
 
 1. **`delegate(hint: string, urgency?: "normal" | "high")`**
    * **极速入队：** 不阻塞等待 Router LLM，立即写一条 `routing` 占位工单并返回 `accepted: t_xxxx`，让 Persona 能秒回一句自然确认（如“好呀，我这就去写”），实际路由与区间划定在后台异步完成。
    * 若后台 Router 判定信息不足（如根本找不到指代对象），直接触发一次 `needs_input` 事件推回用户补全。
-2. **4 个零副作用只读微工具（快路径，免起容器）：**
+2. **零副作用只读微工具 & 个人区能力（快路径，免起容器）：**
    * `calc`：精确四则运算与单位换算。
    * `date_math`：日期加减、星期查询、跨时区时间换算。
-   * `inspect_tickets`：按 ID 或关键词只读查询工单详情与近期执行日志摘要。
+   * `inspect_tickets`：按 ID 或关键词只读查询工单详情与近期执行日志摘要（含外部 CLI 实时更新的 `progress_note`）。
    * `list_schedules`：只读列出当前已登记的常驻脚本、Cron 规则与 Open Loops。
+   * `read_skill(name)`：按需读取 `personal` 区 Skill 正文（仅在命中静态前缀中的索引条目时拉取）。
+   * `Personal MCP`：经轻量 `McpClientPool` 注入的精选低风险/只读个人 MCP 工具（按工具白名单暴露）。
 
 #### 中立轻路由器（Neutral Router）+ `context_id` 按需拉取
 为了彻底消除“中间 LLM 总结需求导致细节丢失”的传话筒失真，Router **不再改写或转述用户的技术需求**，只做边界判定与区间圈定：
 
-* **隔离输入：** 接收带编号的**最近 K 轮完整对话目录（如近 15 轮 `[msg_id | USER / CHAT_RELAY]`）**、**Hindsight `tech` Bank 技术画像**、**脚本注册表**以及 `hint`（仅作话题锚点）。**绝不输入 Persona 的人设 Prompt（`prompts/persona.md`）、情感记忆或 `persona` Bank 内容。**
+* **隔离输入：** 接收带编号的**最近 K 轮完整对话目录（如近 15 轮 `[msg_id | USER / CHAT_RELAY]`）**、**Hindsight `tech` Bank 技术画像**、**脚本注册表**、**Worker 区 Skills/MCP 能力索引**以及 `hint`（仅作话题锚点）。**绝不输入 Persona 的人设 Prompt（`prompts/persona.md`）、情感记忆、`persona` Bank 或 Personal 区配置。**
 * **Router 只输出 3 个确定性决策（TypeBox 严格 Schema）：**
   * **分支 A — `ScheduleOps`（确定性调度修改）：** 若仅涉及“把上次那个脚本改到 8 点半 / 暂停 / 恢复 / 删除”且无需改代码，直接输出调度操作指令，1 秒内确定性执行，不启动 Worker。
   * **分支 B — `Ticket`（工单 + 受限上下文引用）：**
-    1. **`backend` 与 `Mandate`：** 选择 `builtin-pi` / `codex` / `claude-code`，固化工作目录（隔离沙箱或已授权 `allowed_repos`）、网络模式、超时及 `confirm_before` 动作清单；
+    1. **`backend` 与 `Mandate`：** 选择 `codex` / `agy` / `opencode-v2` / `external-pi` / `claude-code` / `builtin-pi`（裸 `opencode` 标记为不支持），固化工作目录（隔离沙箱或已授权 `allowed_repos`）、网络模式、超时、`skills` 与 `allowed_mcp_servers` 授权清单、`confirm_before` 动作清单；
     2. **`brief_title`：** 仅用于工单看板展示的一句话短标题（不代替详细需求）；
     3. **`context_range: { from_msg_id, to_msg_id }`：** 圈定与本次任务相关的连续起止消息区间。**区间内整段原文原样保留**（不做单条裁剪，宁可让强编码模型自行略过一句“我去拿外卖”，也不误删看似闲聊的约束条件），并签发绑定到该工单的只读 **`context_id`**（如 `ctx_0042`）。
 
@@ -171,8 +174,9 @@ Worker 开局只收到干净工程提示词、`brief_title`、`Mandate` 与 `con
 为了避免配置散落在 `.env`、systemd 脚本和代码默认值里，系统严格执行 **密钥与配置物理分离**，并统一采用对人工维护与注释友好的 **TOML** 格式（`smol-toml` 解析 + TypeBox 启动期/热加载强校验）：
 * **环境变量（`.env`）只存密钥：** 仅用于注入 API Key、Bot Token 等敏感凭据。对于模型 Provider，**按 Provider 的 Slug 自动推导环境变量名 `<UPPER_SNAKE(slug)>_API_KEY`**（例如 `[providers.custom-relay]` 自动读取 `CUSTOM_RELAY_API_KEY`，`[providers.google-gateway]` 自动读取 `GOOGLE_GATEWAY_API_KEY`），不写死少数固定厂商；仅需复用或自定义变量名时才可选配 `api_key_env` 覆写。渠道侧则显式写引用名（如 `bot_token_env = "TG_BOT_TOKEN"`）。
 * **其余所有配置全部集中到 TOML 配置文件：**
-  * `config/hato.toml`：Owner 白名单、时区与作息、TG/QQ 渠道开关与 **`base_url` 覆写**、**按 Scope 分流的网络代理规则**、防抖窗口、气泡参数、闲时压缩阈值、回溯上限、Hindsight 地址与 Bank 名称、Worker 沙箱限额与 `allowed_repos` 白名单、文件路径等全部非密钥配置。
+  * `config/hato.toml`：Owner 白名单、时区与作息、TG/QQ 渠道开关与 **`base_url` 覆写**、**按 Scope 分流的网络代理规则**、防抖窗口、气泡参数、闲时压缩阈值、回溯上限、Hindsight 地址与 Bank 名称、Worker 沙箱限额、`external_cli` 权限模式与 `allowed_repos` 白名单、文件路径等全部非密钥配置。
   * `config/models.toml`：全协议 Provider 池与 5 角色槽位绑定。
+  * `config/mcp.toml`：Personal / Worker 双区 MCP Server 定义（传输类型、工具白名单、确认工具列表、代理 Scope 与 `.env` 密钥引用）。
   * 均支持 `/reload` 热加载，无需改动环境变量或重启宿主机服务。
 
 **`config/hato.example.toml` 主配置结构示例：**
@@ -182,6 +186,7 @@ Worker 开局只收到干净工程提示词、`brief_title`、`Mandate` 与 `con
 sqlite = "./data/hato.db"
 workspaces_dir = "./data/workspaces"
 prompts_dir = "./prompts"
+skills_dir = "./data/skills"      # 下设 personal/ 与 worker/ 两个物理隔离区
 
 [owner]
 canonical_user_id = "owner"
@@ -206,7 +211,7 @@ open_ids = []
 name = "main-proxy"
 url = "http://127.0.0.1:7890"     # 支持 http:// / https:// / socks5://
 scope = ["gateway", "llm-calling"] # 可填: "all", "gateway", "gateway.telegram", "gateway.qq",
-                                   # "llm-calling", "llm-calling.<provider>", "memory", "worker"
+                                   # "llm-calling", "llm-calling.<provider>", "memory", "mcp", "mcp.<server>", "worker"
 
 # 示例：针对特定国内直连或内网提供商显式绕过全局代理
 [[network.proxies]]
@@ -260,7 +265,7 @@ defer_after_chat_minutes = 5
 max_unanswered_streak = 2
 
 [worker]
-default_backend = "builtin-pi"
+default_backend = "codex"         # 支持: codex | agy | opencode-v2 | external-pi | claude-code | builtin-pi（裸 opencode 不支持）
 workspace_ttl_days = 14
 
 [worker.sandbox]
@@ -271,12 +276,40 @@ pids_limit = 256
 
 [worker.external_cli]
 allowed_repos = []
+reuse_host_auth_and_provider = true # 复用本机 CLI 登录态与中转站配置
+inherit_host_mcp = false            # 默认剥离本机个人 MCP，防污染
+host_mcp_allowlist = []             # 可选放行的本机已有 MCP 名称白名单
+permission_preset = "auto_safe"     # "follow_host" | "auto_safe" | "yolo" | "read_only" | "custom"
+                                    # 仅对 Hato 拉起的 Worker 子进程生效，绝不修改本机原配置文件
+
+[worker.external_cli.codex]
+enabled = true
+# 留空时跟随 permission_preset 自动映射；手动设置时覆盖 preset（枚举由 CLI 动态探测）
+# sandbox = "workspace-write"       # read-only | workspace-write | danger-full-access
+# approval = "approve-for-me"       # host | approve-for-me | bypass
+
+[worker.external_cli.agy]
+enabled = true
+# mode = "auto"                     # 动态读取: accept-edits | auto | plan
+# skip_permissions = false
+# sandbox = true
+
+[worker.external_cli.opencode_v2]
+enabled = true                      # 仅支持 OpenCode V2（裸 opencode v1 不支持；需通过 v2 版本校验）
+# auto = true
+# agent = ""
+
+[worker.external_cli.external_pi]
+enabled = false                     # 第二梯队（单独安装的 pi CLI）
+
+[worker.external_cli.claude_code]
+enabled = false                     # 第三梯队（后续接入）
 ```
 
 ### 4.1 作用域代理（Scoped Proxy）与聊天平台 `base_url`
 * **为什么不用全局 `HTTP_PROXY`：** Node.js 22 原生 `fetch`（基于 `undici`）默认不自动读 `HTTP_PROXY`，且直接覆盖全局环境变量会导致“国内直连模型 / 本地 Hindsight”和“需翻墙的 TG / 海外模型”互相冲突。
 * **Scope 粒度与优先级：**
-  * 支持的 Scope 标识：`all`（全局兜底）、`gateway`（含子域 `gateway.telegram` / `gateway.qq`）、`llm-calling`（含子域 `llm-calling.<provider_name>`，可精细到某家模型中转）、`memory`（Hindsight / 云端 Embedding & Reranker）、`worker`（仅当工单 `Mandate` 允许出网时透传）。
+  * 支持的 Scope 标识：`all`（全局兜底）、`gateway`（含子域 `gateway.telegram` / `gateway.qq`）、`llm-calling`（含子域 `llm-calling.<provider_name>`，可精细到某家模型中转）、`memory`（Hindsight / 云端 Embedding & Reranker）、`mcp`（含子域 `mcp.<server_name>`，远程 MCP 服务代理控制）、`worker`（仅当工单 `Mandate` 允许出网时透传）。
   * 解析规则：**最精确 Scope 优先**（`llm-calling.google-gateway` → `llm-calling` → `all` → 直连），且允许配置 `url = "direct"` 显式覆盖 `"all"` 实现例外直连。
 * **运行时隔离实现（`src/config/proxy.ts`）：**
   * **Gateway：** 将解析出的 `base_url`（如 `grammY` 的 `apiRoot`）与该 Scope 专属 `ProxyAgent` / `socks` Agent 注入对应的平台客户端；
@@ -467,34 +500,81 @@ Hato 在业务层定义统一的 `MemoryStore` 接口，底层默认接 **Hindsi
 
 ---
 
-## 7. 双模式 Worker 执行引擎、沙箱与常驻脚本生命周期
+## 7. 双区能力注入：Personal vs Worker 的 Skills 与 MCP
 
-所有工程执行统一抽象在 **`ExecutionRunner`（`execute` / `resume`）** 接口之后，向上游 Bus 与 Persona 暴露完全一致的进度状态与 `Result JSON`。
+为避免日常陪聊与后台工程执行互相污染，Hato 将 **Skills** 与 **MCP** 物理拆分为 **`personal`（Persona 区）** 与 **`worker`（Worker 区）** 两个独立区域，严格对齐“三道墙”的数据流隔离边界。
 
-### 7.1 模式一：`builtin-pi`（内置轻量沙箱 Worker）
+### 7.1 双区物理隔离边界
+
+| 能力维度 | `personal` 区（`PersonaRuntime`） | `worker` 区（`builtin-pi` / `external-cli`） |
+|---|---|---|
+| **定位与风险边界** | 日常轻助手、信息查询、个人生活辅助；**严格限制只读或低风险可逆动作** | 多步工程执行、代码修改、数据库/仓库/重型第三方交互 |
+| **Skills 目录** | `data/skills/personal/<name>/SKILL.md` | `data/skills/worker/<name>/SKILL.md` |
+| **MCP 权限** | 精选工具白名单（`allowed_tools`），严禁暴露宿主机 shell/高危写操作 | 按工单 `Mandate.allowed_mcp_servers` 动态授权，支持 `confirm_tools` 二次确认 |
+| **可见性隔离** | 看不到 `worker` 区的 Skills / MCP，超出能力圈自然走 `delegate()` | 看不到 `personal` 区的 Skills / MCP 与人设文件 |
+
+### 7.2 Skills 两级渐进加载（Progressive Disclosure）
+
+* **Personal 区（保 Prompt Cache 稳定）：**
+  1. **Level 1（静态索引）：** 启动与 `/reload` 时扫描 `data/skills/personal/*/SKILL.md` frontmatter，仅提取 `name` 与一句话触发描述，生成轻量 `<available_skills>` 拼入 Layer 1 静态前缀尾部。平时不增删 Skill 时前缀完全不变，不破坏 Prompt Cache。
+  2. **Level 2（按需拉取）：** 通过零副作用只读微工具 `read_skill(name)` 按需读取 `SKILL.md` 正文与同目录下的 `references/`，日常闲聊 **0 正文 Token 开销**。
+* **Worker 区（Router 圈选 + 按需挂载）：**
+  1. 中立 Router 接收 `worker` Skills 的极简索引目录，在 `Mandate.skills` 中勾选本次工单命中的 Skill 列表。
+  2. **`builtin-pi` 模式：** 直接通过工单内 `read_worker_skill(name)` 或在起始任务上下文中按需注入命中项。
+  3. **`external-cli` 模式：** 临时工单目录（`data/workspaces/t_<id>`）可写入 `.agents/skills/<name>/SKILL.md`；宿主机真实仓库（命中 `allowed_repos`）**严禁写脏仓库工作树**，统一落盘至工单运行态目录并通过 `--add-dir` 只读挂载或起始指令引用路径。
+
+### 7.3 轻量 MCP 接入体系（Unified Config + 轻 `McpClientPool`）
+
+采用 **“统一配置注册表 + 分侧消费”**，现阶段**不做**把外部 CLI 全部套进宿主机代理转发的重型网关（避免协议胶水复杂度）：
+
+* **统一配置（`config/mcp.toml`）：** 每条 Server 配置声明 `zone = "personal" | "worker"`、`transport`（`stdio` | `http`）、`enabled`、`allowed_tools`、`confirm_tools`（Worker 区高危拦截）、`proxy_scope`（复用第 4.1 节 `ScopedProxyRouter`，支持 `mcp.<server>`）以及 `.env` 密钥变量引用（禁止把全量 `process.env` 透传给子进程）。
+* **`pi-agent-core` 侧（Persona 与 `builtin-pi`）：** 因 `pi-agent-core` 不内置 MCP 客户端，宿主机侧维护轻量的 **`McpClientPool`**（基于 `@modelcontextprotocol/sdk`），负责长驻连接管理、断线降级与工具白名单转换为 `AgentTool[]`。Persona 仅拿到 `zone = "personal"` 的工具；`builtin-pi` 仅拿到本次 `Mandate` 放行的 `zone = "worker"` 工具。
+* **`external-cli` 侧（直连生成）：** 外部 CLI 本身具备原生 MCP 客户端，不经宿主机二次转发；由 Hato 在起工单时按 `Mandate` 将 **`hato_context` + 授权 Worker MCP** 直接渲染为目标 CLI 的隔离配置文件或参数直连。仅在未来出现独占写锁冲突、工具级强拦截或高密凭据零透传需求时，再演进为聚合 Proxy。
+
+---
+
+## 8. 双模式 Worker 执行引擎、External CLI 与常驻脚本生命周期
+
+所有工程执行统一抽象在 **`ExecutionRunner`（`execute` / `resume` / `abort`）** 接口之后，向上游 Bus 与 Persona 暴露完全一致的进度状态与 `Result JSON`。
+
+### 8.1 模式一：`builtin-pi`（内置轻量沙箱 Worker）
 适合“写个小脚本、抓网页、查服务器状态、修小定时任务”等高频轻量活，启动快、Token 省、边界控制最细：
-* **宿主机进程 + 容器工具隔离：**
+* **宿主机大脑 + 容器手脚：**
   * `hato` 主进程以低权限用户跑在宿主机 `systemd` 下（搭配 Rootless Docker / Podman；**绝不把 `/var/run/docker.sock` 挂载进容器**）。
-  * Worker 的 `pi-agent-core` 循环跑在宿主机进程里（持有模型 API Key），工具调用（`read` / `write` / `edit` / `bash`）通过 `docker exec` 进到每张工单专属容器 `hato-t_<id>` 内执行——**API Key 永不进沙箱容器**。
-  * 上下文读取（`read_task_context` / `expand_earlier_context`）作为宿主机只读工具直接向 Worker Agent 暴露，不给容器开数据库权限。
+  * Worker 的 `pi-agent-core` 循环跑在宿主机进程里（持有 `worker` 槽位模型快照 `tickets.modelSnapshotJson` 与宿主机 `McpClientPool` 连接），工具调用（`read` / `write` / `edit` / `bash`）通过 `docker exec` 进到每张工单专属容器 `hato-t_<id>` 内执行——**模型 API Key 与 MCP Secret 永不进沙箱容器**。
+  * 上下文读取（`read_task_context` / `expand_earlier_context`）作为宿主机只读 `AgentTool` 直接暴露，不给容器开数据库权限。
+* **原生确定性状态机：** 订阅 `pi-agent-core` 事件流实时更新 `tickets.progress_note`；通过显式工具 `ask_user(question)`（挂起进 `needs_input` 并持久化消息现场）与 `finish_task(result)`（TypeBox 校验产出 `Result JSON`）直接收口；命中 `Mandate.confirm_before` 或 MCP `confirm_tools` 时可在工具执行前原生拦截并等待 TG Inline Keyboard 确认。
 * **容器资源限额：** `--memory 512m --cpus 1 --pids-limit 256`，默认网络受限（按 `Mandate` 控制 `none` / `allowlist` / `egress`）。
 
-### 7.2 模式二：`external-cli`（外部编码 Agent：Codex CLI / Claude Code）
-适合对已有项目仓库做多文件开发、跑全套测试、修复杂 Bug，或直接复用你现有的 Codex / Claude Code 订阅与工具链。Hato 在此模式下退居为**“受控上下文提供方 + 会话编排网关”**：
-* **Scoped Context MCP（按 `context_id` 纯拉取 + 有限回溯）：**
-  * 启动外部 CLI 时注入一个极轻的本地 **Stdio MCP Server**（`src/mcp/context-server.ts`，携带单次工单作用域 Token），暴露与 `builtin-pi` 完全对齐的只读工具：`read_task_context(context_id)` 与 `expand_earlier_context(context_id, count <= 10)`。
-  * **Claude Code 注入：** 使用 `--strict-mcp-config --mcp-config <ticket_mcp.json>` 锁死仅加载该只读 MCP，并在 `--allowedTools` 中放行 `mcp__hato_context__*`。
-  * **Codex CLI 注入：** 使用 `-c mcp_servers.hato_context=...` 动态注入 Stdio MCP（完全本地进程通信，无需放开外网即可拉取上下文）。
-* **非交互 Headless 调用与会话续跑：**
-  * **Codex CLI 后端：** 首次执行 `codex exec --json --sandbox workspace-write "<干净任务抬头 + context_id + 调用 read_task_context 提示>"`，从 stdout JSONL 的 `thread.started` 事件中提取并落库 `external_session_id`（`thread_id`）；遇 `needs_input` 或追加需求时用 `codex exec resume <thread_id> "<补充回复 / 新消息区间>" --sandbox workspace-write --json` 续跑。
-  * **Claude Code 后端：** 首次执行 `claude -p "<干净任务抬头 + context_id + 调用 read_task_context 提示>" --output-format stream-json --strict-mcp-config --mcp-config <...> --allowedTools "<按Mandate映射>"`，提取并落库 `session_id`；续跑时用 `claude -p "<补充回复>" --resume <session_id> --output-format stream-json ...`。
-* **外部 CLI 接入必须守住的 4 个工程细节：**
-  1. **环境变量与目录白名单隔离：** 拉起外部 CLI 子进程时显式清洗环境变量（**绝不传入 Hato 的 `TG_BOT_TOKEN`、`HINDSIGHT_*` 等内部凭据**），只保留该 CLI 自身认证与单次只读 `HATO_CTX_TOKEN`；默认 `cwd` 指向隔离工单目录 `/data/workspaces/t_<id>`，仅当工单命中配置文件 `allowed_repos` 白名单时才允许切入宿主机项目目录（且工单目录顶层不放置带人设内容的 `CLAUDE.md` / `AGENTS.md`）。
-  2. **实时进度静默同步：** Adapter 消费 JSONL 事件流，提取当前动作摘要更新 SQLite `tickets.progress_note` 供看板查询，不在聊天窗口刷屏。
-  3. **非交互下的 `needs_input` 捕获：** Headless 模式下 CLI 遇到缺信息不会挂起等 stdin，而是说明疑问后退出。由 **Result Normalizer**（极轻 LLM / 规则校验）结合退出状态与末轮输出判定：若是在向用户提问，则将工单置为 `needs_input` 并保留 `external_session_id`，用户回答后再通过 `resume` 无缝接回原会话。
-  4. **标准 Result JSON 归口：** 传给外部 CLI 的起始指令末尾可附带生成 `_hato_result.json` 的弱约定，但**不强依赖外部 CLI 严格遵守 Schema**；进程退出后由 Hato 扫描工作区文件变动（`git diff --stat` / 新增文件清单）+ CLI 末轮输出，经 `Result Normalizer` 统一组装成标准 `Result JSON`（含 `narration_hint`、`verbatim_blocks`、`artifacts`），确保墙 3 体验完全一致。
+### 8.2 模式二：`external-cli`（优先接入梯度：`codex` → `agy` → `opencode-v2` → `external-pi` → `claude-code`）
+适合对已有项目仓库做多文件开发、跑全套测试、修复杂 Bug，或复用本机已配好的中转站与 CLI 订阅。Hato 在此模式下作为**“受控上下文提供方 + 隔离覆写层 + 会话编排网关”**：
 
-### 7.3 工作区清理与常驻脚本生命周期
+#### 1. 接入优先级与后端适配矩阵
+
+| 梯队 | 后端 | Headless 流式启动 | 会话续跑 | 本机配置继承与隔离覆写（Overlay） |
+|---|---|---|---|---|
+| **Tier 1** | **`codex`** | `codex exec --json` | `codex exec resume <thread_id>` | 影子 `CODEX_HOME`：软链 `~/.codex/auth.json`，读取 `~/.codex/config.toml` 保留 `[model_providers.*]` 与模型配置，剔除个人 `[mcp_servers.*]` 后写入 `hato_context` 与授权 Worker MCP |
+| **Tier 1** | **`agy`** | `agy -p "<prompt>" --output-format stream-json --json-schema <schema> --disable-slash-commands` | `agy --conversation <id> -p "<reply>"` | 继承 `~/.gemini/` 认证与模型设置；通过 `--settings <ticket_settings.json>` 临时会话覆写；后续可按需切换 `agy acp`（支持 `--gemini-dir` / `--app-data-dir` 彻底隔离） |
+| **Tier 1** | **`opencode-v2`** | `opencode run --standalone --format json`（**强制校验 OpenCode V2**，裸 `opencode` v1 标记为不支持） | `opencode run --standalone -s <session_id>` | **强制 `--standalone`** 隔离后台共享 service；继承本机 auth/provider，覆写隔离个人 MCP 与 Skills；后续亦支持 `opencode acp` |
+| **Tier 2** | **`external-pi`** | 独立安装的 `pi` CLI（JSON/RPC 模式） | 按 `session` 参数续跑 | 预留同构 `ExternalCliAdapter` 槽位，独立于 Hato 内置 `pi-agent-core` |
+| **Tier 3** | **`claude-code`** | `claude -p "<prompt>" --output-format stream-json --strict-mcp-config --mcp-config <ticket_mcp.json>` | `claude -p "<reply>" --resume <session_id>` | 继承本机认证与 `settings.json` 中转环境；`--strict-mcp-config` 锁死仅加载工单 MCP，必要时辅以影子 `CLAUDE_CONFIG_DIR` |
+
+#### 2. Scoped Context MCP（按 `context_id` 纯拉取 + 有限回溯）
+* 统一为外部 CLI 注入本地只读 **Stdio MCP Server**（`src/mcp/context-server.ts`，携带单次工单作用域 `HATO_CTX_TOKEN`），暴露 `read_task_context(context_id)` 与 `expand_earlier_context(context_id, count <= 10)`。
+
+#### 3. 动态模式探测与“仅对 Hato 生效”的权限设置
+* **动态能力、版本门禁与本机默认探测（`src/worker/cli-probe.ts`）：** 启动、`/reload` 或 Web Console 触发刷新时，自动解析各已安装 CLI 的 `--help` 模式枚举与开关（如 `codex exec --sandbox` / `--approve-for-me` / `--dangerously-bypass-approvals-and-sandbox`、`agy --mode` / `--sandbox` / `--dangerously-skip-permissions`、`opencode run --auto`），并读取本机原配置文件中的当前默认模式供控制台展示。其中 **`opencode-v2` 必须通过 V2 版本门禁验证**（检测 `opencode --version` 主版本号 `>= 2` 且 `run --help` 具备 `--standalone` 等 V2 能力，若检测到旧版裸 `opencode` 则直接标记为不可用并拒绝启动）。
+* **双层设置模型（Preset + Per-CLI Override）：**
+  * **全局快捷策略（`permission_preset`）：** 支持 `follow_host`（沿用本机）、`auto_safe`（沙箱内自动放行）、`yolo`（**全部设置为无需审批**，如 `codex --dangerously-bypass-approvals-and-sandbox`、`agy --mode auto --dangerously-skip-permissions`、`opencode --standalone --auto`）、`read_only`（只读分析/规划，如 `codex --sandbox read-only`、`agy --mode plan`）、`custom`。
+  * **单后端原生覆写：** 支持在 Web Console 对单个后端直选探测出的原生模式枚举。
+* **作用域红线（仅对 Hato 生效）：** 所有模式参数与 Overlay 隔离配置**仅在 Hato 拉起 Worker 子进程时通过启动参数或影子目录传入，绝不回写修改用户本机 `~/.codex/config.toml`、`~/.gemini/antigravity-cli/settings.json` 等原始全局配置**。
+
+#### 4. 实时状态获取、环境变量隔离与 Result 归一化
+1. **环境变量与目录白名单隔离：** 拉起外部 CLI 子进程时显式清洗环境变量（**绝不传入 Hato 的 `TG_BOT_TOKEN`、`MEMORYECHO_*`、`HINDSIGHT_*` 等内部凭据**），仅透传认证/中转必需变量、按需代理（`proxyRouter.getWorkerProxyEnv()`）及单次 `HATO_CTX_TOKEN`；默认 `cwd` 为 `data/workspaces/t_<id>`，仅命中 `allowed_repos` 白名单才允许进入宿主机仓库。
+2. **流式状态与断点落库：** `spawn` 逐行消费各 CLI 原生 NDJSON 事件流（如 `codex` 的 `thread.started` / `item.*`、`agy` 的 `init` / `step_update` / `result`、`opencode-v2` 的 JSON 事件流），首条带会话 ID 的事件到达即刻写入 `tickets.external_session_id`，过程中节流更新 `tickets.progress_note` 供 `inspect_tickets` 与 Web Console SSE 查询，同时作为 Watchdog 心跳。原始流按工单留档 `_hato_stream.jsonl`。
+3. **非交互下的 `needs_input` 与 4 信号联合判定：** 外部 CLI 缺信息时通常提问后即 exit 0 退出。进程退出后，由 **Result Normalizer** 结合 **(1) 退出码与信号、(2) JSONL 末轮终态与错误/权限拒绝字段、(3) 可选约定产物与工作区 `git diff`、(4) 轻量文本分类** 联合判定：若在向用户提问，则置为 `needs_input` 并保留 `external_session_id` 等待回复后 `resume`；否则组装为标准 `Result JSON`（`agy` 同时可用 `--json-schema` 直接约束终态 JSON）。
+
+### 8.3 工作区清理与常驻脚本生命周期
 * **工作区与容器清理策略：**
   * `builtin-pi` 工单结束后，**临时沙箱容器立即销毁**释放内存；
   * 宿主机对应的工作目录 `data/workspaces/t_<id>`：**临时一次性工单保留 14 天后自动回收，已被纳入脚本注册表的任务目录永久保留**，便于后续“在旧脚本基础上改一下”。
@@ -504,19 +584,19 @@ Hato 在业务层定义统一的 `MemoryStore` 接口，底层默认接 **Hindsi
 
 ---
 
-## 8. 可观测性与排障（`/trace`）
+## 9. 可观测性与排障（`/trace`）
 
 在 SQLite 维护一张轻量 `turn_traces` 表，记录每次 Persona / Router 调用的关键元数据：
 * 本轮使用的 `slot`、`provider/model_id`、`api` 协议；
 * Input / Output / **Cache Read / Cache Write Tokens** 与耗时；
 * 注入的时间卡快照、Hit 的 `Hindsight` 记忆 ID 与打分、活跃 `open_loops` 与 `ticket_board` 快照；
-* 触发的工具调用（`delegate` / 微工具）及关联 `ticket_id`。
+* 触发的工具调用（`delegate` / `read_skill` / `Personal MCP` / 微工具）及关联 `ticket_id`。
 
 Owner 在私聊中发送 **`/trace`（不记入聊天历史、不影响记忆）** 即可直接看到上一条回复的底层上下文构成与缓存命中情况，快速定位“为什么没记住”、“时间算对没有”或“为什么走慢了”。
 
 ---
 
-## 9. SQLite 核心表结构概览（Drizzle）
+## 10. SQLite 核心表结构概览（Drizzle）
 
 | 表名 | 用途 | 关键字段 |
 |---|---|---|
@@ -534,15 +614,21 @@ Owner 在私聊中发送 **`/trace`（不记入聊天历史、不影响记忆）
 
 ---
 
-## 10. 目录结构规划
+## 11. 目录结构规划
 
 ```text
 Hato/
 ├─ docs/
 │  └─ architecture.md          # 本架构设计文档
 ├─ config/
-│  ├─ hato.example.toml        # 全量非密钥系统/渠道/代理/记忆/上下文/沙箱 TOML 模板
-│  └─ models.example.toml      # 全协议 Provider 池与 5 角色槽位 TOML 模板
+│  ├─ hato.example.toml        # 全量非密钥系统/渠道/代理/记忆/上下文/Worker/权限模式 TOML 模板
+│  ├─ models.example.toml      # 全协议 Provider 池与 5 角色槽位 TOML 模板
+│  └─ mcp.example.toml         # Personal / Worker 双区 MCP Server 配置模板
+├─ data/
+│  ├─ skills/
+│  │  ├─ personal/             # Persona 区 Skills (<name>/SKILL.md)
+│  │  └─ worker/               # Worker 区 Skills (<name>/SKILL.md)
+│  └─ worker-cli/              # External CLI 影子隔离目录 (auth 软链 + 过滤配置)
 ├─ prompts/
 │  ├─ persona.md               # 占位人设模板（含气泡规范与边界提示）
 │  ├─ router.md                # 中立轻路由与区间圈定提示词
@@ -553,8 +639,14 @@ Hato/
 │  ├─ config/
 │  │  ├─ app.ts                # smol-toml + TypeBox 校验 config/hato.toml（含热重载）
 │  │  ├─ models.ts             # smol-toml 解析 config/models.toml、pi-ai 全协议构建与槽位解析
+│  │  ├─ mcp.ts                # smol-toml 解析 config/mcp.toml 与双区白名单校验
 │  │  ├─ proxy.ts              # 按 Scope 分流代理 (AsyncLocalStorage + undici Scoped Dispatcher)
 │  │  └─ secrets.ts            # 仅解析 <SLUG>_API_KEY 与 *_env 环境变量中的密钥
+│  ├─ skills/
+│  │  └─ loader.ts             # Personal / Worker 双区 Skill 扫描、索引生成与正文读取
+│  ├─ mcp/
+│  │  ├─ pool.ts               # 轻量宿主机 McpClientPool（供 Persona 与 builtin-pi 转 AgentTool）
+│  │  └─ context-server.ts     # Scoped 只读 Stdio MCP Server（供 External CLI 拉取 context_id）
 │  ├─ gateway/
 │  │  ├─ types.ts              # 统一入站/出站消息、ChannelCapabilities
 │  │  ├─ debouncer.ts          # 1.5s–3s 上下文防抖聚批
@@ -566,7 +658,7 @@ Hato/
 │  │  ├─ agent.ts              # Persona pi-agent-core 实例与 steer/followUp 调度
 │  │  ├─ context.ts            # Prefix 缓存分层、transformContext、convertToLlm
 │  │  ├─ bubbles.ts            # 气泡分段与安全防拆碎判定
-│  │  └─ tools.ts              # delegate() + 4 个零副作用只读微工具
+│  │  └─ tools.ts              # delegate() + 只读微工具 + read_skill + Personal MCP
 │  ├─ time/
 │  │  ├─ clock.ts              # 时区、临时作息覆盖解析
 │  │  ├─ timecard.ts           # 时间卡与代码日期倒计时预计算
@@ -576,12 +668,13 @@ Hato/
 │  │  ├─ router.ts             # 中立轻路由器（定后端、Mandate、区间划定）
 │  │  ├─ context-slice.ts      # context_id 切片构建、reply_to 穿透与有限回溯校验
 │  │  └─ input-router.ts       # needs_input 多工单追问路由与需求变更判定
-│  ├─ mcp/
-│  │  └─ context-server.ts     # Scoped 只读 Stdio MCP Server（供 Codex / Claude Code 拉取 context_id）
 │  ├─ worker/
-│  │  ├─ backend.ts            # ExecutionRunner 双模式接口与路由器
-│  │  ├─ builtin-pi.ts         # 模式 1: pi-agent-core 循环（工单级模型快照 + 上下文拉取工具）
-│  │  ├─ external-cli.ts       # 模式 2: Codex CLI / Claude Code Headless + MCP 注入与 resume
+│  │  ├─ backend.ts            # ExecutionRunner 统一接口与路由器
+│  │  ├─ cli-probe.ts          # Codex / agy / OpenCode / external-pi / CC 动态模式与本机状态探测
+│  │  ├─ overlay.ts            # 本机配置继承 + 个人 MCP/Skills 剥离 + 仅 Hato 生效的权限模式渲染
+│  │  ├─ builtin-pi.ts         # 内置模式: pi-agent-core 循环（工单级模型快照 + 上下文拉取工具）
+│  │  ├─ external-cli.ts       # 外部 CLI 统一执行器 + 流式进度解析 + resume 续跑
+│  │  ├─ adapters/             # codex.ts / agy.ts / opencode-v2.ts / external-pi.ts / claude-code.ts
 │  │  ├─ result-normalizer.ts  # 外部 CLI 输出 + 文件 diff 归一化为标准 Result JSON
 │  │  ├─ sandbox.ts            # Rootless Docker 生命周期与 docker exec 工具封装
 │  │  └─ cleanup.ts            # 14 天临时工作区回收
@@ -606,7 +699,7 @@ Hato/
 
 ---
 
-## 11. MVP 分阶段实施路线
+## 12. MVP 分阶段实施路线
 
 ### Phase 1：全协议底座 + Telegram 陪聊与时间感知闭环（MVP 第一步）
 * 初始化 TypeScript 项目（Node 22 + `@earendil-works/pi-ai` + `@earendil-works/pi-agent-core` + Drizzle SQLite）。
@@ -614,14 +707,15 @@ Hato/
 * 接入 **Telegram (`grammY`)**、Owner 白名单、**上下文防抖聚批**、**气泡分段发送**与占位人设 `prompts/persona.md`。
 * 落地**不可变 Prefix 缓存分层 + 两段式闲时压缩（热缓存预摘要 + 60m 无交互提交）骨架 + 6 层时间卡/绝对时间戳/固定间隔线** + `/trace` 诊断指令。
 
-### Phase 2：打通“三道墙”、按 `context_id` 拉取与轻量同步工单
-* 实现 `delegate()` 快速入队、4 个只读微工具、中立轻路由器 **Router**（TypeBox 校验 + 区间圈定）与 `ScheduleOps` 分流。
-* 实现 `context_slice`（原样保留 + `reply_to` 穿透 + 有限回溯）与 `builtin-pi` 拉取工具，打通 **Result 三分流**（`narration_hint` + `verbatim_blocks` + `artifacts`）。
+### Phase 2：双区 Skills / MCP 底座、“三道墙”与第一梯队 External CLI 骨架
+* 实现 **Personal / Worker 双区 `SkillLoader`**（Persona 静态索引 + `read_skill`）与 **`config/mcp.toml` + 轻量 `McpClientPool`**（先接通 Persona 区，预留 Worker 授权过滤）。
+* 实现 `delegate()` 快速入队、中立轻路由器 **Router**（TypeBox 校验 + 区间圈定 + `Mandate` 能力授权）与 `ScheduleOps` 分流、`context_slice`（原样保留 + `reply_to` 穿透 + 有限回溯）及 **Result 三分流**（`narration_hint` + `verbatim_blocks` + `artifacts`）。
+* 实现 `ExecutionRunner`、`Scoped Context MCP`（`src/mcp/context-server.ts`）、`cli-probe` 动态模式探测与 Web Console 模式配置（`permission_preset` + 单后端原生模式覆写，**仅对 Hato 生效**）、`overlay` 本机配置继承剥离，优先打通第一梯队 **`codex` → `agy` → `opencode-v2`**（强制校验 V2 版本，拒绝裸 `opencode`）及 `builtin-pi` 轻量模式。
 
-### Phase 3：异步工单、双模式 Worker（含 MCP）、追问路由与容器沙箱
-* 接入 Rootless Docker `hato-t_<id>` 沙箱（`builtin-pi` 模式）、`needs_input` 中立追问路由、TG Inline Keyboard `confirm_before` 确认流。
-* 接入 `Scoped Context MCP` 与 `external-cli` 第二模式（**Codex CLI / Claude Code** Headless + `resume` 续跑 + `Result Normalizer` + 目录/环境白名单隔离）。
-* 上线 Watchdog 重启恢复、脚本注册表与 14 天工作区回收策略。
+### Phase 3：第二/三梯队 External CLI、异步追问路由与容器沙箱
+* 接入第二梯队 **`external-pi`**（独立安装的 `pi` CLI）与第三梯队 **`claude-code`**。
+* 接入 Rootless Docker `hato-t_<id>` 沙箱、`needs_input` 中立追问路由与 `resume` 断点续跑、TG Inline Keyboard `confirm_before` 确认流。
+* 上线 Watchdog 重启恢复、脚本注册表与 14 天工作区回收策略；按需评估 `agy acp` / `opencode acp` 实时拦截能力升级。
 
 ### Phase 4：Hindsight 记忆系统与主动关怀
 * 部署 Hindsight Slim（`qwen3-embedding` + `qwen3-reranker`），打通 `persona` / `tech` 双 Bank。

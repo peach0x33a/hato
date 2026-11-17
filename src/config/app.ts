@@ -63,11 +63,20 @@ export const WebConsoleConfigSchema = Type.Object({
   auth_token_env: Type.Optional(Type.String({ minLength: 1 })),
 });
 
+export const ExternalCliPermissionPresetSchema = Type.Union([
+  Type.Literal("follow_host"),
+  Type.Literal("auto_safe"),
+  Type.Literal("yolo"),
+  Type.Literal("read_only"),
+  Type.Literal("custom"),
+]);
+
 export const HatoConfigSchema = Type.Object({
   paths: Type.Object({
     sqlite: Type.String({ minLength: 1 }),
     workspaces_dir: Type.String({ minLength: 1 }),
     prompts_dir: Type.String({ minLength: 1 }),
+    skills_dir: Type.Optional(Type.String({ minLength: 1 })),
   }),
   prompts: Type.Optional(
     Type.Object({
@@ -197,6 +206,9 @@ export const HatoConfigSchema = Type.Object({
     default_backend: Type.Union([
       Type.Literal("builtin-pi"),
       Type.Literal("codex"),
+      Type.Literal("agy"),
+      Type.Literal("opencode-v2"),
+      Type.Literal("external-pi"),
       Type.Literal("claude-code"),
     ]),
     workspace_ttl_days: Type.Number({ minimum: 1 }),
@@ -208,10 +220,60 @@ export const HatoConfigSchema = Type.Object({
     }),
     external_cli: Type.Object({
       allowed_repos: Type.Array(Type.String()),
+      reuse_host_auth_and_provider: Type.Optional(Type.Boolean()),
+      inherit_host_mcp: Type.Optional(Type.Boolean()),
+      host_mcp_allowlist: Type.Optional(Type.Array(Type.String())),
+      permission_preset: Type.Optional(ExternalCliPermissionPresetSchema),
+      timeout_ms: Type.Optional(Type.Number({ minimum: 1000 })),
+      codex: Type.Optional(
+        Type.Object({
+          enabled: Type.Optional(Type.Boolean()),
+          command: Type.Optional(Type.String({ minLength: 1 })),
+          sandbox: Type.Optional(Type.String({ minLength: 1 })),
+          approval: Type.Optional(Type.String({ minLength: 1 })),
+          model: Type.Optional(Type.String({ minLength: 1 })),
+        }),
+      ),
+      agy: Type.Optional(
+        Type.Object({
+          enabled: Type.Optional(Type.Boolean()),
+          command: Type.Optional(Type.String({ minLength: 1 })),
+          mode: Type.Optional(Type.String({ minLength: 1 })),
+          skip_permissions: Type.Optional(Type.Boolean()),
+          sandbox: Type.Optional(Type.Boolean()),
+          model: Type.Optional(Type.String({ minLength: 1 })),
+        }),
+      ),
+      opencode_v2: Type.Optional(
+        Type.Object({
+          enabled: Type.Optional(Type.Boolean()),
+          command: Type.Optional(Type.String({ minLength: 1 })),
+          auto: Type.Optional(Type.Boolean()),
+          agent: Type.Optional(Type.String()),
+          model: Type.Optional(Type.String({ minLength: 1 })),
+        }),
+      ),
+      external_pi: Type.Optional(
+        Type.Object({
+          enabled: Type.Optional(Type.Boolean()),
+          command: Type.Optional(Type.String({ minLength: 1 })),
+          model: Type.Optional(Type.String({ minLength: 1 })),
+        }),
+      ),
+      claude_code: Type.Optional(
+        Type.Object({
+          enabled: Type.Optional(Type.Boolean()),
+          command: Type.Optional(Type.String({ minLength: 1 })),
+          permission_mode: Type.Optional(Type.String({ minLength: 1 })),
+          skip_permissions: Type.Optional(Type.Boolean()),
+          model: Type.Optional(Type.String({ minLength: 1 })),
+        }),
+      ),
     }),
   }),
 });
 
+export type ExternalCliPermissionPreset = Static<typeof ExternalCliPermissionPresetSchema>;
 export type ProxyRuleConfig = Static<typeof ProxyRuleSchema>;
 export type RetryPolicyTomlConfig = Static<typeof RetryPolicySchema>;
 export type TavilySearchConfig = Static<typeof TavilySearchConfigSchema>;
@@ -440,10 +502,63 @@ export function resolveTavilySearchConfig(config: HatoConfig): ResolvedTavilySea
   };
 }
 
+export const DEFAULT_SKILLS_DIR = "./data/skills";
+
+/**
+ * Resolve configured skills root directory (containing `personal/` and `worker/` zones).
+ */
+export function resolveSkillsDir(config: HatoConfig): string {
+  return config.paths.skills_dir?.trim() || DEFAULT_SKILLS_DIR;
+}
+
+export interface ResolvedWorkerExternalCliConfig {
+  allowedRepos: string[];
+  reuseHostAuthAndProvider: boolean;
+  inheritHostMcp: boolean;
+  hostMcpAllowlist: string[];
+  permissionPreset: ExternalCliPermissionPreset;
+  timeoutMs: number;
+}
+
+/**
+ * Resolve external CLI worker orchestration settings with safe defaults.
+ */
+export function resolveWorkerExternalCliConfig(
+  config: HatoConfig,
+): ResolvedWorkerExternalCliConfig {
+  const ext = config.worker.external_cli;
+  return {
+    allowedRepos: [...ext.allowed_repos],
+    reuseHostAuthAndProvider: ext.reuse_host_auth_and_provider ?? true,
+    inheritHostMcp: ext.inherit_host_mcp ?? false,
+    hostMcpAllowlist: [...(ext.host_mcp_allowlist ?? [])],
+    permissionPreset: ext.permission_preset ?? "auto_safe",
+    timeoutMs: ext.timeout_ms ?? 600_000,
+  };
+}
+
 /**
  * Validate a parsed TOML object against HatoConfigSchema.
  */
 export function validateHatoConfigObject(parsed: unknown, sourceLabel = "hato config"): HatoConfig {
+  if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+    const rawWorker = (parsed as Record<string, unknown>).worker;
+    if (rawWorker && typeof rawWorker === "object" && !Array.isArray(rawWorker)) {
+      const workerObj = rawWorker as Record<string, unknown>;
+      if (workerObj.default_backend === "opencode") {
+        throw new Error(
+          `Invalid Hato config (${sourceLabel}): bare "opencode" is unsupported; use "opencode-v2" (requires OpenCode V2).`,
+        );
+      }
+      const extCli = workerObj.external_cli;
+      if (extCli && typeof extCli === "object" && !Array.isArray(extCli) && "opencode" in extCli) {
+        throw new Error(
+          `Invalid Hato config (${sourceLabel}): bare [worker.external_cli.opencode] is unsupported; use [worker.external_cli.opencode_v2] (requires OpenCode V2).`,
+        );
+      }
+    }
+  }
+
   if (!Value.Check(HatoConfigSchema, parsed)) {
     const errors = [...Value.Errors(HatoConfigSchema, parsed)]
       .slice(0, 6)

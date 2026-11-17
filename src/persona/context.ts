@@ -64,15 +64,24 @@ export interface EphemeralTailBuilderInput {
 }
 
 /**
- * Assemble Layer 1 static system prompt from persona markdown + static relationship facts.
+ * Assemble Layer 1 static system prompt from persona markdown, static relationship facts,
+ * and the deterministic Level 1 Personal Skills index.
  */
-export function buildStaticSystemPrompt(basePersonaPrompt: string, repo: HatoRepository): string {
+export function buildStaticSystemPrompt(
+  basePersonaPrompt: string,
+  repo: HatoRepository,
+  personalSkillsIndexText = "",
+): string {
+  const parts = [basePersonaPrompt.trim()];
   const facts = repo.listRelationshipFacts();
-  if (facts.length === 0) {
-    return basePersonaPrompt.trim();
+  if (facts.length > 0) {
+    const factLines = facts.map((f) => `- ${f.key}: ${f.value}`).join("\n");
+    parts.push(`## 关系与约定（固定参考）\n${factLines}`);
   }
-  const factLines = facts.map((f) => `- ${f.key}: ${f.value}`).join("\n");
-  return `${basePersonaPrompt.trim()}\n\n## 关系与约定（固定参考）\n${factLines}`;
+  if (personalSkillsIndexText.trim().length > 0) {
+    parts.push(personalSkillsIndexText.trim());
+  }
+  return parts.filter(Boolean).join("\n\n");
 }
 
 /**

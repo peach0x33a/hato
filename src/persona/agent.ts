@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { Agent, type AgentMessage } from "@earendil-works/pi-agent-core";
+import { Agent, type AgentMessage, type AgentTool } from "@earendil-works/pi-agent-core";
 import {
   clampThinkingLevel,
   createInitialSystemMessage,
@@ -15,13 +15,20 @@ import {
   resolveMemoryRecallConfig,
   resolvePromptDisabled,
   resolvePromptOrder,
+  resolveSkillsDir,
   type HatoConfig,
 } from "../config/app.js";
 import { supportsCustomFetchOption, type ModelRegistry } from "../config/models.js";
 import type { ScopedProxyRouter } from "../config/proxy.js";
 import type { HatoRepository, RawMessageRecord } from "../db/repo.js";
 import type { InboundBatch, InboundMessage } from "../gateway/types.js";
+import type { McpClientPool } from "../mcp/pool.js";
 import { shouldAutoRecall, type MemoryRecallItem, type MemoryStore } from "../memory/store.js";
+import {
+  formatSkillsIndexBlock,
+  loadZoneSkills,
+  type SkillEntry,
+} from "../skills/loader.js";
 import { computeTurnMetrics, extractTraceSteps, formatLlmTelemetryLog } from "../stats/metrics.js";
 import { logWarn } from "../utils/logger.js";
 import { splitIntoBubbles } from "./bubbles.js";
@@ -75,6 +82,8 @@ export class PersonaRuntime {
   private readonly agent: Agent;
   private basePersonaPrompt = "";
   private layeredPrompts: LoadedLayeredPrompts | null = null;
+  private personalSkills: SkillEntry[] = [];
+  private personalSkillsIndexText = "";
   private lastTimeCardSnapshot = "";
   private activeCallStartPerf: number | null = null;
   private activeBeforeToolHook: ((toolName: string, input: unknown) => Promise<void>) | null = null;
@@ -92,47 +101,20 @@ export class PersonaRuntime {
     private readonly browserRuntime?: BrowserRuntime,
     private memoryStore: MemoryStore | null = null,
     private readonly hatoConfigPath = "config/hato.toml",
+    private readonly mcpPool: McpClientPool | null = null,
   ) {
     this.reloadPrompt();
     const resolved = this.modelRegistry.resolveSlot("persona");
     const canonicalUserId = this.hatoConfig.owner.canonical_user_id;
-    const tools = createPersonaReadOnlyTools({
-      repo: this.repo,
-      canonicalUserId,
-      getTimezone: () => this.getEffectiveTimezone(canonicalUserId),
-      getHatoConfig: () => this.hatoConfig,
-      proxyRouter: this.proxyRouter,
-      browserRuntime: this.browserRuntime,
-      getMemoryStore: () => this.memoryStore,
-      selfConfigDeps: {
-        hatoConfigPath: this.hatoConfigPath,
-        getHatoConfig: () => this.hatoConfig,
-        getModelRegistry: () => this.modelRegistry,
-        repo: this.repo,
-        onReloadRuntime: async () => {
-          if (this.reloadHandler) {
-            await this.reloadHandler();
-          } else {
-            this.reloadPrompt();
-            if (!this.activeTurn) {
-              this.refreshTranscriptFromDb();
-            }
-          }
-        },
-      },
-      onMemoryRecalled: (ids) => {
-        for (const id of ids) this.activeTurnRecalledIds.add(id);
-      },
-      onBeforeToolExecute: async (toolName, input) => {
-        if (this.activeBeforeToolHook) {
-          await this.activeBeforeToolHook(toolName, input);
-        }
-      },
-    });
+    const tools = this.buildPersonaTools();
 
     this.agent = new Agent({
       initialState: {
-        systemPrompt: buildStaticSystemPrompt(this.basePersonaPrompt, this.repo),
+        systemPrompt: buildStaticSystemPrompt(
+          this.basePersonaPrompt,
+          this.repo,
+          this.personalSkillsIndexText,
+        ),
         model: resolved.model,
         thinkingLevel: clampThinkingLevel(resolved.model, resolved.model.reasoning ? "low" : "off"),
         tools,
@@ -191,6 +173,7 @@ export class PersonaRuntime {
     this.reloadPrompt();
     // Avoid clobbering in-flight agent.state.messages if triggered by self_config mid-turn.
     if (!this.activeTurn) {
+      this.syncTools();
       this.refreshTranscriptFromDb();
     }
   }
@@ -210,6 +193,16 @@ export class PersonaRuntime {
       resolvePromptDisabled(this.hatoConfig),
     );
     this.basePersonaPrompt = this.layeredPrompts.combinedText;
+    this.personalSkills = loadZoneSkills(resolveSkillsDir(this.hatoConfig), "personal");
+    this.personalSkillsIndexText = formatSkillsIndexBlock(this.personalSkills);
+  }
+
+  syncTools(): void {
+    this.agent.state.tools = this.buildPersonaTools();
+  }
+
+  getPersonalSkills(): readonly SkillEntry[] {
+    return this.personalSkills;
   }
 
   getLayeredPrompts(): LoadedLayeredPrompts | null {
@@ -222,13 +215,57 @@ export class PersonaRuntime {
 
   refreshTranscriptFromDb(): void {
     const canonicalUserId = this.hatoConfig.owner.canonical_user_id;
-    const systemPromptText = buildStaticSystemPrompt(this.basePersonaPrompt, this.repo);
+    const systemPromptText = buildStaticSystemPrompt(
+      this.basePersonaPrompt,
+      this.repo,
+      this.personalSkillsIndexText,
+    );
     const leadingSystem = createInitialSystemMessage(
       systemPromptText,
       this.agent.state.tools.map(toToolDeclaration),
     );
     const history = hydrateTranscriptFromDb(this.repo, canonicalUserId);
     this.agent.state.messages = leadingSystem ? [leadingSystem, ...history] : history;
+  }
+
+  private buildPersonaTools(): AgentTool<any>[] {
+    const canonicalUserId = this.hatoConfig.owner.canonical_user_id;
+    return createPersonaReadOnlyTools({
+      repo: this.repo,
+      canonicalUserId,
+      getTimezone: () => this.getEffectiveTimezone(canonicalUserId),
+      getHatoConfig: () => this.hatoConfig,
+      proxyRouter: this.proxyRouter,
+      browserRuntime: this.browserRuntime,
+      getMemoryStore: () => this.memoryStore,
+      enableReadSkillTool: this.personalSkills.length > 0,
+      extraTools: this.mcpPool?.getToolsForZone("personal") ?? [],
+      selfConfigDeps: {
+        hatoConfigPath: this.hatoConfigPath,
+        getHatoConfig: () => this.hatoConfig,
+        getModelRegistry: () => this.modelRegistry,
+        repo: this.repo,
+        onReloadRuntime: async () => {
+          if (this.reloadHandler) {
+            await this.reloadHandler();
+          } else {
+            this.reloadPrompt();
+            if (!this.activeTurn) {
+              this.syncTools();
+              this.refreshTranscriptFromDb();
+            }
+          }
+        },
+      },
+      onMemoryRecalled: (ids) => {
+        for (const id of ids) this.activeTurnRecalledIds.add(id);
+      },
+      onBeforeToolExecute: async (toolName, input) => {
+        if (this.activeBeforeToolHook) {
+          await this.activeBeforeToolHook(toolName, input);
+        }
+      },
+    });
   }
 
   /**
@@ -689,7 +726,11 @@ export class PersonaRuntime {
     messagesToSummarize: RawMessageRecord[];
   }): Promise<string> {
     const resolved = this.modelRegistry.resolveSlot("persona");
-    const systemPrompt = buildStaticSystemPrompt(this.basePersonaPrompt, this.repo);
+    const systemPrompt = buildStaticSystemPrompt(
+      this.basePersonaPrompt,
+      this.repo,
+      this.personalSkillsIndexText,
+    );
     const tz = this.getEffectiveTimezone(params.canonicalUserId);
 
     const agentMessages: AgentMessage[] = [];

@@ -11,6 +11,7 @@ import {
   type HatoConfig,
 } from "./config/app.js";
 import { collectReloadDiff, fingerprintSecret, type ReloadSnapshot } from "./config/diff.js";
+import { loadMcpConfig } from "./config/mcp.js";
 import { ModelRegistry } from "./config/models.js";
 import { ScopedProxyRouter } from "./config/proxy.js";
 import { loadSecretEnv, reloadSecretEnv, requireSecret } from "./config/secrets.js";
@@ -20,6 +21,7 @@ import { HatoRepository } from "./db/repo.js";
 import { MessageDebouncer, mergeInboundBatches } from "./gateway/debouncer.js";
 import { TelegramAdapter } from "./gateway/tg.js";
 import type { InboundBatch } from "./gateway/types.js";
+import { McpClientPool } from "./mcp/pool.js";
 import { CompactionManager } from "./memory/compaction.js";
 import { MemoryCurator } from "./memory/curator.js";
 import { MemoryEchoStore } from "./memory/memoryecho.js";
@@ -30,6 +32,7 @@ import { WebConsoleServer } from "./web-console/server.js";
 
 const HATO_CONFIG_PATH = "config/hato.toml";
 const MODELS_CONFIG_PATH = "config/models.toml";
+const MCP_CONFIG_PATH = "config/mcp.toml";
 
 async function main(): Promise<void> {
   loadSecretEnv();
@@ -53,6 +56,8 @@ async function main(): Promise<void> {
   });
 
   const modelRegistry = new ModelRegistry(MODELS_CONFIG_PATH, repo);
+  const mcpPool = new McpClientPool(proxyRouter);
+  await mcpPool.syncConfig(loadMcpConfig(MCP_CONFIG_PATH), { eagerZones: ["personal"] });
   const browserRuntime = new BrowserRuntime(hatoConfig, modelRegistry, proxyRouter, undefined, repo);
   let memoryStore = buildMemoryStore(hatoConfig, proxyRouter, repo);
   const personaRuntime = new PersonaRuntime(
@@ -63,6 +68,7 @@ async function main(): Promise<void> {
     browserRuntime,
     memoryStore,
     HATO_CONFIG_PATH,
+    mcpPool,
   );
   const memoryCurator = new MemoryCurator(
     hatoConfig,
@@ -117,6 +123,7 @@ async function main(): Promise<void> {
       idleCommitAfterMinutes: nextConfig.context.idle_commit_after_minutes,
     });
     memoryStore = buildMemoryStore(nextConfig, proxyRouter, repo, memoryStore);
+    await mcpPool.syncConfig(loadMcpConfig(MCP_CONFIG_PATH), { eagerZones: ["personal"] });
     personaRuntime.updateConfig(nextConfig, memoryStore);
     memoryCurator.updateConfig(nextConfig, memoryStore);
     tgAdapter?.updateConfig(nextConfig);
@@ -404,6 +411,7 @@ async function main(): Promise<void> {
     compactionManager.dispose();
     memoryCurator.dispose();
     await browserRuntime.dispose();
+    await mcpPool.closeAll();
     await webConsoleServer?.stop();
     await tgAdapter?.stop();
     proxyRouter.uninstallGlobalFetchHook();
