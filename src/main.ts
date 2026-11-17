@@ -122,14 +122,27 @@ async function main(): Promise<void> {
     bus,
   });
   personaRuntime.setDelegateHandler((input) => ticketCoordinator.enqueueDelegation(input));
-  personaRuntime.setSendFileHandler(async ({ channel, path, caption }) => {
+  const resolveStrictOutboundTarget = (
+    channel: "tg" | "qq",
+  ): { channel: "tg" | "qq"; adapter: ChannelAdapter; targetId: string } | null => {
+    if (channel === "qq") {
+      const qqTargetId = resolveQqTarget();
+      return qqAdapter && qqTargetId ? { channel: "qq", adapter: qqAdapter, targetId: qqTargetId } : null;
+    }
+    const tgTargetId = resolveTgTarget();
+    return tgAdapter && tgTargetId ? { channel: "tg", adapter: tgAdapter, targetId: tgTargetId } : null;
+  };
+
+  personaRuntime.setSendFileHandler(async ({ channel, strictChannel, path, caption }) => {
     if (channel === "web") {
       return {
         ok: false,
         message: `Web Console 暂不支持直接发送文件附件，本地路径为: ${path}`,
       };
     }
-    const outbound = resolveOutboundTarget(channel);
+    const outbound = strictChannel
+      ? resolveStrictOutboundTarget(channel)
+      : resolveOutboundTarget(channel);
     if (!outbound?.adapter.sendFile) {
       return {
         ok: false,
@@ -140,6 +153,63 @@ async function main(): Promise<void> {
     return {
       ok: true,
       message: `已发送文件到 ${outbound.channel.toUpperCase()}: ${basename(path)}`,
+    };
+  });
+
+  personaRuntime.setSendMessageHandler(async ({ canonicalUserId, channel, text, filePath, caption }) => {
+    const trimmedText = text?.trim();
+    if (channel === "web") {
+      if (trimmedText) {
+        repo.appendRawMessage({
+          canonicalUserId,
+          channel: "web",
+          role: "assistant",
+          content: trimmedText,
+          createdAt: Date.now(),
+        });
+        personaRuntime.refreshTranscriptFromDb();
+      }
+      if (filePath && !trimmedText) {
+        return {
+          ok: false,
+          message: `Web Console 暂不支持直接发送文件附件，本地路径为: ${filePath}`,
+        };
+      }
+      return {
+        ok: true,
+        message: filePath
+          ? `已将文本消息写入 Web 控制台（文件附件请取本地路径: ${filePath}）`
+          : "已发送消息到 Web 控制台",
+      };
+    }
+
+    const outbound = resolveStrictOutboundTarget(channel);
+    if (!outbound) {
+      return {
+        ok: false,
+        message: `${channel.toUpperCase()} 网关未就绪或未绑定 owner（可通过 /sethome 绑定），无法发送跨平台消息`,
+      };
+    }
+
+    const sentParts: string[] = [];
+    if (trimmedText) {
+      await outbound.adapter.sendText(outbound.targetId, trimmedText);
+      sentParts.push("文本消息");
+    }
+    if (filePath) {
+      if (!outbound.adapter.sendFile) {
+        return {
+          ok: false,
+          message: `${channel.toUpperCase()} 网关当前不支持发送文件: ${filePath}`,
+        };
+      }
+      await outbound.adapter.sendFile(outbound.targetId, filePath, basename(filePath), caption);
+      sentParts.push(`文件 ${basename(filePath)}`);
+    }
+
+    return {
+      ok: true,
+      message: `已发送到 ${outbound.channel.toUpperCase()}: ${sentParts.join(" + ")}`,
     };
   });
   personaRuntime.setBotProfileHandler(async (input) => {

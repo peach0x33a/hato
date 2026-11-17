@@ -104,7 +104,17 @@ export class PersonaRuntime {
   private sendFileHandler:
     | ((input: {
         channel: InboundBatch["originChannel"];
+        strictChannel?: boolean;
         path: string;
+        caption?: string;
+      }) => Promise<{ ok: boolean; message: string }>)
+    | null = null;
+  private sendMessageHandler:
+    | ((input: {
+        canonicalUserId: string;
+        channel: InboundBatch["originChannel"];
+        text?: string;
+        filePath?: string;
         caption?: string;
       }) => Promise<{ ok: boolean; message: string }>)
     | null = null;
@@ -231,12 +241,30 @@ export class PersonaRuntime {
     handler:
       | ((input: {
           channel: InboundBatch["originChannel"];
+          strictChannel?: boolean;
           path: string;
           caption?: string;
         }) => Promise<{ ok: boolean; message: string }>)
       | null,
   ): void {
     this.sendFileHandler = handler;
+    if (!this.activeTurn) {
+      this.syncTools();
+    }
+  }
+
+  setSendMessageHandler(
+    handler:
+      | ((input: {
+          canonicalUserId: string;
+          channel: InboundBatch["originChannel"];
+          text?: string;
+          filePath?: string;
+          caption?: string;
+        }) => Promise<{ ok: boolean; message: string }>)
+      | null,
+  ): void {
+    this.sendMessageHandler = handler;
     if (!this.activeTurn) {
       this.syncTools();
     }
@@ -332,10 +360,34 @@ export class PersonaRuntime {
         : {}),
       ...(this.sendFileHandler
         ? {
-            onSendFile: (input: { path: string; caption?: string }) =>
-              this.sendFileHandler!({
-                channel: this.activeTurnOriginChannel,
+            onSendFile: (input: {
+              path: string;
+              caption?: string;
+              channel?: "current" | "tg" | "qq";
+            }) => {
+              const explicit = input.channel && input.channel !== "current" ? input.channel : undefined;
+              return this.sendFileHandler!({
+                channel: explicit ?? this.activeTurnOriginChannel,
+                strictChannel: Boolean(explicit),
                 path: input.path,
+                caption: input.caption,
+              });
+            },
+          }
+        : {}),
+      ...(this.sendMessageHandler
+        ? {
+            onSendMessage: (input: {
+              channel: InboundBatch["originChannel"];
+              text?: string;
+              filePath?: string;
+              caption?: string;
+            }) =>
+              this.sendMessageHandler!({
+                canonicalUserId,
+                channel: input.channel,
+                text: input.text,
+                filePath: input.filePath,
                 caption: input.caption,
               }),
           }

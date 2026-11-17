@@ -141,6 +141,21 @@ const DelegateParams = obj({
 const SendFileParams = obj({
   path: str({ description: "Local file path to send to the user" }),
   caption: opt(str({ description: "Optional short caption for the file" })),
+  channel: opt(
+    oneOf(["current", "tg", "qq"], {
+      description:
+        "Target platform: 'current' (default, reply in current chat), 'tg' (Telegram), or 'qq' (QQ).",
+    }),
+  ),
+});
+
+const SendMessageParams = obj({
+  channel: oneOf(["tg", "qq", "web"], {
+    description: "Target platform to send the message to: 'tg', 'qq', or 'web'.",
+  }),
+  text: opt(str({ description: "Optional text message to deliver to the target platform" })),
+  file_path: opt(str({ description: "Optional local file or image path to deliver to the target platform" })),
+  caption: opt(str({ description: "Optional short caption when sending file_path" })),
 });
 
 const BotProfileParams = obj({
@@ -172,7 +187,20 @@ export function createPersonaReadOnlyTools(params: {
     ticketId: string;
     status: string;
   };
-  onSendFile?: (input: { path: string; caption?: string }) => Promise<{
+  onSendFile?: (input: {
+    path: string;
+    caption?: string;
+    channel?: "current" | "tg" | "qq";
+  }) => Promise<{
+    ok: boolean;
+    message: string;
+  }>;
+  onSendMessage?: (input: {
+    channel: "tg" | "qq" | "web";
+    text?: string;
+    filePath?: string;
+    caption?: string;
+  }) => Promise<{
     ok: boolean;
     message: string;
   }>;
@@ -663,7 +691,7 @@ export function createPersonaReadOnlyTools(params: {
       name: "send_file",
       label: "发送文件",
       description:
-        "将本地文件发送到当前聊天窗口。仅在用户明确索取文件、或你判断需要把生成的文件发给用户时调用。",
+        "将本地文件发送到当前聊天窗口或指定平台（tg / qq）。仅在用户明确索取文件、要求发到某平台、或你判断需要把生成的文件发给用户时调用。",
       parameters: SendFileParams,
       async execute(_toolCallId, input) {
         const resolved = resolve(input.path.trim());
@@ -680,10 +708,14 @@ export function createPersonaReadOnlyTools(params: {
               details: { ok: false, path: resolved },
             };
           }
-          const res = await sendFileFn({ path: resolved, caption: input.caption });
+          const res = await sendFileFn({
+            path: resolved,
+            caption: input.caption,
+            channel: input.channel,
+          });
           return {
             content: [{ type: "text", text: res.message }],
-            details: { ok: res.ok, path: resolved },
+            details: { ok: res.ok, path: resolved, channel: input.channel ?? "current" },
           };
         } catch (err) {
           return {
@@ -699,6 +731,66 @@ export function createPersonaReadOnlyTools(params: {
       },
     };
     tools.push(sendFileTool);
+  }
+
+  if (params.onSendMessage) {
+    const sendMessageFn = params.onSendMessage;
+    const sendMessageTool: AgentTool<typeof SendMessageParams> = {
+      name: "send_message",
+      label: "跨平台发消息",
+      description:
+        "主动向指定平台（tg、qq 或 web）发送文本消息和/或本地文件（图片、附件）。适合跨平台转达、把生成好的图/文件直接发到 QQ 或 Telegram。",
+      parameters: SendMessageParams,
+      async execute(_toolCallId, input) {
+        const text = input.text?.trim() || undefined;
+        const rawFile = input.file_path?.trim();
+        let resolvedFile: string | undefined;
+        if (rawFile) {
+          resolvedFile = resolve(rawFile);
+          if (!existsSync(resolvedFile)) {
+            return {
+              content: [{ type: "text", text: `文件不存在: ${resolvedFile}` }],
+              details: { ok: false, channel: input.channel, path: resolvedFile },
+            };
+          }
+          if (!statSync(resolvedFile).isFile()) {
+            return {
+              content: [{ type: "text", text: `目标路径不是常规文件: ${resolvedFile}` }],
+              details: { ok: false, channel: input.channel, path: resolvedFile },
+            };
+          }
+        }
+        if (!text && !resolvedFile) {
+          return {
+            content: [{ type: "text", text: "请至少提供 text 或 file_path 中的一项。" }],
+            details: { ok: false, channel: input.channel },
+          };
+        }
+        try {
+          const res = await sendMessageFn({
+            channel: input.channel,
+            text,
+            filePath: resolvedFile,
+            caption: input.caption?.trim() || undefined,
+          });
+          return {
+            content: [{ type: "text", text: res.message }],
+            details: { ok: res.ok, channel: input.channel, path: resolvedFile },
+          };
+        } catch (err) {
+          return {
+            content: [
+              {
+                type: "text",
+                text: `跨平台发送失败: ${err instanceof Error ? err.message : String(err)}`,
+              },
+            ],
+            details: { ok: false, channel: input.channel, path: resolvedFile },
+          };
+        }
+      },
+    };
+    tools.push(sendMessageTool);
   }
 
   if (params.onBotProfile) {

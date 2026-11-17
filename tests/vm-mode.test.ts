@@ -7,6 +7,8 @@ import { resolveWorkerExecutionMode, resolveWorkerVmWorkdir } from "../src/confi
 import { ensureHatoHomeConfig, resolveHatoHomeDir } from "../src/config/paths.js";
 import { createDefaultHatoConfig } from "../src/setup/presets.js";
 import { loadZoneSkills, selectWorkerSkills } from "../src/skills/loader.js";
+import { createPersonaReadOnlyTools } from "../src/persona/tools.js";
+import { ScopedProxyRouter } from "../src/config/proxy.js";
 import { isProtectedEnvPath } from "../src/worker/builtin-pi.js";
 
 test("resolveWorkerExecutionMode and resolveWorkerVmWorkdir handle isolated and vm_unrestricted modes", () => {
@@ -72,4 +74,57 @@ test("hato-self-ops and hato-vm-ops skills are discoverable in personal and work
 
   const worker = selectWorkerSkills("data/skills", ["hato-vm-ops"]);
   assert.ok(worker.some((s) => s.name === "hato-vm-ops"));
+});
+
+test("send_message and send_file support explicit cross-platform channel routing", async () => {
+  const tempDir = mkdtempSync(join(tmpdir(), "hato-cross-send-"));
+  const sampleFile = join(tempDir, "sticker.png");
+  writeFileSync(sampleFile, "png-bytes", "utf8");
+
+  const calls: Array<{ tool: string; channel?: string; text?: string; path?: string }> = [];
+  try {
+    const tools = createPersonaReadOnlyTools({
+      repo: {} as any,
+      canonicalUserId: "owner",
+      getTimezone: () => "Asia/Shanghai",
+      getHatoConfig: () => createDefaultHatoConfig(),
+      proxyRouter: new ScopedProxyRouter([]),
+      onSendFile: async (input) => {
+        calls.push({ tool: "send_file", channel: input.channel, path: input.path });
+        return { ok: true, message: `sent to ${input.channel}` };
+      },
+      onSendMessage: async (input) => {
+        calls.push({
+          tool: "send_message",
+          channel: input.channel,
+          text: input.text,
+          path: input.filePath,
+        });
+        return { ok: true, message: `delivered to ${input.channel}` };
+      },
+    });
+
+    const sendFileTool = tools.find((t) => t.name === "send_file");
+    const sendMsgTool = tools.find((t) => t.name === "send_message");
+    assert.ok(sendFileTool);
+    assert.ok(sendMsgTool);
+
+    await sendFileTool.execute("c1", { path: sampleFile, channel: "qq" });
+    await sendMsgTool.execute("c2", {
+      channel: "qq",
+      text: "贴纸发你啦",
+      file_path: sampleFile,
+    });
+
+    assert.equal(calls.length, 2);
+    assert.deepEqual(calls[0], { tool: "send_file", channel: "qq", path: sampleFile });
+    assert.deepEqual(calls[1], {
+      tool: "send_message",
+      channel: "qq",
+      text: "贴纸发你啦",
+      path: sampleFile,
+    });
+  } finally {
+    rmSync(tempDir, { recursive: true, force: true });
+  }
 });
