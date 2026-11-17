@@ -1,3 +1,5 @@
+import { existsSync, readFileSync } from "node:fs";
+import { basename, resolve } from "node:path";
 import {
   createModels,
   createProvider,
@@ -6,7 +8,8 @@ import {
   type Model,
   type MutableModels,
 } from "@earendil-works/pi-ai";
-import type { ResolvedTavilySearchConfig } from "../config/app.js";
+import type { ResolvedMemoryEchoConfig, ResolvedTavilySearchConfig } from "../config/app.js";
+import { QqOpenApiClient } from "../gateway/qq-client.js";
 import {
   resolveBuiltInApiStreams,
   supportsCustomFetchOption,
@@ -270,6 +273,192 @@ async function fetchSingleTelegramUserProfile(params: {
     return {
       id: userId,
       ok: false,
+      error: err instanceof Error ? err.message : String(err),
+    };
+  }
+}
+
+/**
+ * Fetch the Telegram bot's own profile photo directly via getUserProfilePhotos + getFile
+ * (since bots cannot call getChat on their own bot_id).
+ */
+export async function fetchTelegramBotAvatar(params: {
+  baseUrl: string;
+  botToken: string;
+  botId: number | string;
+  proxyRouter: ScopedProxyRouter;
+  timeoutMs?: number;
+}): Promise<string | undefined> {
+  const cleanBaseUrl = params.baseUrl.replace(/\/+$/, "");
+  const token = params.botToken.trim();
+  const botIdStr = String(params.botId).trim();
+  if (!token || !botIdStr) return undefined;
+
+  const scope = "gateway.telegram";
+  const timeoutMs = params.timeoutMs ?? 5_000;
+  try {
+    const photosUrl = `${cleanBaseUrl}/bot${token}/getUserProfilePhotos?user_id=${encodeURIComponent(botIdStr)}&limit=1`;
+    const photosRes = await params.proxyRouter.scopedFetch(
+      photosUrl,
+      { method: "GET", signal: AbortSignal.timeout(timeoutMs) },
+      scope,
+    );
+    const photosData = (await photosRes.json().catch(() => null)) as {
+      ok?: boolean;
+      description?: string;
+      result?: { photos?: Array<Array<{ file_id?: string }>> };
+    } | null;
+    if (!photosRes.ok || !photosData?.ok) {
+      console.warn(
+        `[WARN] [TG] getUserProfilePhotos failed for bot ${botIdStr}: HTTP ${photosRes.status} ${photosData?.description ?? ""}`,
+      );
+      return undefined;
+    }
+    const firstSizes = photosData.result?.photos?.[0];
+    const fileId = firstSizes?.[firstSizes.length - 1]?.file_id?.trim() || firstSizes?.[0]?.file_id?.trim() || "";
+    if (!fileId) return undefined;
+
+    const getFileUrl = `${cleanBaseUrl}/bot${token}/getFile?file_id=${encodeURIComponent(fileId)}`;
+    const fileRes = await params.proxyRouter.scopedFetch(
+      getFileUrl,
+      { method: "GET", signal: AbortSignal.timeout(timeoutMs) },
+      scope,
+    );
+    const fileData = (await fileRes.json().catch(() => null)) as {
+      ok?: boolean;
+      result?: { file_path?: string };
+    } | null;
+    const filePath = fileData?.ok ? fileData.result?.file_path?.trim() : undefined;
+    if (!filePath) return undefined;
+
+    const cleanPath = filePath.replace(/^\/+/, "");
+    const downloadUrl = `${cleanBaseUrl}/file/bot${token}/${cleanPath}`;
+    const imgRes = await params.proxyRouter.scopedFetch(
+      downloadUrl,
+      { method: "GET", signal: AbortSignal.timeout(timeoutMs) },
+      scope,
+    );
+    if (!imgRes.ok) return undefined;
+    const buf = await imgRes.arrayBuffer();
+    if (buf.byteLength === 0 || buf.byteLength > MAX_TELEGRAM_AVATAR_BYTES) return undefined;
+    const mime = inferImageMimeType(cleanPath, imgRes.headers.get("content-type"));
+    return `data:${mime};base64,${Buffer.from(buf).toString("base64")}`;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Update Telegram bot's own profile (name, description, short description, avatar) via Bot API.
+ */
+export async function updateTelegramBotProfile(params: {
+  baseUrl: string;
+  botToken: string;
+  proxyRouter: ScopedProxyRouter;
+  name?: string;
+  description?: string;
+  shortDescription?: string;
+  avatarPath?: string;
+  removeAvatar?: boolean;
+  timeoutMs?: number;
+}): Promise<{ ok: boolean; updated: string[]; error?: string }> {
+  const cleanBaseUrl = params.baseUrl.replace(/\/+$/, "");
+  const token = params.botToken.trim();
+  if (!token) {
+    return { ok: false, updated: [], error: "Bot Token 为空，无法修改 Telegram 机器人信息" };
+  }
+
+  const scope = "gateway.telegram";
+  const timeoutMs = params.timeoutMs ?? 15_000;
+  const updated: string[] = [];
+
+  const callJsonMethod = async (method: string, body: Record<string, unknown>) => {
+    const res = await params.proxyRouter.scopedFetch(
+      `${cleanBaseUrl}/bot${token}/${method}`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+        signal: AbortSignal.timeout(timeoutMs),
+      },
+      scope,
+    );
+    const data = (await res.json().catch(() => null)) as {
+      ok?: boolean;
+      description?: string;
+    } | null;
+    if (!res.ok || !data?.ok) {
+      throw new Error(
+        data?.description
+          ? `${method} 失败 (HTTP ${res.status}): ${data.description}`
+          : `${method} 失败 (HTTP ${res.status})`,
+      );
+    }
+  };
+
+  try {
+    if (params.name !== undefined) {
+      await callJsonMethod("setMyName", { name: params.name });
+      updated.push("name");
+    }
+    if (params.description !== undefined) {
+      await callJsonMethod("setMyDescription", { description: params.description });
+      updated.push("description");
+    }
+    if (params.shortDescription !== undefined) {
+      await callJsonMethod("setMyShortDescription", {
+        short_description: params.shortDescription,
+      });
+      updated.push("short_description");
+    }
+    if (params.removeAvatar) {
+      await callJsonMethod("removeMyProfilePhoto", {});
+      updated.push("remove_avatar");
+    } else if (params.avatarPath !== undefined) {
+      const abs = resolve(params.avatarPath.trim());
+      if (!existsSync(abs)) {
+        throw new Error(`头像文件不存在: ${abs}`);
+      }
+      const bytes = readFileSync(abs);
+      const mime = inferImageMimeType(abs, null);
+      const form = new FormData();
+      form.append(
+        "photo",
+        JSON.stringify({ type: "static", photo: "attach://avatar" }),
+      );
+      form.append("avatar", new Blob([bytes], { type: mime }), basename(abs));
+      const tempReq = new Request("http://localhost", { method: "POST", body: form });
+      const multipartContentType = tempReq.headers.get("content-type") || "multipart/form-data";
+      const multipartBody = Buffer.from(await tempReq.arrayBuffer());
+      const res = await params.proxyRouter.scopedFetch(
+        `${cleanBaseUrl}/bot${token}/setMyProfilePhoto`,
+        {
+          method: "POST",
+          headers: { "Content-Type": multipartContentType },
+          body: multipartBody,
+          signal: AbortSignal.timeout(timeoutMs),
+        },
+        scope,
+      );
+      const data = (await res.json().catch(() => null)) as {
+        ok?: boolean;
+        description?: string;
+      } | null;
+      if (!res.ok || !data?.ok) {
+        throw new Error(
+          data?.description
+            ? `setMyProfilePhoto 失败 (HTTP ${res.status}): ${data.description}`
+            : `setMyProfilePhoto 失败 (HTTP ${res.status})`,
+        );
+      }
+      updated.push("avatar");
+    }
+
+    return { ok: true, updated };
+  } catch (err) {
+    return {
+      ok: false,
+      updated,
       error: err instanceof Error ? err.message : String(err),
     };
   }
@@ -678,4 +867,234 @@ export async function probeTavilySearch(params: {
     resultCount: out.results.length,
     error: out.error,
   };
+}
+
+export interface QqProbeResult {
+  ok: boolean;
+  baseUrl: string;
+  latencyMs: number;
+  proxy: ProxyResolution;
+  gatewayUrl?: string;
+  error?: string;
+}
+
+/**
+ * Verify QQ Official Bot credentials (App Access Token exchange) and GET /gateway reachability.
+ */
+export async function probeQqGateway(params: {
+  baseUrl: string;
+  appId: string;
+  clientSecret: string;
+  proxyRouter: ScopedProxyRouter;
+  tokenUrl?: string;
+}): Promise<QqProbeResult> {
+  const cleanBaseUrl = params.baseUrl.replace(/\/+$/, "");
+  const scope = "gateway.qq";
+  const proxy = params.proxyRouter.resolveScope(scope);
+  const startedAt = Date.now();
+
+  if (!params.appId.trim() || !params.clientSecret.trim()) {
+    return {
+      ok: false,
+      baseUrl: cleanBaseUrl,
+      latencyMs: 0,
+      proxy,
+      error: "QQ app_id 或 client_secret 为空，无法发起连通性探测",
+    };
+  }
+
+  try {
+    const client = new QqOpenApiClient({
+      baseUrl: cleanBaseUrl,
+      appId: params.appId.trim(),
+      clientSecret: params.clientSecret.trim(),
+      proxyRouter: params.proxyRouter,
+      tokenUrl: params.tokenUrl,
+    });
+    const gatewayUrl = await client.getGatewayUrl();
+    return {
+      ok: true,
+      baseUrl: cleanBaseUrl,
+      latencyMs: Date.now() - startedAt,
+      proxy,
+      gatewayUrl,
+    };
+  } catch (err) {
+    return {
+      ok: false,
+      baseUrl: cleanBaseUrl,
+      latencyMs: Date.now() - startedAt,
+      proxy,
+      error: err instanceof Error ? err.message : String(err),
+    };
+  }
+}
+
+export interface MemoryServiceProbeResult {
+  ok: boolean;
+  provider: string;
+  baseUrl: string;
+  latencyMs: number;
+  proxy: ProxyResolution;
+  vaultCount?: number;
+  skipped?: boolean;
+  error?: string;
+}
+
+/**
+ * Verify MemoryEcho (or configured external memory service) connectivity and API key.
+ */
+export async function probeMemoryService(params: {
+  provider: "none" | "memoryecho" | "hindsight";
+  memoryEcho: ResolvedMemoryEchoConfig;
+  hindsight?: { base_url: string };
+  proxyRouter: ScopedProxyRouter;
+  apiKey: string;
+  timeoutMs?: number;
+}): Promise<MemoryServiceProbeResult> {
+  if (params.provider === "hindsight") {
+    const scope = "memory.hindsight";
+    const proxy = params.proxyRouter.resolveScope(scope);
+    const cleanBaseUrl = (params.hindsight?.base_url ?? "").trim().replace(/\/+$/, "");
+    const startedAt = Date.now();
+    if (!cleanBaseUrl) {
+      return {
+        ok: false,
+        provider: params.provider,
+        baseUrl: "",
+        latencyMs: 0,
+        proxy,
+        error: "未配置 memory.hindsight.base_url",
+      };
+    }
+    try {
+      const probeUrls = [`${cleanBaseUrl}/health`, `${cleanBaseUrl}/v1/default/banks`, cleanBaseUrl];
+      let lastStatus = 0;
+      let lastRaw = "";
+      for (const targetUrl of probeUrls) {
+        const res = await params.proxyRouter.runWithScope(scope, () =>
+          params.proxyRouter.scopedFetch(
+            targetUrl,
+            {
+              method: "GET",
+              signal: AbortSignal.timeout(params.timeoutMs ?? 10_000),
+            },
+            scope,
+          ),
+        );
+        lastStatus = res.status;
+        lastRaw = await res.text();
+        if (res.ok) {
+          return {
+            ok: true,
+            provider: params.provider,
+            baseUrl: cleanBaseUrl,
+            latencyMs: Date.now() - startedAt,
+            proxy,
+          };
+        }
+        if (res.status !== 404) break;
+      }
+      return {
+        ok: false,
+        provider: params.provider,
+        baseUrl: cleanBaseUrl,
+        latencyMs: Date.now() - startedAt,
+        proxy,
+        error: `Hindsight HTTP ${lastStatus}: ${lastRaw.slice(0, 200)}`,
+      };
+    } catch (err) {
+      return {
+        ok: false,
+        provider: params.provider,
+        baseUrl: cleanBaseUrl,
+        latencyMs: Date.now() - startedAt,
+        proxy,
+        error: err instanceof Error ? err.message : String(err),
+      };
+    }
+  }
+
+  const scope = "memory.memoryecho";
+  const proxy = params.proxyRouter.resolveScope(scope);
+  const cleanBaseUrl = params.memoryEcho.baseUrl.replace(/\/+$/, "");
+  const startedAt = Date.now();
+
+  if (params.provider === "none" || !params.memoryEcho.enabled) {
+    return {
+      ok: false,
+      provider: params.provider,
+      baseUrl: cleanBaseUrl,
+      latencyMs: 0,
+      proxy,
+      skipped: true,
+      error: "记忆服务未启用 (memory.provider=none)",
+    };
+  }
+
+  if (params.provider !== "memoryecho") {
+    return {
+      ok: false,
+      provider: params.provider,
+      baseUrl: cleanBaseUrl,
+      latencyMs: 0,
+      proxy,
+      error: `暂不支持探测记忆后端: ${params.provider}`,
+    };
+  }
+
+  if (!params.apiKey.trim()) {
+    return {
+      ok: false,
+      provider: params.provider,
+      baseUrl: cleanBaseUrl,
+      latencyMs: 0,
+      proxy,
+      error: `${params.memoryEcho.apiKeyEnv} 为空，未配置 MemoryEcho API Key`,
+    };
+  }
+
+  try {
+    const res = await params.proxyRouter.runWithScope(scope, () =>
+      params.proxyRouter.scopedFetch(
+        `${cleanBaseUrl}/api/v1/memory/vaults`,
+        {
+          method: "GET",
+          headers: { Authorization: `Bearer ${params.apiKey.trim()}` },
+          signal: AbortSignal.timeout(params.timeoutMs ?? params.memoryEcho.timeoutMs ?? 10_000),
+        },
+        scope,
+      ),
+    );
+    const raw = await res.text();
+    if (!res.ok) {
+      return {
+        ok: false,
+        provider: params.provider,
+        baseUrl: cleanBaseUrl,
+        latencyMs: Date.now() - startedAt,
+        proxy,
+        error: `HTTP ${res.status}: ${raw.slice(0, 200)}`,
+      };
+    }
+    const parsed = JSON.parse(raw) as unknown;
+    const vaultCount = Array.isArray(parsed) ? parsed.length : undefined;
+    return {
+      ok: true,
+      provider: params.provider,
+      baseUrl: cleanBaseUrl,
+      latencyMs: Date.now() - startedAt,
+      proxy,
+      vaultCount,
+    };
+  } catch (err) {
+    return {
+      ok: false,
+      provider: params.provider,
+      baseUrl: cleanBaseUrl,
+      latencyMs: Date.now() - startedAt,
+      proxy,
+      error: err instanceof Error ? err.message : String(err),
+    };
+  }
 }

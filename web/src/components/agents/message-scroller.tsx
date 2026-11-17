@@ -148,6 +148,7 @@ export function MessageScroller({
   const contentRef = useRef<HTMLDivElement>(null);
   const followingRef = useRef(followOutput);
   const programmaticScrollRef = useRef(false);
+  const mountedAtRef = useRef(Date.now());
   const scrollTimerRef = useRef<number | undefined>(undefined);
   const frameRef = useRef<number | undefined>(undefined);
   const railFrameRef = useRef<number | undefined>(undefined);
@@ -351,7 +352,8 @@ export function MessageScroller({
     const observer = new ResizeObserver(() => {
       scheduleRailSync();
       if (!followOutput || !followingRef.current) return;
-      scrollToEnd(reduce || !smooth ? "auto" : "smooth");
+      const isInitialLoad = Date.now() - mountedAtRef.current < 600;
+      scrollToEnd(reduce || !smooth || isInitialLoad ? "auto" : "smooth");
     });
     observer.observe(content);
 

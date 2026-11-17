@@ -108,6 +108,16 @@ export class PersonaRuntime {
         caption?: string;
       }) => Promise<{ ok: boolean; message: string }>)
     | null = null;
+  private botProfileHandler:
+    | ((input: {
+        platform: "tg" | "qq";
+        action: "inspect" | "update" | "remove_avatar";
+        name?: string;
+        description?: string;
+        shortDescription?: string;
+        avatarPath?: string;
+      }) => Promise<{ ok: boolean; message: string; details?: Record<string, unknown> }>)
+    | null = null;
   private activeTurnOriginChannel: InboundBatch["originChannel"] = "tg";
 
   constructor(
@@ -232,6 +242,24 @@ export class PersonaRuntime {
     }
   }
 
+  setBotProfileHandler(
+    handler:
+      | ((input: {
+          platform: "tg" | "qq";
+          action: "inspect" | "update" | "remove_avatar";
+          name?: string;
+          description?: string;
+          shortDescription?: string;
+          avatarPath?: string;
+        }) => Promise<{ ok: boolean; message: string; details?: Record<string, unknown> }>)
+      | null,
+  ): void {
+    this.botProfileHandler = handler;
+    if (!this.activeTurn) {
+      this.syncTools();
+    }
+  }
+
   setMemoryStore(nextMemoryStore: MemoryStore | null): void {
     this.memoryStore = nextMemoryStore;
   }
@@ -312,6 +340,7 @@ export class PersonaRuntime {
               }),
           }
         : {}),
+      ...(this.botProfileHandler ? { onBotProfile: this.botProfileHandler } : {}),
       selfConfigDeps: {
         hatoConfigPath: this.hatoConfigPath,
         getHatoConfig: () => this.hatoConfig,

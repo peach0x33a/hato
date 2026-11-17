@@ -1,7 +1,8 @@
 import { execFile } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { randomBytes } from "node:crypto";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { extname, join } from "node:path";
+import { extname, join, resolve } from "node:path";
 import { promisify } from "node:util";
 import type { ImageContent } from "@earendil-works/pi-ai";
 
@@ -22,6 +23,24 @@ export interface StickerDownloadCandidate {
   fileId: string;
   fallbackExt: string;
   sourceKind: "sticker_webp" | "sticker_video" | "sticker_thumb";
+}
+
+/**
+ * Persist an inbound media buffer to `<dataDir>/media/inbound/` so background workers
+ * can inspect or reference it via `attachment.localPath`.
+ */
+export function saveInboundMediaBuffer(
+  dataDir: string,
+  buffer: Buffer,
+  extOrFilename?: string,
+): string {
+  const dir = resolve(dataDir, "media", "inbound");
+  mkdirSync(dir, { recursive: true });
+  const rawExt = extOrFilename ? extname(extOrFilename) || extOrFilename : "";
+  const safeExt = /^\.[a-zA-Z0-9]{1,8}$/.test(rawExt) ? rawExt.toLowerCase() : ".jpg";
+  const filePath = join(dir, `${Date.now()}_${randomBytes(3).toString("hex")}${safeExt}`);
+  writeFileSync(filePath, buffer);
+  return filePath;
 }
 
 /**

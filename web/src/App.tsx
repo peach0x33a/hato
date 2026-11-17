@@ -5,13 +5,14 @@ import {
   Cpu,
   FileText,
   History,
+  LayoutDashboard,
   Lock,
   MessageSquare,
   PanelLeft,
   RefreshCw,
   Settings,
 } from "lucide-react";
-import { AnimatePresence, motion, useReducedMotion } from "motion/react";
+import { AnimatePresence, LayoutGroup, MotionConfig, motion, useReducedMotion } from "motion/react";
 import { ThemeProvider } from "next-themes";
 import { useCallback, useEffect, useState } from "react";
 import {
@@ -25,6 +26,7 @@ import {
 import { ChatPanel } from "@/components/console/ChatPanel";
 import { ConsoleInput } from "@/components/console/ConsolePrimitives";
 import { ModelsConfigPanel } from "@/components/console/ModelsConfigPanel";
+import { OverviewPanel } from "@/components/console/OverviewPanel";
 import { PromptPanel } from "@/components/console/PromptPanel";
 import { RemoteBrowserPanel } from "@/components/console/RemoteBrowserPanel";
 import {
@@ -47,22 +49,30 @@ import {
 } from "@/components/motion/card";
 import { SharedLayoutBg } from "@/components/motion/shared-layout-bg";
 import { ThemeToggle } from "@/components/motion/theme-toggle";
-import { EASE_OUT } from "@/lib/ease";
+import { EASE_OUT, SPRING_LAYOUT } from "@/lib/ease";
 
-type ConsoleTab = "chat" | "browser" | "models" | "prompt" | "settings";
+type ConsoleTab = "overview" | "chat" | "browser" | "models" | "prompt" | "settings";
 
 const NAV_ITEMS: Array<{
   id: Exclude<ConsoleTab, "settings">;
   label: string;
   icon: typeof MessageSquare;
 }> = [
+  { id: "overview", label: "概览", icon: LayoutDashboard },
   { id: "chat", label: "对话", icon: MessageSquare },
   { id: "browser", label: "远程浏览器", icon: Compass },
   { id: "models", label: "模型与供应商", icon: Cpu },
   { id: "prompt", label: "提示词与层级管理", icon: FileText },
 ];
 
-const VALID_TABS = new Set<ConsoleTab>(["chat", "browser", "models", "prompt", "settings"]);
+const VALID_TABS = new Set<ConsoleTab>([
+  "overview",
+  "chat",
+  "browser",
+  "models",
+  "prompt",
+  "settings",
+]);
 
 const ACTIVE_TAB_STORAGE_KEY = "hato.activeTab";
 const SETTINGS_SECTION_STORAGE_KEY = "hato.settingsSection";
@@ -135,7 +145,7 @@ function readInitialRoute(): { tab: ConsoleTab; settingsSection: SettingsSection
   } catch {
     // Ignore storage or location restrictions.
   }
-  return { tab: "chat", settingsSection: fallbackSection };
+  return { tab: "overview", settingsSection: fallbackSection };
 }
 
 function ConsoleShell() {
@@ -593,6 +603,17 @@ function ConsoleShell() {
               workspaceTab === "chat" ? "overflow-hidden" : "overflow-y-auto overflow-x-hidden"
             }`}
           >
+            {workspaceTab === "overview" && (
+              <OverviewPanel
+                onNavigateTab={(tab) => setActiveTab(tab)}
+                onNavigateSettings={(section) => {
+                  setSettingsSection(section);
+                  setActiveTab("settings");
+                }}
+                onToast={notify}
+              />
+            )}
+
             {workspaceTab === "chat" && (
               <div className="flex h-full min-h-0 min-w-0 w-full flex-col">
                 <ChatPanel
@@ -715,7 +736,11 @@ function ConsoleShell() {
 export function App() {
   return (
     <ThemeProvider attribute="class" defaultTheme="system" enableSystem>
-      <ConsoleShell />
+      <MotionConfig transition={{ layout: SPRING_LAYOUT }}>
+        <LayoutGroup>
+          <ConsoleShell />
+        </LayoutGroup>
+      </MotionConfig>
     </ThemeProvider>
   );
 }

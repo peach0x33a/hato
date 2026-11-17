@@ -4,7 +4,7 @@ import { resolve, sep } from "node:path";
 import { promisify } from "node:util";
 import { Agent, type AgentMessage, type AgentTool } from "@earendil-works/pi-agent-core";
 import { clampThinkingLevel, type AssistantMessage, type TextContent } from "@earendil-works/pi-ai";
-import { arr, obj, opt, oneOf, str } from "@earendil-works/pi-schema";
+import { arr, num, obj, opt, oneOf, str } from "@earendil-works/pi-schema";
 import { resolveSkillsDir, type HatoConfig } from "../config/app.js";
 import { supportsCustomFetchOption, type ModelRegistry } from "../config/models.js";
 import type { ScopedProxyRouter } from "../config/proxy.js";
@@ -13,6 +13,11 @@ import { expandEarlierContext, readTaskContext } from "../dispatch/context-slice
 import type { WorkerMandate, WorkerResult } from "../dispatch/schema.js";
 import type { McpClientPool } from "../mcp/pool.js";
 import { readSkillContent, selectWorkerSkills } from "../skills/loader.js";
+import {
+  generateOpenAiImage,
+  resolveImageGenProvider,
+  resolveProviderApiKey,
+} from "./image-gen.js";
 import type {
   ExecutionProgressCallback,
   ExecutionRunner,
@@ -28,7 +33,7 @@ const WORKER_SYSTEM_PROMPT = `You are Hato's isolated background engineering wor
 - Messages labeled \`[CHAT_RELAY]\` come from the companion chat layer: ignore their casual tone and extract only factual requirements initiated or confirmed by \`[USER]\`.
 - If crucial earlier references are missing, call \`expand_earlier_context\`.
 - Operate strictly within your workspace boundary. Never ask the user to paste raw secrets into chat; list required secret names in \`required_secrets\`.
-- When you lack required information to proceed safely, call \`ask_user\` and stop.
+- NEVER read \`.env\` or call Telegram/QQ Bot APIs (such as \`forwardMessage\`, \`sendMessage\`, etc.) via shell commands to fetch historical messages or media. Use \`read_task_context\` / \`expand_earlier_context\` (which include saved attachment \`路径=...\` paths), and call \`ask_user\` if a file is missing.
 - When finished, ALWAYS call \`finish_task\` with an accurate, concise \`narration_hint\`, any verbatim blocks/artifacts, and caveats.`;
 
 const ReadContextParams = obj({
@@ -56,6 +61,16 @@ const WriteFileParams = obj({
 
 const RunCommandParams = obj({
   command: str({ description: "Shell command to run inside the workspace" }),
+});
+
+const ImageGenParams = obj({
+  prompt: str({ description: "Detailed text prompt describing the image to generate" }),
+  model: opt(str({ description: "Optional image model ID (e.g. gpt-image-2.5, gpt-image-2, gpt-image-1)" })),
+  size: opt(str({ description: "Optional size like '1024x1024', '1536x1024', or '1024x1536'" })),
+  quality: opt(str({ description: "Optional quality like 'standard', 'hd', 'medium', or 'high'" })),
+  filename: opt(str({ description: "Optional relative output filename inside workspace (defaults to generated_<ts>.png)" })),
+  reference_image_paths: opt(arr(str({ description: "Optional local reference image path(s) (e.g. from attachment 路径=...) for image editing/reference generation" }))),
+  n: opt(num({ description: "Optional number of images (1-4), defaults to 1" })),
 });
 
 const AskUserParams = obj({
@@ -448,6 +463,60 @@ export class BuiltinPiRunner implements ExecutionRunner {
           return {
             content: [{ type: "text", text: combined || "(命令完成，无输出)" }],
             details: { ok: true },
+          };
+        },
+      },
+      {
+        name: "image_gen",
+        label: "生成图片",
+        description:
+          "Generate image(s) via OpenAI-compatible Images API into the workspace. Pass the generated relative path(s) to finish_task(artifact_paths) to deliver them.",
+        parameters: ImageGenParams,
+        execute: async (_id, input) => {
+          const provider = resolveImageGenProvider(this.deps.modelRegistry);
+          if (!provider) {
+            return {
+              content: [{ type: "text", text: "未找到可用的 OpenAI 兼容图片生成供应商配置。" }],
+              details: { ok: false },
+            };
+          }
+          const apiKey = resolveProviderApiKey(provider);
+          const result = await generateOpenAiImage({
+            prompt: input.prompt,
+            model: input.model,
+            size: input.size,
+            quality: input.quality,
+            n: input.n,
+            filename: input.filename,
+            referenceImagePaths: input.reference_image_paths,
+            workspaceDir: workspaceRoot,
+            providerSlug: provider.slug,
+            baseUrl: provider.baseUrl,
+            apiKey,
+            proxyRouter: this.deps.proxyRouter,
+          });
+          if (!result.ok) {
+            return {
+              content: [{ type: "text", text: `图片生成失败 (${result.model}): ${result.error}` }],
+              details: { ok: false, provider: result.providerSlug, model: result.model },
+            };
+          }
+          const summary = result.files
+            .map((f) => `${f.relativePath} (${f.bytes} bytes)`)
+            .join(", ");
+          return {
+            content: [
+              {
+                type: "text",
+                text: `已生成图片 (${result.providerSlug}/${result.model}): ${summary}。请在 finish_task 的 artifact_paths 中附上该路径。`,
+              },
+            ],
+            details: {
+              ok: true,
+              provider: result.providerSlug,
+              model: result.model,
+              files: result.files,
+            },
           };
         },
       },

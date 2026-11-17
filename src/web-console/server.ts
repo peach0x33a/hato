@@ -9,6 +9,7 @@ import {
   loadHatoConfig,
   resolveMemoryEchoConfig,
   resolvePromptDisabled,
+  resolveMemoryProvider,
   resolvePromptOrder,
   resolveTavilySearchConfig,
   resolveWebConsoleConfig,
@@ -22,6 +23,7 @@ import { getOptionalSecret, reloadSecretEnv } from "../config/secrets.js";
 import { mergeEnvFile, readEnvMap, writeHatoConfig, writeModelsConfig } from "../config/store.js";
 import type { HatoRepository } from "../db/repo.js";
 import type { TicketCoordinator } from "../dispatch/coordinator.js";
+import { QqOpenApiClient } from "../gateway/qq-client.js";
 import { formatGatewayMessageLog } from "../gateway/msg-log.js";
 import type { CompactionManager } from "../memory/compaction.js";
 import type { MemoryCurator } from "../memory/curator.js";
@@ -34,9 +36,12 @@ import {
   upsertPromptBlock,
 } from "../persona/prompts.js";
 import {
+  fetchTelegramBotAvatar,
   fetchTelegramUserProfiles,
   probeAdHocModel,
+  probeMemoryService,
   probeModelSlot,
+  probeQqGateway,
   probeTavilySearch,
   probeTelegramGateway,
   type TelegramUserProfileResult,
@@ -75,6 +80,11 @@ export interface WebConsoleServerDeps {
   getSlashDeps: (canonicalUserId: string) => SlashCommandDeps;
   reloadAll: () => Promise<WebConsoleReloadResult>;
   probeExternalClis?: (config: HatoConfig) => Promise<ExternalCliProbeEntry[]>;
+  getGatewayStatus?: () => {
+    telegram: { enabled: boolean; running: boolean; online: boolean; username?: string };
+    qq: { enabled: boolean; running: boolean; online: boolean; sessionId?: string };
+  };
+  toggleGateway?: (channel: "tg" | "qq", enabled: boolean) => Promise<{ ok: boolean; error?: string }>;
 }
 
 const MIME_TYPES: Record<string, string> = {
@@ -107,6 +117,10 @@ export class WebConsoleServer {
     string,
     { expiresAt: number; profile: TelegramUserProfileResult }
   >();
+  private readonly botAvatarCache = new Map<
+    string,
+    { expiresAt: number; avatarUrl?: string; username?: string; displayName?: string; botId?: string }
+  >();
 
   constructor(private readonly deps: WebConsoleServerDeps) {
     this.envPath = deps.envPath ?? ".env";
@@ -117,6 +131,18 @@ export class WebConsoleServer {
     if (!this.server || this.boundPort === null) return null;
     const cfg = resolveWebConsoleConfig(this.deps.getConfig());
     return { host: cfg.host, port: this.boundPort };
+  }
+
+  invalidateBotProfileCache(channel?: "tg" | "qq"): void {
+    if (!channel) {
+      this.botAvatarCache.clear();
+      return;
+    }
+    for (const key of this.botAvatarCache.keys()) {
+      if (key.startsWith(`${channel}:`)) {
+        this.botAvatarCache.delete(key);
+      }
+    }
   }
 
   async start(): Promise<{ host: string; port: number } | null> {
@@ -182,6 +208,23 @@ export class WebConsoleServer {
           return;
         }
 
+        if (pathname === "/api/overview" && method === "GET") {
+          await this.handleGetOverview(res);
+          return;
+        }
+        if (pathname === "/api/pairing-code" && method === "GET") {
+          const repo = this.deps.getRepo();
+          if (parsedUrl.searchParams.get("refresh") === "1") {
+            repo.deleteRuntimeSetting("home_pairing_code");
+          }
+          const code = repo.getOrCreateHomePairingCode();
+          sendJson(res, 200, { ok: true, code, command: `/sethome ${code}` });
+          return;
+        }
+        if (pathname === "/api/gateway/toggle" && method === "POST") {
+          await this.handleToggleGateway(req, res);
+          return;
+        }
         if (pathname === "/api/sessions" && method === "GET") {
           this.handleListSessions(res);
           return;
@@ -327,6 +370,174 @@ export class WebConsoleServer {
     const customHeader = req.headers["x-hato-token"];
     if (typeof customHeader === "string" && customHeader.trim() === requiredToken) return true;
     return false;
+  }
+
+  private async handleToggleGateway(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    const body = (await readJsonBody(req)) as { channel?: unknown; enabled?: unknown };
+    const channel = body.channel === "qq" ? "qq" : body.channel === "tg" ? "tg" : null;
+    if (!channel || typeof body.enabled !== "boolean") {
+      sendJson(res, 400, { ok: false, error: "Invalid channel or enabled flag" });
+      return;
+    }
+    if (!this.deps.toggleGateway) {
+      sendJson(res, 501, { ok: false, error: "Gateway toggle handler is not configured" });
+      return;
+    }
+    const result = await this.deps.toggleGateway(channel, body.enabled);
+    if (!result.ok) {
+      sendJson(res, 400, { ok: false, error: result.error ?? "Failed to toggle gateway" });
+      return;
+    }
+    sendJson(res, 200, { ok: true, channel, enabled: body.enabled });
+  }
+
+  private async resolveBotProfile(
+    channel: "tg" | "qq",
+    hato: HatoConfig,
+  ): Promise<{ avatarUrl?: string; username?: string; displayName?: string; botId?: string }> {
+    const cacheKey =
+      channel === "tg"
+        ? `tg:${hato.gateway.telegram.base_url}:${hato.gateway.telegram.bot_token_env}`
+        : `qq:${hato.gateway.qq.base_url}:${hato.gateway.qq.app_id}`;
+    const cached = this.botAvatarCache.get(cacheKey);
+    if (cached && cached.expiresAt > Date.now()) {
+      return {
+        avatarUrl: cached.avatarUrl,
+        username: cached.username,
+        displayName: cached.displayName,
+        botId: cached.botId,
+      };
+    }
+
+    const envMap = readEnvMap(this.envPath);
+    const proxyRouter = this.deps.getProxyRouter();
+    let avatarUrl: string | undefined;
+    let username: string | undefined;
+    let displayName: string | undefined;
+    let botId: string | undefined;
+
+    try {
+      if (channel === "tg" && hato.gateway.telegram.enabled) {
+        const botToken =
+          envMap[hato.gateway.telegram.bot_token_env]?.trim() ||
+          process.env[hato.gateway.telegram.bot_token_env]?.trim() ||
+          "";
+        if (botToken) {
+          const me = await probeTelegramGateway({
+            baseUrl: hato.gateway.telegram.base_url,
+            botToken,
+            proxyRouter,
+            timeoutMs: 6000,
+          });
+          if (me.ok) {
+            username = me.username || undefined;
+            displayName = me.firstName?.trim() || undefined;
+            if (me.botId) {
+              botId = String(me.botId);
+              avatarUrl = await fetchTelegramBotAvatar({
+                baseUrl: hato.gateway.telegram.base_url,
+                botToken,
+                botId: me.botId,
+                proxyRouter,
+                timeoutMs: 12_000,
+              });
+            }
+          }
+        }
+      } else if (channel === "qq" && hato.gateway.qq.enabled && hato.gateway.qq.app_id.trim()) {
+        const clientSecret =
+          envMap[hato.gateway.qq.client_secret_env]?.trim() ||
+          process.env[hato.gateway.qq.client_secret_env]?.trim() ||
+          "";
+        if (clientSecret) {
+          const client = new QqOpenApiClient({
+            baseUrl: hato.gateway.qq.base_url,
+            appId: hato.gateway.qq.app_id.trim(),
+            clientSecret,
+            proxyRouter,
+          });
+          const me = await client.getMe();
+          avatarUrl = me.avatar || undefined;
+          username = me.username?.trim() || undefined;
+          botId = me.id?.trim() || hato.gateway.qq.app_id.trim();
+        }
+      }
+    } catch {
+      avatarUrl = undefined;
+      username = undefined;
+      displayName = undefined;
+      botId = undefined;
+    }
+
+    this.botAvatarCache.set(cacheKey, {
+      expiresAt: Date.now() + (avatarUrl || username || displayName ? 10 * 60_000 : 15_000),
+      avatarUrl,
+      username,
+      displayName,
+      botId,
+    });
+    return { avatarUrl, username, displayName, botId };
+  }
+
+  private async handleGetOverview(res: ServerResponse): Promise<void> {
+    const hato = this.deps.getConfig();
+    const repo = this.deps.getRepo();
+    const registry = this.deps.getModelRegistry();
+    const canonicalUserId = hato.owner.canonical_user_id;
+    const dbStats = repo.getOverviewStats(canonicalUserId);
+
+    const gwStatus = this.deps.getGatewayStatus?.() ?? {
+      telegram: {
+        enabled: hato.gateway.telegram.enabled,
+        running: false,
+        online: false,
+      },
+      qq: {
+        enabled: hato.gateway.qq.enabled,
+        running: false,
+        online: false,
+      },
+    };
+
+    const [tgProfile, qqProfile] = await Promise.all([
+      this.resolveBotProfile("tg", hato),
+      this.resolveBotProfile("qq", hato),
+    ]);
+
+    const slots = registry.listSlots();
+    const personaTarget = slots.find((s) => s.slot === "persona")?.target ?? "";
+    const routerTarget = slots.find((s) => s.slot === "router")?.target ?? "";
+
+    sendJson(res, 200, {
+      ok: true,
+      uptimeSec: Math.round((Date.now() - this.startedAtMs) / 1000),
+      gateways: {
+        telegram: {
+          ...gwStatus.telegram,
+          username: gwStatus.telegram.username || tgProfile.username,
+          displayName: tgProfile.displayName,
+          botId: tgProfile.botId,
+          avatarUrl: tgProfile.avatarUrl,
+          whitelistCount: hato.owner.channels.tg.user_ids.length,
+        },
+        qq: {
+          ...gwStatus.qq,
+          username: qqProfile.username,
+          botId: qqProfile.botId || hato.gateway.qq.app_id.trim() || undefined,
+          avatarUrl: qqProfile.avatarUrl,
+          whitelistCount: hato.owner.channels.qq.open_ids.length,
+        },
+      },
+      ...dbStats,
+      runtime: {
+        personaModel: personaTarget,
+        routerModel: routerTarget,
+        workerBackend: hato.worker.default_backend,
+        workerRoutingMode: hato.worker.routing_mode ?? "smart",
+        memoryProvider: resolveMemoryProvider(hato),
+        pendingTakeover: this.deps.getBrowserRuntime().isPendingTakeover(),
+      },
+    });
   }
 
   private handleListSessions(res: ServerResponse): void {
@@ -912,21 +1123,60 @@ export class WebConsoleServer {
 
     if (target === "all" || target === "telegram") {
       if (!hato.gateway.telegram.enabled) {
-        results.telegram = { ok: false, skipped: true, error: "Telegram gateway disabled" };
+        results.telegram = {
+          ok: false,
+          skipped: true,
+          latencyMs: 0,
+          message: "Telegram 网关未启用",
+        };
       } else {
         const botToken =
           envMap[hato.gateway.telegram.bot_token_env]?.trim() ||
           process.env[hato.gateway.telegram.bot_token_env]?.trim() ||
           "";
-        results.telegram = await probeTelegramGateway({
+        const tgRes = await probeTelegramGateway({
           baseUrl: hato.gateway.telegram.base_url,
           botToken,
           proxyRouter,
         });
+        results.telegram = {
+          ...tgRes,
+          message: tgRes.ok
+            ? `Telegram Bot${tgRes.username ? ` @${tgRes.username}` : ""} 连接正常`
+            : tgRes.error ?? "Telegram 连接失败",
+        };
       }
     }
 
-    if (target === "all" || target === "persona") {
+    if (target === "all" || target === "qq") {
+      if (!hato.gateway.qq.enabled) {
+        results.qq = {
+          ok: false,
+          skipped: true,
+          latencyMs: 0,
+          message: "QQ 网关未启用",
+        };
+      } else {
+        const clientSecret =
+          envMap[hato.gateway.qq.client_secret_env]?.trim() ||
+          process.env[hato.gateway.qq.client_secret_env]?.trim() ||
+          "";
+        const qqRes = await probeQqGateway({
+          baseUrl: hato.gateway.qq.base_url,
+          appId: hato.gateway.qq.app_id,
+          clientSecret,
+          proxyRouter,
+        });
+        results.qq = {
+          ...qqRes,
+          message: qqRes.ok
+            ? "QQ App Access Token 与官方网关可达"
+            : qqRes.error ?? "QQ 网关连接失败",
+        };
+      }
+    }
+
+    if (target === "persona") {
       results.persona = await probeModelSlot({
         slot: "persona",
         modelRegistry,
@@ -939,11 +1189,39 @@ export class WebConsoleServer {
       const searchCfg = resolveTavilySearchConfig(hato);
       const apiKey =
         envMap[searchCfg.apiKeyEnv]?.trim() || process.env[searchCfg.apiKeyEnv]?.trim() || "";
-      results.tavily = await probeTavilySearch({
+      const tavilyRes = await probeTavilySearch({
         config: searchCfg,
         proxyRouter,
         apiKey,
       });
+      results.tavily = {
+        ...tavilyRes,
+        message: tavilyRes.ok
+          ? `Tavily 搜索正常（返回 ${tavilyRes.resultCount ?? 0} 条）`
+          : tavilyRes.error ?? "Tavily 连接失败",
+      };
+    }
+
+    if (target === "all" || target === "memory") {
+      const provider = resolveMemoryProvider(hato);
+      const memoryEcho = resolveMemoryEchoConfig(hato);
+      const apiKey =
+        envMap[memoryEcho.apiKeyEnv]?.trim() || process.env[memoryEcho.apiKeyEnv]?.trim() || "";
+      const memRes = await probeMemoryService({
+        provider,
+        memoryEcho,
+        hindsight: hato.memory.hindsight,
+        proxyRouter,
+        apiKey,
+      });
+      results.memory = {
+        ...memRes,
+        message: memRes.ok
+          ? memRes.provider === "hindsight"
+            ? `Hindsight 服务连接正常 (${memRes.baseUrl})`
+            : `MemoryEcho 连接正常${typeof memRes.vaultCount === "number" ? `（${memRes.vaultCount} 个 Vault）` : ""}`
+          : memRes.error ?? "记忆服务连接失败",
+      };
     }
 
     sendJson(res, 200, { ok: true, results });

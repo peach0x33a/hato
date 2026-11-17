@@ -441,12 +441,76 @@ export interface SaveConfigResponse {
   error?: string;
 }
 
+export interface OverviewResponse {
+  ok: boolean;
+  uptimeSec: number;
+  gateways: {
+    telegram: {
+      enabled: boolean;
+      running: boolean;
+      online: boolean;
+      username?: string;
+      displayName?: string;
+      botId?: string;
+      avatarUrl?: string;
+      whitelistCount: number;
+    };
+    qq: {
+      enabled: boolean;
+      running: boolean;
+      online: boolean;
+      sessionId?: string;
+      username?: string;
+      botId?: string;
+      avatarUrl?: string;
+      whitelistCount: number;
+    };
+  };
+  messages: {
+    total: number;
+    inbound: number;
+    outbound: number;
+    last24h: number;
+    hotCount: number;
+    byChannel: { tg: number; qq: number; web: number };
+  };
+  tickets: {
+    total: number;
+    active: number;
+    done: number;
+    failed: number;
+  };
+  turns: {
+    total: number;
+    last24h: number;
+    avgLatencyMs: number | null;
+    avgCacheHitRate: number | null;
+  };
+  runtime: {
+    personaModel: string;
+    routerModel: string;
+    workerBackend: string;
+    workerRoutingMode: string;
+    memoryProvider: string;
+    pendingTakeover: boolean;
+  };
+}
+
+export interface ProbeItemResult {
+  ok: boolean;
+  latencyMs: number;
+  message: string;
+  skipped?: boolean;
+  testedAtMs?: number;
+}
+
 export interface ProbeResponse {
   ok: boolean;
   results: {
-    telegram?: { ok: boolean; latencyMs: number; message: string };
-    persona?: { ok: boolean; latencyMs: number; message: string };
-    tavily?: { ok: boolean; latencyMs: number; message: string };
+    telegram?: ProbeItemResult;
+    qq?: ProbeItemResult;
+    tavily?: ProbeItemResult;
+    memory?: ProbeItemResult;
   };
 }
 
@@ -585,6 +649,17 @@ async function requestJson<T>(url: string, init?: RequestInit): Promise<T> {
 
 export const api = {
   getHealth: () => fetch("/api/health").then((r) => r.json() as Promise<HealthResponse>),
+  getOverview: () => requestJson<OverviewResponse>("/api/overview"),
+  getPairingCode: (refresh = false) =>
+    requestJson<{ ok: boolean; code: string; command: string }>(
+      refresh ? "/api/pairing-code?refresh=1" : "/api/pairing-code",
+    ),
+  toggleGateway: (channel: "tg" | "qq", enabled: boolean) =>
+    requestJson<{ ok: boolean; channel: "tg" | "qq"; enabled: boolean }>("/api/gateway/toggle", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ channel, enabled }),
+    }),
   getSessions: () => requestJson<{ ok: boolean; sessions: ChatSessionRecord[] }>("/api/sessions"),
   getChatHistory: (sessionId?: string | null) =>
     requestJson<ChatHistoryResponse>(
@@ -644,7 +719,7 @@ export const api = {
     requestJson<SaveConfigResponse>("/api/config/reload", {
       method: "POST",
     }),
-  probe: (target: "all" | "telegram" | "persona" | "tavily") =>
+  probe: (target: "all" | "telegram" | "qq" | "tavily" | "memory") =>
     requestJson<ProbeResponse>("/api/config/probe", {
       method: "POST",
       headers: { "Content-Type": "application/json" },

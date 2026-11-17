@@ -185,6 +185,68 @@ export function bindTelegramHomeChannel(params: {
   };
 }
 
+/**
+ * Bind QQ private chat as Hato's Home Channel:
+ * - Ensures qqOpenId is present in owner.channels.qq.open_ids
+ * - Sets owner.proactive_channel = "qq"
+ * - Updates config/hato.toml (with .bak backup when present) and SQLite owner/home state
+ */
+export function bindQqHomeChannel(params: {
+  hatoConfigPath: string;
+  repo: HatoRepository;
+  canonicalUserId: string;
+  qqOpenId: string;
+  currentConfig: HatoConfig;
+}): {
+  updatedConfig: HatoConfig;
+  addedToWhitelist: boolean;
+  savedToConfig: boolean;
+  backupPath?: string;
+} {
+  const absConfigPath = resolve(params.hatoConfigPath);
+  const baseConfig = existsSync(absConfigPath) ? loadHatoConfig(absConfigPath) : params.currentConfig;
+
+  const existingIds = baseConfig.owner.channels.qq.open_ids;
+  const alreadyAllowed = existingIds.includes(params.qqOpenId);
+  const nextOpenIds = alreadyAllowed ? [...existingIds] : [...existingIds, params.qqOpenId];
+
+  const updatedConfig: HatoConfig = {
+    ...baseConfig,
+    owner: {
+      ...baseConfig.owner,
+      proactive_channel: "qq",
+      channels: {
+        ...baseConfig.owner.channels,
+        qq: {
+          ...baseConfig.owner.channels.qq,
+          open_ids: nextOpenIds,
+        },
+      },
+    },
+  };
+
+  let savedToConfig = false;
+  let backupPath: string | undefined;
+  if (existsSync(absConfigPath)) {
+    const written = writeHatoConfig(absConfigPath, updatedConfig, { backup: true });
+    savedToConfig = true;
+    backupPath = written.backupPath;
+  }
+
+  params.repo.setHomeChannel({
+    canonicalUserId: params.canonicalUserId,
+    channel: "qq",
+    targetId: params.qqOpenId,
+  });
+
+  return {
+    updatedConfig,
+    addedToWhitelist: !alreadyAllowed,
+    savedToConfig,
+    backupPath,
+  };
+}
+
 function writeTomlFileWithBackup(
   configPath: string,
   tomlContent: string,

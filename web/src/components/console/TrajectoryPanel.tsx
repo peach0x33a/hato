@@ -891,8 +891,54 @@ export function TrajectoryPanel({ onToast, sessionEpoch = 0, sessionId = null }:
                   </div>
                 )}
 
+                {inspectorTab === "overview" && selectedEvent?.kind === "recall" && (
+                  <div className="flex flex-col gap-3.5 divide-y divide-border/60">
+                    <div className="grid grid-cols-[64px_1fr] gap-y-1.5 pb-3 text-[11px]">
+                      <span className="text-muted-foreground">来源</span>
+                      <div className="flex flex-wrap items-center gap-1.5">
+                        <SlotBadge slot={selectedTrace.slot} className="h-4 px-1 text-[10px]" />
+                        <span className="font-mono font-medium text-foreground">
+                          {selectedTrace.provider}/{selectedTrace.modelId}
+                        </span>
+                      </div>
+                      <span className="text-muted-foreground">时间</span>
+                      <span className="font-mono text-foreground">
+                        {formatDateTime(selectedTrace.createdAt)}
+                      </span>
+                    </div>
+
+                    <div className="flex flex-col gap-1.5 pt-3">
+                      <span className="text-[11px] font-medium text-muted-foreground">触发检索输入</span>
+                      <div className="whitespace-pre-wrap break-words border-l-2 border-border pl-3 py-0.5 text-xs text-foreground">
+                        {selectedTrace.userPreview || "（无文本输入）"}
+                      </div>
+                    </div>
+
+                    <div className="flex flex-col gap-2 pt-3">
+                      <span className="text-[11px] font-medium text-muted-foreground">
+                        本次召回记忆 ({selectedRecalled.length} 条)
+                      </span>
+                      {selectedRecalled.length > 0 ? (
+                        <div className="flex flex-wrap gap-1.5">
+                          {selectedRecalled.map((rid) => (
+                            <span
+                              key={rid}
+                              className="rounded border border-emerald-500/25 bg-emerald-500/10 px-2 py-0.5 font-mono text-[11px] text-emerald-700 dark:text-emerald-300"
+                            >
+                              {rid}
+                            </span>
+                          ))}
+                        </div>
+                      ) : (
+                        <p className="text-xs text-muted-foreground">（本次未召回记忆条目）</p>
+                      )}
+                    </div>
+                  </div>
+                )}
+
                 {inspectorTab === "overview" &&
                   selectedEvent?.kind !== "input" &&
+                  selectedEvent?.kind !== "recall" &&
                   activeStep?.kind !== "tool" && (
                   <div className="flex flex-col gap-3.5 divide-y divide-border/60">
                     <div className="grid grid-cols-[64px_1fr] gap-y-1.5 pb-3 text-[11px]">

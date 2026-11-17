@@ -118,6 +118,9 @@ const SETTINGS_NAV_ITEMS: SettingsNavItem[] = [
       "消息网关",
       "gateway",
       "telegram",
+      "qq",
+      "openid",
+      "app_id",
       "通道",
       "bot",
       "token",
@@ -437,7 +440,7 @@ function SettingsCardGroup({
   children: ReactNode;
 }) {
   return (
-    <section className="flex flex-col gap-2.5">
+    <motion.section layout className="flex flex-col gap-2.5">
       <div className="flex flex-wrap items-end justify-between gap-2">
         <div>
           <h3 className="text-xs font-medium text-muted-foreground">{title}</h3>
@@ -450,7 +453,7 @@ function SettingsCardGroup({
       <div className="divide-y divide-border/70 rounded-xl border border-border/80 bg-card/60">
         {children}
       </div>
-    </section>
+    </motion.section>
   );
 }
 
@@ -1331,6 +1334,135 @@ export function SettingsPanel({
                         gateway: {
                           ...p.gateway,
                           telegram: { ...p.gateway.telegram, bot_token_env: v },
+                        },
+                      }))
+                    }
+                  />
+                </div>
+              </SettingsRow>
+            </SettingsCardGroup>
+
+            <SettingsCardGroup
+              title="QQ 官方机器人"
+              description="QQ 开放平台 C2C 官方机器人接入配置（OpenAPI v2 + WebSocket 网关）"
+            >
+              <SettingsRow
+                title="启用 QQ 通道"
+                description="开启后通过 QQ 官方 WebSocket 网关接收并回复白名单用户的私聊消息"
+              >
+                <Switch
+                  ariaLabel="启用 QQ 通道"
+                  checked={draft.gateway.qq.enabled}
+                  onCheckedChange={(on) =>
+                    setDraft((p) => ({
+                      ...p,
+                      gateway: {
+                        ...p.gateway,
+                        qq: { ...p.gateway.qq, enabled: on },
+                      },
+                    }))
+                  }
+                />
+              </SettingsRow>
+              <SettingsRow title="QQ OpenAPI 地址" description="默认 https://api.bot.qq.com，可按需填写沙箱或反代地址">
+                <div className="w-full sm:w-72">
+                  <ConsoleInput
+                    size="sm"
+                    value={draft.gateway.qq.base_url}
+                    placeholder="https://api.bot.qq.com"
+                    onChange={(v) =>
+                      setDraft((p) => ({
+                        ...p,
+                        gateway: {
+                          ...p.gateway,
+                          qq: { ...p.gateway.qq, base_url: v },
+                        },
+                      }))
+                    }
+                  />
+                </div>
+              </SettingsRow>
+              <SettingsRow title="QQ App ID" description="QQ 开放平台机器人应用的 AppID">
+                <div className="w-full sm:w-56">
+                  <ConsoleInput
+                    size="sm"
+                    value={draft.gateway.qq.app_id}
+                    placeholder="例如 102000001"
+                    onChange={(v) =>
+                      setDraft((p) => ({
+                        ...p,
+                        gateway: {
+                          ...p.gateway,
+                          qq: { ...p.gateway.qq, app_id: v },
+                        },
+                      }))
+                    }
+                  />
+                </div>
+              </SettingsRow>
+              <SettingsRow title="Client Secret 环境变量" description="用于读取 QQ 机器人 AppSecret 的环境变量名">
+                <div className="w-full sm:w-56">
+                  <ConsoleInput
+                    size="sm"
+                    value={draft.gateway.qq.client_secret_env}
+                    placeholder="QQ_BOT_SECRET"
+                    onChange={(v) =>
+                      setDraft((p) => ({
+                        ...p,
+                        gateway: {
+                          ...p.gateway,
+                          qq: { ...p.gateway.qq, client_secret_env: v },
+                        },
+                      }))
+                    }
+                  />
+                </div>
+              </SettingsRow>
+              <SettingsRow title="回退通道" description="QQ 主动推送受限时是否回退到 Telegram 发送">
+                <div className="w-full sm:w-44">
+                  <ConsoleSelect
+                    size="sm"
+                    value={draft.gateway.qq.fallback_channel}
+                    onValueChange={(v) =>
+                      setDraft((p) => ({
+                        ...p,
+                        gateway: {
+                          ...p.gateway,
+                          qq: { ...p.gateway.qq, fallback_channel: v as "tg" | "none" },
+                        },
+                      }))
+                    }
+                    options={[
+                      { value: "tg", label: "Telegram" },
+                      { value: "none", label: "不回退" },
+                    ]}
+                  />
+                </div>
+              </SettingsRow>
+              <SettingsRow
+                title="QQ OpenID 白名单"
+                description="允许私聊的主人 user_openid 列表（多个用逗号分隔，也可留空后通过 /sethome 配对）"
+              >
+                <div className="w-full sm:w-72">
+                  <ConsoleInput
+                    size="sm"
+                    value={draft.owner.channels.qq.open_ids.join(", ")}
+                    placeholder="留空可通过 /sethome 自动绑定"
+                    onChange={(v) =>
+                      setDraft((p) => ({
+                        ...p,
+                        owner: {
+                          ...p.owner,
+                          channels: {
+                            ...p.owner.channels,
+                            qq: {
+                              ...p.owner.channels.qq,
+                              open_ids: v
+                                .split(",")
+                                .map((s) => s.trim())
+                                .filter(Boolean),
+                            },
+                          },
                         },
                       }))
                     }

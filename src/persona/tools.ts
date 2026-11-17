@@ -143,6 +143,17 @@ const SendFileParams = obj({
   caption: opt(str({ description: "Optional short caption for the file" })),
 });
 
+const BotProfileParams = obj({
+  platform: oneOf(["tg", "qq"], { description: "Target bot platform: 'tg' or 'qq'" }),
+  action: oneOf(["inspect", "update", "remove_avatar"], {
+    description: "'inspect' to view current bot profile, 'update' to change name/description/avatar, 'remove_avatar' to clear avatar",
+  }),
+  name: opt(str({ description: "New bot display name (up to 64 chars)" })),
+  description: opt(str({ description: "New bot description (about/intro text)" })),
+  short_description: opt(str({ description: "New short description shown on profile page" })),
+  avatar_path: opt(str({ description: "Local image file path (.jpg/.png/.webp) to set as bot avatar" })),
+});
+
 /**
  * Zero-side-effect, read-only micro-tools + isolated web/browser + personal skills/MCP + guarded self-config + fast delegate() exposed to Persona.
  */
@@ -165,6 +176,14 @@ export function createPersonaReadOnlyTools(params: {
     ok: boolean;
     message: string;
   }>;
+  onBotProfile?: (input: {
+    platform: "tg" | "qq";
+    action: "inspect" | "update" | "remove_avatar";
+    name?: string;
+    description?: string;
+    shortDescription?: string;
+    avatarPath?: string;
+  }) => Promise<{ ok: boolean; message: string; details?: Record<string, unknown> }>;
   onMemoryRecalled?: (ids: string[]) => void;
   onBeforeToolExecute?: (toolName: string, input: unknown) => Promise<void>;
 }): AgentTool<any>[] {
@@ -680,6 +699,32 @@ export function createPersonaReadOnlyTools(params: {
       },
     };
     tools.push(sendFileTool);
+  }
+
+  if (params.onBotProfile) {
+    const botProfileFn = params.onBotProfile;
+    const botProfileTool: AgentTool<typeof BotProfileParams> = {
+      name: "bot_profile",
+      label: "机器人资料管理",
+      description:
+        "查看或修改 Telegram / QQ 平台上的机器人资料（名称、简介、头像等）。修改前请确认符合用户意图。",
+      parameters: BotProfileParams,
+      async execute(_toolCallId, input) {
+        const res = await botProfileFn({
+          platform: input.platform,
+          action: input.action,
+          name: input.name,
+          description: input.description,
+          shortDescription: input.short_description,
+          avatarPath: input.avatar_path,
+        });
+        return {
+          content: [{ type: "text", text: res.message }],
+          details: { ok: res.ok, ...(res.details ?? {}) },
+        };
+      },
+    };
+    tools.push(botProfileTool);
   }
 
   if (params.extraTools && params.extraTools.length > 0) {

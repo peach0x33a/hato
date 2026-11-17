@@ -1,3 +1,4 @@
+import { dirname } from "node:path";
 import type { ImageContent } from "@earendil-works/pi-ai";
 import { Bot, GrammyError, HttpError, InputFile, InlineKeyboard, type Context } from "grammy";
 import { buildTelegramBotCommands } from "../commands/slash.js";
@@ -13,6 +14,7 @@ import { retryWithBackoff } from "../utils/retry.js";
 import {
   convertBufferToModelImage,
   formatTelegramStickerSummary,
+  saveInboundMediaBuffer,
   selectTelegramStickerDownloadCandidates,
 } from "./media.js";
 import { formatGatewayMessageLog } from "./msg-log.js";
@@ -72,6 +74,7 @@ export class TelegramAdapter implements ChannelAdapter {
   private readonly bot: Bot;
   private config: HatoConfig;
   private running = false;
+  private connectedUsername: string | null = null;
   private lastCommandSyncSignature: string | null = null;
 
   constructor(private readonly deps: TelegramAdapterDeps) {
@@ -179,6 +182,7 @@ export class TelegramAdapter implements ChannelAdapter {
       .start({
         drop_pending_updates: false,
         onStart: (info) => {
+          this.connectedUsername = info.username ?? null;
           logInfo("TG", `connected as @${info.username} via ${this.config.gateway.telegram.base_url}`, {
             timeZone: this.config.owner.timezone,
           });
@@ -199,7 +203,16 @@ export class TelegramAdapter implements ChannelAdapter {
   async stop(): Promise<void> {
     if (!this.running) return;
     this.running = false;
+    this.connectedUsername = null;
     await this.bot.stop();
+  }
+
+  getStatus(): { running: boolean; online: boolean; username?: string } {
+    return {
+      running: this.running,
+      online: this.running && this.connectedUsername !== null,
+      username: this.connectedUsername ?? undefined,
+    };
   }
 
   async sendTyping(platformUserId: string): Promise<void> {
@@ -384,7 +397,7 @@ export class TelegramAdapter implements ChannelAdapter {
         }),
       );
 
-      const images = await this.loadInboundImages(ctx);
+      const images = await this.loadInboundImages(ctx, attachments);
 
       await this.deps.onInboundMessage({
         channel: "tg",
@@ -446,11 +459,15 @@ export class TelegramAdapter implements ChannelAdapter {
     return true;
   }
 
-  private async loadInboundImages(ctx: Context): Promise<ImageContent[]> {
+  private async loadInboundImages(
+    ctx: Context,
+    attachments?: InboundAttachment[],
+  ): Promise<ImageContent[]> {
     const msg = ctx.message;
     if (!msg) return [];
 
     const images: ImageContent[] = [];
+    const dataDir = dirname(this.config.paths.sqlite);
 
     if (msg.sticker) {
       const candidates = selectTelegramStickerDownloadCandidates(msg.sticker);
@@ -463,6 +480,14 @@ export class TelegramAdapter implements ChannelAdapter {
         });
         if (img) {
           images.push(img);
+          const stickerAtt = attachments?.find((a) => a.kind === "sticker" && !a.localPath);
+          if (stickerAtt) {
+            stickerAtt.localPath = saveInboundMediaBuffer(
+              dataDir,
+              downloaded.buffer,
+              downloaded.filePath || candidate.fallbackExt,
+            );
+          }
           break;
         }
       }
@@ -478,6 +503,14 @@ export class TelegramAdapter implements ChannelAdapter {
         });
         if (img) {
           images.push(img);
+          const photoAtt = attachments?.find((a) => a.kind === "image" && !a.localPath);
+          if (photoAtt) {
+            photoAtt.localPath = saveInboundMediaBuffer(
+              dataDir,
+              downloaded.buffer,
+              downloaded.filePath || ".jpg",
+            );
+          }
         }
       }
     }

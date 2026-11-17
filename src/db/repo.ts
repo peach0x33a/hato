@@ -1321,6 +1321,105 @@ export class HatoRepository {
     }
     return stats;
   }
+
+  /**
+   * Collect aggregate message, hot-context, ticket, and turn-trace stats for Web Console overview.
+   */
+  getOverviewStats(canonicalUserId: string): {
+    messages: {
+      total: number;
+      inbound: number;
+      outbound: number;
+      last24h: number;
+      hotCount: number;
+      byChannel: { tg: number; qq: number; web: number };
+    };
+    tickets: {
+      total: number;
+      active: number;
+      done: number;
+      failed: number;
+    };
+    turns: {
+      total: number;
+      last24h: number;
+      avgLatencyMs: number | null;
+      avgCacheHitRate: number | null;
+    };
+  } {
+    const cutoff24h = Date.now() - 24 * 60 * 60 * 1000;
+    const msgRows = this.db
+      .select({
+        role: rawMessages.role,
+        channel: rawMessages.channel,
+        createdAt: rawMessages.createdAt,
+      })
+      .from(rawMessages)
+      .where(eq(rawMessages.canonicalUserId, canonicalUserId))
+      .all();
+
+    let inbound = 0;
+    let outbound = 0;
+    let last24hMsgs = 0;
+    const byChannel = { tg: 0, qq: 0, web: 0 };
+    for (const r of msgRows) {
+      if (r.role === "user") inbound++;
+      else if (r.role === "assistant") outbound++;
+      if (r.createdAt >= cutoff24h) last24hMsgs++;
+      if (r.channel === "tg") byChannel.tg++;
+      else if (r.channel === "qq") byChannel.qq++;
+      else if (r.channel === "web") byChannel.web++;
+    }
+
+    const wm = this.getWorkingMemory(canonicalUserId);
+    const hotCount = this.getHotMessages(canonicalUserId, wm.compactedUntilTs).length;
+
+    const ticketRows = this.listTickets(canonicalUserId, 500);
+    let activeTickets = 0;
+    let doneTickets = 0;
+    let failedTickets = 0;
+    for (const t of ticketRows) {
+      if (t.status === "done") doneTickets++;
+      else if (t.status === "failed" || t.status === "cancelled") failedTickets++;
+      else activeTickets++;
+    }
+
+    const traceRows = this.listTurnTraces({ canonicalUserId, limit: 500 });
+    let last24hTurns = 0;
+    let latencySum = 0;
+    let cacheSum = 0;
+    for (const tr of traceRows) {
+      if (tr.createdAt >= cutoff24h) last24hTurns++;
+      latencySum += tr.latencyMs;
+      cacheSum += tr.cacheHitRate;
+    }
+
+    return {
+      messages: {
+        total: msgRows.length,
+        inbound,
+        outbound,
+        last24h: last24hMsgs,
+        hotCount,
+        byChannel,
+      },
+      tickets: {
+        total: ticketRows.length,
+        active: activeTickets,
+        done: doneTickets,
+        failed: failedTickets,
+      },
+      turns: {
+        total: traceRows.length,
+        last24h: last24hTurns,
+        avgLatencyMs: traceRows.length > 0 ? Math.round(latencySum / traceRows.length) : null,
+        avgCacheHitRate:
+          traceRows.length > 0
+            ? Math.round((cacheSum / traceRows.length) * 10) / 10
+            : null,
+      },
+    };
+  }
 }
 
 function toMemorySyncRecordView(row: typeof memorySyncRecords.$inferSelect): MemorySyncRecordView {

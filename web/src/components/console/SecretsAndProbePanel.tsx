@@ -12,23 +12,55 @@ export interface SecretsAndProbePanelProps {
   embedded?: boolean;
 }
 
-const PROBE_TARGETS = [
+const PROBE_STORAGE_KEY = "hato_service_probe_results_v1";
+
+type ProbeTargetKey = "telegram" | "qq" | "tavily" | "memory";
+
+const PROBE_TARGETS: ReadonlyArray<{
+  key: ProbeTargetKey;
+  title: string;
+  description: string;
+}> = [
   {
     key: "telegram",
     title: "Telegram 通道",
     description: "检查 Bot Token 有效性及 Telegram API 网络可达性",
   },
   {
-    key: "persona",
-    title: "主对话模型",
-    description: "向当前 persona 槽位模型发起最小连通性探测",
+    key: "qq",
+    title: "QQ 通道",
+    description: "检查 QQ App Access Token 兑换与官方 WebSocket 网关可达性",
   },
   {
     key: "tavily",
     title: "Tavily 搜索",
     description: "验证联网检索密钥与 Tavily 接口响应状态",
   },
-] as const;
+  {
+    key: "memory",
+    title: "记忆服务",
+    description: "检查当前记忆后端（MemoryEcho / Hindsight）连通性与鉴权状态",
+  },
+];
+
+function loadSavedProbeResults(): ProbeResponse["results"] | null {
+  try {
+    const raw = window.localStorage.getItem(PROBE_STORAGE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as unknown;
+    return parsed && typeof parsed === "object" ? (parsed as ProbeResponse["results"]) : null;
+  } catch {
+    return null;
+  }
+}
+
+function saveProbeResults(results: ProbeResponse["results"]): void {
+  try {
+    window.localStorage.setItem(PROBE_STORAGE_KEY, JSON.stringify(results));
+  } catch {
+    // ignore storage quota errors
+  }
+}
 
 export function SecretsAndProbePanel({
   secretStates,
@@ -46,10 +78,10 @@ export function SecretsAndProbePanel({
   const [showCustomVal, setShowCustomVal] = useState(false);
 
   const [saveState, setSaveState] = useState<ButtonState>("idle");
-  const [probingTarget, setProbingTarget] = useState<"all" | "telegram" | "persona" | "tavily" | null>(
-    null,
+  const [probingTarget, setProbingTarget] = useState<"all" | ProbeTargetKey | null>(null);
+  const [probeResult, setProbeResult] = useState<ProbeResponse["results"] | null>(() =>
+    loadSavedProbeResults(),
   );
-  const [probeResult, setProbeResult] = useState<ProbeResponse["results"] | null>(null);
 
   const configuredCount = secretStates.filter((s) => s.configured).length;
   const probing = probingTarget !== null;
@@ -91,11 +123,22 @@ export function SecretsAndProbePanel({
     }
   };
 
-  const runProbe = async (target: "all" | "telegram" | "persona" | "tavily") => {
+  const runProbe = async (target: "all" | ProbeTargetKey) => {
     setProbingTarget(target);
     try {
       const res = await api.probe(target);
-      setProbeResult((prev) => ({ ...(prev ?? {}), ...res.results }));
+      const nowMs = Date.now();
+      const stamped: ProbeResponse["results"] = {};
+      for (const [k, val] of Object.entries(res.results)) {
+        if (val) {
+          stamped[k as ProbeTargetKey] = { ...val, testedAtMs: nowMs };
+        }
+      }
+      setProbeResult((prev) => {
+        const merged = { ...(prev ?? {}), ...stamped };
+        saveProbeResults(merged);
+        return merged;
+      });
     } catch (err) {
       onToast({
         title: "连通性检测失败",
@@ -401,8 +444,11 @@ export function SecretsAndProbePanel({
                         检测中…
                       </AnimatedBadge>
                     ) : r ? (
-                      <AnimatedBadge status={r.ok ? "success" : "danger"} size="sm">
-                        {r.ok ? `${r.latencyMs}ms` : "连接失败"}
+                      <AnimatedBadge
+                        status={r.ok ? "success" : r.skipped ? "neutral" : "danger"}
+                        size="sm"
+                      >
+                        {r.ok ? `${r.latencyMs}ms` : r.skipped ? "未启用" : "连接失败"}
                       </AnimatedBadge>
                     ) : (
                       <AnimatedBadge status="neutral" size="sm">
