@@ -11,7 +11,12 @@ import {
   type Usage,
 } from "@earendil-works/pi-ai";
 import type { BrowserRuntime, SendPhotoToUserFn } from "../browser/runtime.js";
-import { resolveMemoryRecallConfig, resolvePromptOrder, type HatoConfig } from "../config/app.js";
+import {
+  resolveMemoryRecallConfig,
+  resolvePromptDisabled,
+  resolvePromptOrder,
+  type HatoConfig,
+} from "../config/app.js";
 import { supportsCustomFetchOption, type ModelRegistry } from "../config/models.js";
 import type { ScopedProxyRouter } from "../config/proxy.js";
 import type { HatoRepository, RawMessageRecord } from "../db/repo.js";
@@ -202,6 +207,7 @@ export class PersonaRuntime {
     this.layeredPrompts = loadLayeredPrompts(
       this.hatoConfig.paths.prompts_dir,
       resolvePromptOrder(this.hatoConfig),
+      resolvePromptDisabled(this.hatoConfig),
     );
     this.basePersonaPrompt = this.layeredPrompts.combinedText;
   }

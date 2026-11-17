@@ -45,7 +45,7 @@ export function supportsCustomFetchOption(api: Api): boolean {
   return api !== "google-generative-ai" && api !== "google-vertex";
 }
 
-function resolveBuiltInApiStreams(api: Api): ProviderStreams | undefined {
+export function resolveBuiltInApiStreams(api: Api): ProviderStreams | undefined {
   switch (api) {
     case "openai-completions":
       return openAICompletionsApi();

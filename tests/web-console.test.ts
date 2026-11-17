@@ -264,7 +264,7 @@ hindsight_llm = "faux-provider/faux-persona-1"
     assert.ok(tgEntry?.configured);
     assert.match(tgEntry.masked, /\*\*\*/);
 
-    // 3. Prompt save + reload diff
+    // 3. Prompt save + reload diff + layered prompt blocks / order / enable-disable
     const savePromptRes = await fetch(`${baseUrl}/api/config/prompt`, {
       method: "PUT",
       headers: { ...authHeaders, "Content-Type": "application/json" },
@@ -274,6 +274,56 @@ hindsight_llm = "faux-provider/faux-persona-1"
     assert.equal(savePromptJson.ok, true, savePromptJson.error ?? "savePrompt failed");
     assert.match(readFileSync(join(promptsDir, "persona.md"), "utf8"), /更新后的/);
 
+    const addBlockRes = await fetch(`${baseUrl}/api/config/prompts/block`, {
+      method: "PUT",
+      headers: { ...authHeaders, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        name: "01-rules",
+        content: "CUSTOM_RULE_BLOCK",
+        enabled: true,
+      }),
+    });
+    const addBlockJson = (await addBlockRes.json()) as {
+      ok: boolean;
+      promptLayers: {
+        blocks: Array<{ name: string; content: string }>;
+        combinedText: string;
+      };
+    };
+    assert.equal(addBlockJson.ok, true);
+    assert.equal(addBlockJson.promptLayers.blocks.some((b) => b.name === "01-rules.md"), true);
+    assert.match(addBlockJson.promptLayers.combinedText, /CUSTOM_RULE_BLOCK/);
+
+    const orderRes = await fetch(`${baseUrl}/api/config/prompts/order`, {
+      method: "PUT",
+      headers: { ...authHeaders, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        order: ["soul", "block:01-rules.md", "system"],
+        disabled: ["block:01-rules.md"],
+      }),
+    });
+    const orderJson = (await orderRes.json()) as {
+      ok: boolean;
+      promptLayers: { order: string[]; disabled: string[]; combinedText: string };
+    };
+    assert.equal(orderJson.ok, true);
+    assert.deepEqual(orderJson.promptLayers.order, ["soul", "block:01-rules.md", "system"]);
+    assert.deepEqual(orderJson.promptLayers.disabled, ["block:01-rules.md"]);
+    assert.equal(orderJson.promptLayers.combinedText.includes("CUSTOM_RULE_BLOCK"), false);
+    assert.match(orderJson.promptLayers.combinedText, /更新后的 Hato 人设/);
+
+    const delBlockRes = await fetch(`${baseUrl}/api/config/prompts/block?name=01-rules.md`, {
+      method: "DELETE",
+      headers: authHeaders,
+    });
+    const delBlockJson = (await delBlockRes.json()) as {
+      ok: boolean;
+      promptLayers: { blocks: Array<{ name: string }>; order: string[] };
+    };
+    assert.equal(delBlockJson.ok, true);
+    assert.equal(delBlockJson.promptLayers.blocks.length, 0);
+    assert.equal(delBlockJson.promptLayers.order.includes("block:01-rules.md"), false);
+
     // 4. Secret update persists to .env without leaking back raw value
     const saveSecretRes = await fetch(`${baseUrl}/api/config/secrets`, {
       method: "PUT",
@@ -282,6 +332,31 @@ hindsight_llm = "faux-provider/faux-persona-1"
     });
     assert.equal(saveSecretRes.status, 200);
     assert.equal(readEnvMap(envPath).TAVILY_API_KEY, "tvly-new-secret-8888");
+
+    // 4b. Per-model hello greeting test endpoint
+    faux.setResponses([() => fauxAssistantMessage("hello")]);
+    const modelTestRes = await fetch(`${baseUrl}/api/config/models/test`, {
+      method: "POST",
+      headers: { ...authHeaders, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        providerSlug: "faux-provider",
+        api: "hato-faux-api",
+        baseUrl: "http://127.0.0.1:0/faux",
+        model: {
+          id: "faux-persona-1",
+          name: "Faux Persona",
+        },
+      }),
+    });
+    assert.equal(modelTestRes.status, 200);
+    const modelTestJson = (await modelTestRes.json()) as {
+      ok: boolean;
+      result: { ok: boolean; target: string; replyPreview?: string };
+    };
+    assert.equal(modelTestJson.ok, true);
+    assert.equal(modelTestJson.result.ok, true);
+    assert.equal(modelTestJson.result.target, "faux-provider/faux-persona-1");
+    assert.equal(modelTestJson.result.replyPreview, "hello");
 
     // 5. Chat SSE (normal reply + slash command)
     faux.setResponses([

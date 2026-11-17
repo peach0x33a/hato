@@ -71,7 +71,8 @@ export const HatoConfigSchema = Type.Object({
   }),
   prompts: Type.Optional(
     Type.Object({
-      order: Type.Array(Type.String({ minLength: 1 })),
+      order: Type.Optional(Type.Array(Type.String({ minLength: 1 }))),
+      disabled: Type.Optional(Type.Array(Type.String({ minLength: 1 }))),
     }),
   ),
   owner: Type.Object({
@@ -383,6 +384,18 @@ export function resolvePromptOrder(config: HatoConfig): string[] {
   const configured = config.prompts?.order;
   if (!configured || configured.length === 0) {
     return [...DEFAULT_PROMPT_ORDER];
+  }
+  return configured.map((item) => item.trim()).filter(Boolean);
+}
+
+/**
+ * Resolve disabled Layer 1 prompt tokens from `[prompts].disabled`
+ * (e.g. `["system", "block:01-user.md"]`).
+ */
+export function resolvePromptDisabled(config: HatoConfig): string[] {
+  const configured = config.prompts?.disabled;
+  if (!configured || configured.length === 0) {
+    return [];
   }
   return configured.map((item) => item.trim()).filter(Boolean);
 }

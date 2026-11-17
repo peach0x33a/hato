@@ -6,6 +6,7 @@ import {
   resolveMemoryEchoConfig,
   resolveMemoryProvider,
   resolveMemoryRecallConfig,
+  resolvePromptDisabled,
   resolvePromptOrder,
   resolveTavilySearchConfig,
   resolveWebBrowserConfig,
@@ -30,6 +31,7 @@ import {
  */
 const ALLOWED_SELF_CONFIG_PATHS = new Set<string>([
   "prompts.order",
+  "prompts.disabled",
   "owner.timezone",
   "owner.proactive_channel",
   "owner.quiet_hours.start",
@@ -126,7 +128,11 @@ export async function runSelfConfigAction(
   const registry = deps.getModelRegistry();
 
   if (input.action === "inspect") {
-    const prompts = loadLayeredPrompts(cfg.paths.prompts_dir, resolvePromptOrder(cfg));
+    const prompts = loadLayeredPrompts(
+      cfg.paths.prompts_dir,
+      resolvePromptOrder(cfg),
+      resolvePromptDisabled(cfg),
+    );
     const snapshot = {
       tunable_hato_config: buildSanitizedTunableSnapshot(cfg),
       editable_config_paths: [...ALLOWED_SELF_CONFIG_PATHS].sort(),
@@ -139,6 +145,7 @@ export async function runSelfConfigAction(
       prompts: {
         mode: prompts.mode,
         order: prompts.order,
+        disabled: prompts.disabled,
         blocks: prompts.blocks.map((b) => ({ name: b.name, chars: b.content.length, content: b.content })),
         system_chars: prompts.systemText.length,
         soul_path: prompts.soulPath,
@@ -216,7 +223,11 @@ export async function runSelfConfigAction(
   }
 
   if (input.action === "edit_soul") {
-    const layered = loadLayeredPrompts(cfg.paths.prompts_dir, resolvePromptOrder(cfg));
+    const layered = loadLayeredPrompts(
+      cfg.paths.prompts_dir,
+      resolvePromptOrder(cfg),
+      resolvePromptDisabled(cfg),
+    );
     const targetPath = resolve(cfg.paths.prompts_dir, "soul.md");
 
     let nextContent: string;
@@ -356,6 +367,7 @@ function buildSanitizedTunableSnapshot(cfg: HatoConfig): Record<string, unknown>
   return {
     prompts: {
       order: resolvePromptOrder(cfg),
+      disabled: resolvePromptDisabled(cfg),
     },
     owner: {
       timezone: cfg.owner.timezone,

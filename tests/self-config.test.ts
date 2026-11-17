@@ -37,6 +37,16 @@ test("loadLayeredPrompts assembles blocks, system.md, and soul.md in default and
       ["SOUL_PERSONA", "USER_BLOCK_2", "SYSTEM_RULES", "USER_BLOCK_1"].join("\n\n"),
     );
 
+    const disabledOne = loadLayeredPrompts(
+      tempDir,
+      ["soul", "block:02-style.md", "system", "blocks"],
+      ["block:02-style.md", "system"],
+    );
+    assert.equal(disabledOne.combinedText, ["SOUL_PERSONA", "USER_BLOCK_1"].join("\n\n"));
+
+    const disabledWildcard = loadLayeredPrompts(tempDir, ["blocks", "system", "soul"], ["blocks", "soul"]);
+    assert.equal(disabledWildcard.combinedText, "SYSTEM_RULES");
+
     // Legacy directory with only persona.md still works seamlessly
     const legacyDir = mkdtempSync(join(tmpdir(), "hato-legacy-prompts-"));
     try {

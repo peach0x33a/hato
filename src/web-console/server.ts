@@ -6,7 +6,9 @@ import type { BrowserRuntime } from "../browser/runtime.js";
 import type { ActorLock } from "../bus/actor-bus.js";
 import { tryHandleSlashCommand, type SlashCommandDeps } from "../commands/slash.js";
 import {
+  loadHatoConfig,
   resolveMemoryEchoConfig,
+  resolvePromptDisabled,
   resolvePromptOrder,
   resolveTavilySearchConfig,
   resolveWebConsoleConfig,
@@ -23,8 +25,18 @@ import type { CompactionManager } from "../memory/compaction.js";
 import type { MemoryCurator } from "../memory/curator.js";
 import type { PersonaRuntime } from "../persona/agent.js";
 import { splitIntoBubbles } from "../persona/bubbles.js";
-import { loadLayeredPrompts } from "../persona/prompts.js";
-import { probeModelSlot, probeTavilySearch, probeTelegramGateway } from "../setup/probe.js";
+import {
+  deletePromptBlock,
+  loadLayeredPrompts,
+  normalizePromptBlockFilename,
+  upsertPromptBlock,
+} from "../persona/prompts.js";
+import {
+  probeAdHocModel,
+  probeModelSlot,
+  probeTavilySearch,
+  probeTelegramGateway,
+} from "../setup/probe.js";
 import { parseSinceSpec, summarizeTurnTraces } from "../stats/metrics.js";
 import { logInfo, summarizeError } from "../utils/logger.js";
 
@@ -177,8 +189,24 @@ export class WebConsoleServer {
           await this.handleSaveModels(req, res);
           return;
         }
+        if (pathname === "/api/config/models/test" && method === "POST") {
+          await this.handleTestModel(req, res);
+          return;
+        }
         if (pathname === "/api/config/prompt" && method === "PUT") {
           await this.handleSavePrompt(req, res);
+          return;
+        }
+        if (pathname === "/api/config/prompts/order" && method === "PUT") {
+          await this.handleSavePromptOrder(req, res);
+          return;
+        }
+        if (pathname === "/api/config/prompts/block" && method === "PUT") {
+          await this.handleUpsertPromptBlock(req, res);
+          return;
+        }
+        if (pathname === "/api/config/prompts/block" && method === "DELETE") {
+          await this.handleDeletePromptBlock(parsedUrl, req, res);
           return;
         }
         if (pathname === "/api/config/secrets" && method === "PUT") {
@@ -494,11 +522,33 @@ export class WebConsoleServer {
     }
   }
 
+  private buildPromptLayersSnapshot(hatoConfig: HatoConfig) {
+    const layered = loadLayeredPrompts(
+      hatoConfig.paths.prompts_dir,
+      resolvePromptOrder(hatoConfig),
+      resolvePromptDisabled(hatoConfig),
+    );
+    return {
+      layered,
+      promptLayers: {
+        mode: layered.mode,
+        order: layered.order,
+        disabled: layered.disabled,
+        blocks: layered.blocks.map((b) => ({ name: b.name, path: b.path, content: b.content })),
+        systemPath: layered.systemPath,
+        systemText: layered.systemText,
+        soulPath: layered.soulPath,
+        soulText: layered.soulText,
+        combinedText: layered.combinedText,
+      },
+    };
+  }
+
   private async handleGetConfig(res: ServerResponse): Promise<void> {
     const hatoConfig = this.deps.getConfig();
     const modelsRegistry = this.deps.getModelRegistry();
     const modelsConfig = modelsRegistry.getFileConfig();
-    const layered = loadLayeredPrompts(hatoConfig.paths.prompts_dir, resolvePromptOrder(hatoConfig));
+    const { layered, promptLayers } = this.buildPromptLayersSnapshot(hatoConfig);
     const promptPath = layered.soulPath;
     const promptText = layered.soulText;
 
@@ -519,16 +569,7 @@ export class WebConsoleServer {
       modelsConfig,
       promptPath,
       promptText,
-      promptLayers: {
-        mode: layered.mode,
-        order: layered.order,
-        blocks: layered.blocks.map((b) => ({ name: b.name, path: b.path, content: b.content })),
-        systemPath: layered.systemPath,
-        systemText: layered.systemText,
-        soulPath: layered.soulPath,
-        soulText: layered.soulText,
-        combinedText: layered.combinedText,
-      },
+      promptLayers,
       secretStates,
     });
   }
@@ -570,7 +611,7 @@ export class WebConsoleServer {
     }
 
     const hato = this.deps.getConfig();
-    const layered = loadLayeredPrompts(hato.paths.prompts_dir, resolvePromptOrder(hato));
+    const { layered } = this.buildPromptLayersSnapshot(hato);
     const absPromptPath = layered.soulPath;
     mkdirSync(dirname(absPromptPath), { recursive: true });
     let backupPath: string | undefined;
@@ -580,7 +621,196 @@ export class WebConsoleServer {
     }
     writeFileSync(absPromptPath, payload.promptText, "utf8");
     const reloadRes = await this.deps.reloadAll();
-    sendJson(res, 200, { ok: true, path: absPromptPath, backupPath, ...reloadRes });
+    const nextHato = this.deps.getConfig();
+    const nextSnapshot = this.buildPromptLayersSnapshot(nextHato);
+    sendJson(res, 200, {
+      ok: true,
+      path: absPromptPath,
+      backupPath,
+      hatoConfig: nextHato,
+      promptPath: nextSnapshot.layered.soulPath,
+      promptText: nextSnapshot.layered.soulText,
+      promptLayers: nextSnapshot.promptLayers,
+      ...reloadRes,
+    });
+  }
+
+  private persistPromptsSection(nextPrompts: { order: string[]; disabled: string[] }): {
+    path: string;
+    backupPath?: string;
+    config: HatoConfig;
+  } {
+    const base = existsSync(resolve(this.deps.hatoConfigPath))
+      ? loadHatoConfig(this.deps.hatoConfigPath)
+      : this.deps.getConfig();
+    const cleanedOrder = nextPrompts.order.map((s) => s.trim()).filter(Boolean);
+    const cleanedDisabled = nextPrompts.disabled.map((s) => s.trim()).filter(Boolean);
+    const nextConfig: HatoConfig = {
+      ...base,
+      prompts: {
+        order: cleanedOrder,
+        ...(cleanedDisabled.length > 0 ? { disabled: cleanedDisabled } : {}),
+      },
+    };
+    const validated = validateHatoConfigObject(nextConfig, this.deps.hatoConfigPath);
+    const writeRes = writeHatoConfig(this.deps.hatoConfigPath, validated, { backup: true });
+    return { ...writeRes, config: validated };
+  }
+
+  private async handleSavePromptOrder(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    const payload = (await readJsonBody(req)) as { order?: unknown; disabled?: unknown };
+    if (!Array.isArray(payload.order) || !payload.order.every((item) => typeof item === "string" && item.trim().length > 0)) {
+      sendJson(res, 400, { ok: false, error: "order 必须是非空字符串数组" });
+      return;
+    }
+    if (
+      payload.disabled !== undefined &&
+      (!Array.isArray(payload.disabled) ||
+        !payload.disabled.every((item) => typeof item === "string" && item.trim().length > 0))
+    ) {
+      sendJson(res, 400, { ok: false, error: "disabled 必须是非空字符串数组" });
+      return;
+    }
+
+    const cur = this.deps.getConfig();
+    const nextOrder = (payload.order as string[]).map((s) => s.trim());
+    const nextDisabled =
+      payload.disabled !== undefined
+        ? (payload.disabled as string[]).map((s) => s.trim())
+        : resolvePromptDisabled(cur);
+
+    const writeRes = this.persistPromptsSection({ order: nextOrder, disabled: nextDisabled });
+    const reloadRes = await this.deps.reloadAll();
+    const nextHato = this.deps.getConfig();
+    const nextSnapshot = this.buildPromptLayersSnapshot(nextHato);
+    sendJson(res, 200, {
+      ok: true,
+      path: writeRes.path,
+      backupPath: writeRes.backupPath,
+      hatoConfig: nextHato,
+      promptPath: nextSnapshot.layered.soulPath,
+      promptText: nextSnapshot.layered.soulText,
+      promptLayers: nextSnapshot.promptLayers,
+      ...reloadRes,
+    });
+  }
+
+  private async handleUpsertPromptBlock(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    const payload = (await readJsonBody(req)) as {
+      name?: unknown;
+      content?: unknown;
+      enabled?: unknown;
+    };
+    if (typeof payload.name !== "string" || !payload.name.trim()) {
+      sendJson(res, 400, { ok: false, error: "提示词名称不能为空" });
+      return;
+    }
+    if (typeof payload.content !== "string") {
+      sendJson(res, 400, { ok: false, error: "content 必须为字符串" });
+      return;
+    }
+
+    const hato = this.deps.getConfig();
+    const blockRes = upsertPromptBlock(hato.paths.prompts_dir, payload.name, payload.content);
+    const token = `block:${blockRes.name}`;
+    const bare = blockRes.name.endsWith(".md") ? blockRes.name.slice(0, -3) : blockRes.name;
+
+    const currentOrder = resolvePromptOrder(hato);
+    let nextOrder = [...currentOrder];
+    const hasWildcard = nextOrder.includes("blocks");
+    const hasExplicit = nextOrder.some((t) => t === token || t === `block:${bare}`);
+    if (!hasWildcard && !hasExplicit) {
+      nextOrder.push(token);
+    }
+
+    let nextDisabled = [...resolvePromptDisabled(hato)];
+    if (typeof payload.enabled === "boolean") {
+      nextDisabled = nextDisabled.filter(
+        (t) => t !== token && t !== `block:${bare}` && t !== blockRes.name && t !== bare,
+      );
+      if (!payload.enabled) {
+        nextDisabled.push(token);
+      }
+    }
+
+    if (
+      nextOrder.length !== currentOrder.length ||
+      typeof payload.enabled === "boolean"
+    ) {
+      this.persistPromptsSection({ order: nextOrder, disabled: nextDisabled });
+    }
+
+    const reloadRes = await this.deps.reloadAll();
+    const nextHato = this.deps.getConfig();
+    const nextSnapshot = this.buildPromptLayersSnapshot(nextHato);
+    sendJson(res, 200, {
+      ok: true,
+      block: blockRes,
+      hatoConfig: nextHato,
+      promptPath: nextSnapshot.layered.soulPath,
+      promptText: nextSnapshot.layered.soulText,
+      promptLayers: nextSnapshot.promptLayers,
+      ...reloadRes,
+    });
+  }
+
+  private async handleDeletePromptBlock(
+    parsedUrl: URL,
+    req: IncomingMessage,
+    res: ServerResponse,
+  ): Promise<void> {
+    let rawName = parsedUrl.searchParams.get("name") ?? "";
+    if (!rawName.trim()) {
+      try {
+        const body = (await readJsonBody(req)) as { name?: unknown };
+        if (typeof body.name === "string") rawName = body.name;
+      } catch {
+        // Optional body when DELETE uses query param
+      }
+    }
+    if (!rawName.trim()) {
+      sendJson(res, 400, { ok: false, error: "缺少要删除的提示词名称 name" });
+      return;
+    }
+
+    const hato = this.deps.getConfig();
+    const filename = normalizePromptBlockFilename(rawName);
+    const bare = filename.endsWith(".md") ? filename.slice(0, -3) : filename;
+    const token = `block:${filename}`;
+    const delRes = deletePromptBlock(hato.paths.prompts_dir, filename);
+    if (!delRes.deleted) {
+      sendJson(res, 404, { ok: false, error: `提示词块 blocks/${filename} 不存在` });
+      return;
+    }
+
+    const currentOrder = resolvePromptOrder(hato);
+    const currentDisabled = resolvePromptDisabled(hato);
+    const isMatch = (t: string) =>
+      t === token || t === `block:${bare}` || t === filename || t === bare;
+    const nextOrder = currentOrder.filter((t) => !isMatch(t));
+    const nextDisabled = currentDisabled.filter((t) => !isMatch(t));
+    if (
+      nextOrder.length !== currentOrder.length ||
+      nextDisabled.length !== currentDisabled.length
+    ) {
+      this.persistPromptsSection({
+        order: nextOrder.length > 0 ? nextOrder : ["blocks", "system", "soul"],
+        disabled: nextDisabled,
+      });
+    }
+
+    const reloadRes = await this.deps.reloadAll();
+    const nextHato = this.deps.getConfig();
+    const nextSnapshot = this.buildPromptLayersSnapshot(nextHato);
+    sendJson(res, 200, {
+      ok: true,
+      ...delRes,
+      hatoConfig: nextHato,
+      promptPath: nextSnapshot.layered.soulPath,
+      promptText: nextSnapshot.layered.soulText,
+      promptLayers: nextSnapshot.promptLayers,
+      ...reloadRes,
+    });
   }
 
   private async handleSaveSecrets(req: IncomingMessage, res: ServerResponse): Promise<void> {
@@ -664,6 +894,76 @@ export class WebConsoleServer {
     }
 
     sendJson(res, 200, { ok: true, results });
+  }
+
+  private async handleTestModel(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    const body = (await readJsonBody(req)) as {
+      providerSlug?: unknown;
+      api?: unknown;
+      baseUrl?: unknown;
+      apiKeyEnv?: unknown;
+      apiKeyOverride?: unknown;
+      providerHeaders?: unknown;
+      model?: {
+        id?: unknown;
+        name?: unknown;
+        api?: unknown;
+        base_url?: unknown;
+        headers?: unknown;
+        reasoning?: unknown;
+        input?: unknown;
+        context_window?: unknown;
+        max_tokens?: unknown;
+      };
+    };
+
+    const providerSlug = typeof body.providerSlug === "string" ? body.providerSlug.trim() : "";
+    const api = typeof body.api === "string" ? body.api.trim() : "";
+    const baseUrl = typeof body.baseUrl === "string" ? body.baseUrl.trim() : "";
+    const apiKeyEnv = typeof body.apiKeyEnv === "string" ? body.apiKeyEnv.trim() : "";
+    const apiKeyOverride = typeof body.apiKeyOverride === "string" ? body.apiKeyOverride.trim() : undefined;
+    const modelId = typeof body.model?.id === "string" ? body.model.id.trim() : "";
+
+    if (!providerSlug || !modelId || !api || !baseUrl) {
+      sendJson(res, 400, { ok: false, error: "测试模型需要提供供应商名称、协议、Base URL 与模型 ID" });
+      return;
+    }
+
+    const toStringMap = (raw: unknown): Record<string, string> | undefined => {
+      if (!raw || typeof raw !== "object" || Array.isArray(raw)) return undefined;
+      const entries = Object.entries(raw as Record<string, unknown>)
+        .filter(([k, v]) => k.trim().length > 0 && v !== undefined && v !== null)
+        .map(([k, v]) => [k, String(v)] as const);
+      return entries.length > 0 ? Object.fromEntries(entries) : undefined;
+    };
+
+    const result = await probeAdHocModel({
+      providerSlug,
+      api,
+      baseUrl,
+      apiKeyEnv,
+      apiKeyOverride,
+      providerHeaders: toStringMap(body.providerHeaders),
+      model: {
+        id: modelId,
+        name: typeof body.model?.name === "string" ? body.model.name.trim() : undefined,
+        api: typeof body.model?.api === "string" ? body.model.api.trim() : undefined,
+        base_url: typeof body.model?.base_url === "string" ? body.model.base_url.trim() : undefined,
+        headers: toStringMap(body.model?.headers),
+        reasoning: typeof body.model?.reasoning === "boolean" ? body.model.reasoning : undefined,
+        input: Array.isArray(body.model?.input)
+          ? (body.model.input.filter((x) => x === "text" || x === "image") as Array<"text" | "image">)
+          : undefined,
+        context_window:
+          typeof body.model?.context_window === "number" ? body.model.context_window : undefined,
+        max_tokens: typeof body.model?.max_tokens === "number" ? body.model.max_tokens : undefined,
+      },
+      modelRegistry: this.deps.getModelRegistry(),
+      proxyRouter: this.deps.getProxyRouter(),
+      envOverrides: readEnvMap(this.envPath),
+    });
+
+    sendJson(res, 200, { ok: true, result });
   }
 
   private handleStatics(url: URL, res: ServerResponse): void {

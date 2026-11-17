@@ -1,5 +1,18 @@
+import {
+  createModels,
+  createProvider,
+  envApiKeyAuth,
+  type Api,
+  type Model,
+  type MutableModels,
+} from "@earendil-works/pi-ai";
 import type { ResolvedTavilySearchConfig } from "../config/app.js";
-import { supportsCustomFetchOption, type ModelSlot, type ModelRegistry } from "../config/models.js";
+import {
+  resolveBuiltInApiStreams,
+  supportsCustomFetchOption,
+  type ModelSlot,
+  type ModelRegistry,
+} from "../config/models.js";
 import type { ProxyResolution, ScopedProxyRouter } from "../config/proxy.js";
 import { runTavilySearch } from "../persona/web-search.js";
 
@@ -109,6 +122,122 @@ export async function probeTelegramGateway(params: {
   }
 }
 
+export interface AdHocModelProbeResult {
+  ok: boolean;
+  target: string;
+  providerSlug: string;
+  api: string;
+  baseUrl: string;
+  apiKeyEnv: string;
+  latencyMs: number;
+  proxy: ProxyResolution;
+  replyPreview?: string;
+  inputTokens?: number;
+  outputTokens?: number;
+  error?: string;
+}
+
+async function runModelProbeCompletion(params: {
+  modelsClient: MutableModels;
+  model: Model<Api>;
+  providerSlug: string;
+  apiKeyEnv: string;
+  apiKey?: string;
+  proxyRouter: ScopedProxyRouter;
+  promptText: string;
+  maxTokens: number;
+  timeoutMs?: number;
+}): Promise<AdHocModelProbeResult> {
+  const target = `${params.providerSlug}/${params.model.id}`;
+  const scope = `llm-calling.${params.providerSlug}`;
+  const proxy = params.proxyRouter.resolveScope(scope);
+  const startedAt = Date.now();
+
+  const hookWasInstalled = params.proxyRouter.isGlobalFetchHookInstalled();
+  if (!hookWasInstalled) {
+    params.proxyRouter.installGlobalFetchHook();
+  }
+
+  try {
+    const scopedFetch: typeof globalThis.fetch = (input, init) =>
+      params.proxyRouter.scopedFetch(input, init, scope);
+
+    const result = await params.proxyRouter.runWithScope(scope, () =>
+      params.modelsClient.completeSimple(
+        params.model,
+        {
+          messages: [
+            {
+              role: "user",
+              content: params.promptText,
+              timestamp: Date.now(),
+            },
+          ],
+        },
+        {
+          apiKey: params.apiKey,
+          maxTokens: params.maxTokens,
+          ...(supportsCustomFetchOption(params.model.api) ? { fetch: scopedFetch } : {}),
+          signal: AbortSignal.timeout(params.timeoutMs ?? 20_000),
+          disableContinuation: true,
+        },
+      ),
+    );
+
+    const latencyMs = Date.now() - startedAt;
+    if (result.stopReason === "error" || result.stopReason === "aborted") {
+      return {
+        ok: false,
+        target,
+        providerSlug: params.providerSlug,
+        api: String(params.model.api),
+        baseUrl: params.model.baseUrl,
+        apiKeyEnv: params.apiKeyEnv,
+        latencyMs,
+        proxy,
+        error: result.errorMessage || `Model stopped with reason "${result.stopReason}"`,
+      };
+    }
+
+    const replyPreview = result.content
+      .filter((block): block is { type: "text"; text: string } => block.type === "text")
+      .map((block) => block.text)
+      .join("")
+      .trim()
+      .slice(0, 120);
+
+    return {
+      ok: true,
+      target,
+      providerSlug: params.providerSlug,
+      api: String(params.model.api),
+      baseUrl: params.model.baseUrl,
+      apiKeyEnv: params.apiKeyEnv,
+      latencyMs,
+      proxy,
+      replyPreview: replyPreview || "(empty text response)",
+      inputTokens: result.usage?.input,
+      outputTokens: result.usage?.output,
+    };
+  } catch (err) {
+    return {
+      ok: false,
+      target,
+      providerSlug: params.providerSlug,
+      api: String(params.model.api),
+      baseUrl: params.model.baseUrl,
+      apiKeyEnv: params.apiKeyEnv,
+      latencyMs: Date.now() - startedAt,
+      proxy,
+      error: err instanceof Error ? err.message : String(err),
+    };
+  } finally {
+    if (!hookWasInstalled) {
+      params.proxyRouter.uninstallGlobalFetchHook();
+    }
+  }
+}
+
 /**
  * Send a minimal one-turn handshake to the configured slot model through ScopedProxyRouter.
  */
@@ -121,81 +250,12 @@ export async function probeModelSlot(params: {
 }): Promise<ModelProbeResult> {
   const slot = params.slot ?? "persona";
   const resolved = params.modelRegistry.resolveSlot(slot);
-  const scope = `llm-calling.${resolved.providerSlug}`;
-  const proxy = params.proxyRouter.resolveScope(scope);
   const startedAt = Date.now();
 
-  const hookWasInstalled = params.proxyRouter.isGlobalFetchHookInstalled();
-  if (!hookWasInstalled) {
-    params.proxyRouter.installGlobalFetchHook();
-  }
-
+  let apiKey: string | undefined;
   try {
     const overrideKey = resolved.apiKeyEnv ? params.envOverrides?.[resolved.apiKeyEnv]?.trim() : undefined;
-    const apiKey = overrideKey || params.modelRegistry.resolveApiKeyForProvider(resolved.providerSlug);
-
-    const scopedFetch: typeof globalThis.fetch = (input, init) =>
-      params.proxyRouter.scopedFetch(input, init, scope);
-
-    const result = await params.proxyRouter.runWithScope(scope, () =>
-      params.modelRegistry.models.completeSimple(
-        resolved.model,
-        {
-          messages: [
-            {
-              role: "user",
-              content: "Reply with OK only.",
-              timestamp: Date.now(),
-            },
-          ],
-        },
-        {
-          apiKey,
-          maxTokens: 16,
-          ...(supportsCustomFetchOption(resolved.model.api) ? { fetch: scopedFetch } : {}),
-          signal: AbortSignal.timeout(params.timeoutMs ?? 20_000),
-          disableContinuation: true,
-        },
-      ),
-    );
-
-    const latencyMs = Date.now() - startedAt;
-    if (result.stopReason === "error" || result.stopReason === "aborted") {
-      return {
-        ok: false,
-        slot,
-        target: resolved.target,
-        providerSlug: resolved.providerSlug,
-        api: String(resolved.model.api),
-        baseUrl: resolved.model.baseUrl,
-        apiKeyEnv: resolved.apiKeyEnv,
-        latencyMs,
-        proxy,
-        error: result.errorMessage || `Model stopped with reason "${result.stopReason}"`,
-      };
-    }
-
-    const replyPreview = result.content
-      .filter((block): block is { type: "text"; text: string } => block.type === "text")
-      .map((block) => block.text)
-      .join("")
-      .trim()
-      .slice(0, 80);
-
-    return {
-      ok: true,
-      slot,
-      target: resolved.target,
-      providerSlug: resolved.providerSlug,
-      api: String(resolved.model.api),
-      baseUrl: resolved.model.baseUrl,
-      apiKeyEnv: resolved.apiKeyEnv,
-      latencyMs,
-      proxy,
-      replyPreview: replyPreview || "(empty text response)",
-      inputTokens: result.usage?.input,
-      outputTokens: result.usage?.output,
-    };
+    apiKey = overrideKey || params.modelRegistry.resolveApiKeyForProvider(resolved.providerSlug);
   } catch (err) {
     return {
       ok: false,
@@ -206,14 +266,171 @@ export async function probeModelSlot(params: {
       baseUrl: resolved.model.baseUrl,
       apiKeyEnv: resolved.apiKeyEnv,
       latencyMs: Date.now() - startedAt,
-      proxy,
+      proxy: params.proxyRouter.resolveScope(`llm-calling.${resolved.providerSlug}`),
       error: err instanceof Error ? err.message : String(err),
     };
-  } finally {
-    if (!hookWasInstalled) {
-      params.proxyRouter.uninstallGlobalFetchHook();
+  }
+
+  const probe = await runModelProbeCompletion({
+    modelsClient: params.modelRegistry.models,
+    model: resolved.model,
+    providerSlug: resolved.providerSlug,
+    apiKeyEnv: resolved.apiKeyEnv,
+    apiKey,
+    proxyRouter: params.proxyRouter,
+    promptText: "Reply with OK only.",
+    maxTokens: 16,
+    timeoutMs: params.timeoutMs,
+  });
+
+  return {
+    slot,
+    ...probe,
+  };
+}
+
+/**
+ * Test a specific provider/model configuration (saved or unsaved UI draft) with a greeting asking for "hello".
+ */
+export async function probeAdHocModel(params: {
+  providerSlug: string;
+  api: string;
+  baseUrl: string;
+  apiKeyEnv: string;
+  apiKeyOverride?: string;
+  providerHeaders?: Record<string, string>;
+  model: {
+    id: string;
+    name?: string;
+    api?: string;
+    base_url?: string;
+    headers?: Record<string, string>;
+    reasoning?: boolean;
+    input?: Array<"text" | "image">;
+    context_window?: number;
+    max_tokens?: number;
+  };
+  modelRegistry: ModelRegistry;
+  proxyRouter: ScopedProxyRouter;
+  envOverrides?: Record<string, string>;
+  timeoutMs?: number;
+}): Promise<AdHocModelProbeResult> {
+  const providerSlug = params.providerSlug.trim();
+  const modelId = params.model.id.trim();
+  const target = `${providerSlug}/${modelId}`;
+  const modelApi = (params.model.api?.trim() || params.api.trim()) as Api;
+  const baseUrl = params.model.base_url?.trim() || params.baseUrl.trim();
+  const apiKeyEnv = params.apiKeyEnv.trim();
+  const scope = `llm-calling.${providerSlug}`;
+  const proxy = params.proxyRouter.resolveScope(scope);
+
+  if (modelApi === "hato-faux-api") {
+    try {
+      const resolved = params.modelRegistry.resolveTarget(target);
+      return await runModelProbeCompletion({
+        modelsClient: params.modelRegistry.models,
+        model: resolved.model,
+        providerSlug: resolved.providerSlug,
+        apiKeyEnv: resolved.apiKeyEnv,
+        apiKey: undefined,
+        proxyRouter: params.proxyRouter,
+        promptText: "你好！请只回复 hello。",
+        maxTokens: 64,
+        timeoutMs: params.timeoutMs,
+      });
+    } catch (err) {
+      return {
+        ok: false,
+        target,
+        providerSlug,
+        api: String(modelApi),
+        baseUrl,
+        apiKeyEnv,
+        latencyMs: 0,
+        proxy,
+        error: err instanceof Error ? err.message : String(err),
+      };
     }
   }
+
+  const streams = resolveBuiltInApiStreams(modelApi);
+  if (!streams) {
+    return {
+      ok: false,
+      target,
+      providerSlug,
+      api: String(modelApi),
+      baseUrl,
+      apiKeyEnv,
+      latencyMs: 0,
+      proxy,
+      error: `不支持的接口协议: ${String(modelApi)}`,
+    };
+  }
+
+  const apiKey =
+    params.apiKeyOverride?.trim() ||
+    (apiKeyEnv ? params.envOverrides?.[apiKeyEnv]?.trim() || process.env[apiKeyEnv]?.trim() : "") ||
+    "";
+  if (!apiKey) {
+    return {
+      ok: false,
+      target,
+      providerSlug,
+      api: String(modelApi),
+      baseUrl,
+      apiKeyEnv,
+      latencyMs: 0,
+      proxy,
+      error: apiKeyEnv
+        ? `未找到密钥环境变量 ${apiKeyEnv}，请先在「配置供应商」或「密钥与自检」中配置`
+        : "未配置 API Key 或密钥变量名",
+    };
+  }
+
+  const mergedHeaders =
+    params.providerHeaders || params.model.headers
+      ? { ...(params.providerHeaders ?? {}), ...(params.model.headers ?? {}) }
+      : undefined;
+
+  const modelObj: Model<Api> = {
+    id: modelId,
+    name: params.model.name?.trim() || modelId,
+    api: modelApi,
+    provider: providerSlug,
+    baseUrl,
+    reasoning: params.model.reasoning ?? false,
+    input: params.model.input ?? ["text"],
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    contextWindow: params.model.context_window ?? 128_000,
+    maxTokens: params.model.max_tokens ?? 8_192,
+    headers: mergedHeaders,
+  };
+
+  const tempModels = createModels();
+  tempModels.setProvider(
+    createProvider({
+      id: providerSlug,
+      name: providerSlug,
+      baseUrl,
+      headers: params.providerHeaders,
+      auth: { apiKey: envApiKeyAuth(`${providerSlug} API key`, apiKeyEnv ? [apiKeyEnv] : []) },
+      models: [modelObj],
+      api: { [modelApi]: streams },
+    }),
+  );
+
+  return runModelProbeCompletion({
+    modelsClient: tempModels,
+    model: modelObj,
+    providerSlug,
+    apiKeyEnv,
+    apiKey,
+    proxyRouter: params.proxyRouter,
+    promptText: "你好！请只回复 hello。",
+    maxTokens: 64,
+    timeoutMs: params.timeoutMs,
+  });
 }
 
 /**

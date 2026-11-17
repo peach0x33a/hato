@@ -18,6 +18,7 @@ export interface LoadedLayeredPrompts {
   soulText: string;
   legacyPersonaPath: string;
   order: string[];
+  disabled: string[];
   mode: "layered" | "legacy";
   combinedText: string;
 }
@@ -53,6 +54,7 @@ export function normalizePromptBlockFilename(rawName: string): string {
 export function loadLayeredPrompts(
   promptsDir: string,
   order: readonly string[] = DEFAULT_PROMPT_ORDER,
+  disabled: readonly string[] = [],
 ): LoadedLayeredPrompts {
   const absPromptsDir = resolve(promptsDir);
   const blocksDir = resolve(absPromptsDir, "blocks");
@@ -63,6 +65,8 @@ export function loadLayeredPrompts(
   const blocks = loadPromptBlocks(blocksDir);
   const hasSystem = existsSync(systemPath);
   const hasSoul = existsSync(soulPath);
+  const effectiveDisabled = disabled.map((d) => d.trim()).filter(Boolean);
+  const disabledSet = new Set(effectiveDisabled);
 
   if (!hasSystem && !hasSoul && blocks.length === 0 && existsSync(legacyPersonaPath)) {
     const legacyText = readFileSync(legacyPersonaPath, "utf8").trim();
@@ -76,8 +80,9 @@ export function loadLayeredPrompts(
       soulText: legacyText,
       legacyPersonaPath,
       order: order.length > 0 ? [...order] : [...DEFAULT_PROMPT_ORDER],
+      disabled: effectiveDisabled,
       mode: "legacy",
-      combinedText: legacyText,
+      combinedText: disabledSet.has("soul") ? "" : legacyText,
     };
   }
 
@@ -94,6 +99,7 @@ export function loadLayeredPrompts(
     systemText,
     soulText,
     order: effectiveOrder,
+    disabled: effectiveDisabled,
   });
 
   return {
@@ -106,6 +112,7 @@ export function loadLayeredPrompts(
     soulText,
     legacyPersonaPath,
     order: effectiveOrder,
+    disabled: effectiveDisabled,
     mode: "layered",
     combinedText,
   };
@@ -116,6 +123,7 @@ export function assembleLayeredPromptText(params: {
   systemText: string;
   soulText: string;
   order: readonly string[];
+  disabled?: readonly string[];
 }): string {
   const byName = new Map<string, PromptBlockEntry>();
   for (const b of params.blocks) {
@@ -124,6 +132,17 @@ export function assembleLayeredPromptText(params: {
       byName.set(b.name.slice(0, -3), b);
     }
   }
+
+  const disabledSet = new Set((params.disabled ?? []).map((item) => item.trim()).filter(Boolean));
+  const isBlockDisabled = (blockName: string): boolean => {
+    const bare = blockName.endsWith(".md") ? blockName.slice(0, -3) : blockName;
+    return (
+      disabledSet.has(`block:${blockName}`) ||
+      disabledSet.has(`block:${bare}`) ||
+      disabledSet.has(blockName) ||
+      disabledSet.has(bare)
+    );
+  };
 
   // Track which blocks were explicitly placed by `block:<name>` so a subsequent `"blocks"`
   // token expands only the remaining blocks without duplicating explicitly ordered ones.
@@ -147,8 +166,11 @@ export function assembleLayeredPromptText(params: {
     if (!token) continue;
 
     if (token === "blocks") {
+      if (disabledSet.has("blocks")) continue;
       for (const b of params.blocks) {
-        if (explicitlyNamed.has(b.name) || emittedBlocks.has(b.name)) continue;
+        if (explicitlyNamed.has(b.name) || emittedBlocks.has(b.name) || isBlockDisabled(b.name)) {
+          continue;
+        }
         emittedBlocks.add(b.name);
         if (b.content.trim()) sections.push(b.content.trim());
       }
@@ -158,7 +180,7 @@ export function assembleLayeredPromptText(params: {
     if (token.startsWith("block:")) {
       const ref = token.slice("block:".length).trim();
       const matched = byName.get(ref) ?? byName.get(ref.endsWith(".md") ? ref : `${ref}.md`);
-      if (matched && !emittedBlocks.has(matched.name)) {
+      if (matched && !emittedBlocks.has(matched.name) && !isBlockDisabled(matched.name)) {
         emittedBlocks.add(matched.name);
         if (matched.content.trim()) sections.push(matched.content.trim());
       }
@@ -166,7 +188,7 @@ export function assembleLayeredPromptText(params: {
     }
 
     if (token === "system") {
-      if (!emittedSystem && params.systemText.trim()) {
+      if (!disabledSet.has("system") && !emittedSystem && params.systemText.trim()) {
         emittedSystem = true;
         sections.push(params.systemText.trim());
       }
@@ -174,7 +196,7 @@ export function assembleLayeredPromptText(params: {
     }
 
     if (token === "soul") {
-      if (!emittedSoul && params.soulText.trim()) {
+      if (!disabledSet.has("soul") && !emittedSoul && params.soulText.trim()) {
         emittedSoul = true;
         sections.push(params.soulText.trim());
       }
