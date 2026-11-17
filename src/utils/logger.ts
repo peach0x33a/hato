@@ -130,6 +130,28 @@ export function redactSensitiveTokens(text: string): string {
     .replace(/(Bearer\s+)[A-Za-z0-9._-]+/gi, "$1***");
 }
 
+function formatReadableErrorText(raw: string): string {
+  const collapsed = redactSensitiveTokens(raw.replace(/\s+/g, " ").trim());
+  if (!collapsed) return "";
+
+  if (/<html[\s>]|<!doctype\s+html/i.test(collapsed)) {
+    const titleMatch = collapsed.match(/<title[^>]*>([^<]+)<\/title>/i);
+    const title = titleMatch?.[1]?.trim();
+    const isCf = /cdn-cgi|cloudflare|cf-wrapper|cf-error-details/i.test(collapsed);
+    const statusMatch =
+      title?.match(/\b(403|429|500|502|503|504|52[0-9])\b/) ??
+      collapsed.match(/\b(502|503|504|52[0-9])\b/);
+    const statusText = statusMatch ? statusMatch[1] : "HTTP Error";
+    const source = isCf ? "Cloudflare 上游网关" : "上游网关";
+    if (title) {
+      return `${source}返回错误 (${title})，请稍后重试`;
+    }
+    return `${source}返回 ${statusText} 错误，请稍后重试`;
+  }
+
+  return collapsed.length > 600 ? `${collapsed.slice(0, 597)}...` : collapsed;
+}
+
 /**
  * Formats an error into a concise single-line summary (name/code + cause chain) without dumping stack traces.
  */
@@ -158,13 +180,13 @@ export function summarizeError(err: unknown): string {
           : typeof rec.error_code === "number"
             ? `${cursor.name} (${rec.error_code})`
             : cursor.name || "Error";
-      const msg = redactSensitiveTokens(cursor.message.replace(/\s+/g, " ").trim());
+      const msg = formatReadableErrorText(cursor.message);
       parts.push(msg ? `${tag}: ${msg}` : tag);
       cursor = rec.error ?? rec.cause;
       continue;
     }
 
-    const raw = redactSensitiveTokens(String(cursor).replace(/\s+/g, " ").trim());
+    const raw = formatReadableErrorText(String(cursor));
     if (raw) parts.push(raw);
     break;
   }

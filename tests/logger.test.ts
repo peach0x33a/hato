@@ -6,6 +6,7 @@ import {
   getLogTimezone,
   setLogTimezone,
   shouldUseColor,
+  summarizeError,
 } from "../src/utils/logger.js";
 
 test("logger formats [CATEGORY] [SCOPE] [YYYY-MM-DD HH:mm:ss] consistently and respects configured timezone", () => {
@@ -71,4 +72,14 @@ test("shouldUseColor respects NO_COLOR, FORCE_COLOR, and TTY stream status", () 
     if (prevForceColor === undefined) delete process.env.FORCE_COLOR;
     else process.env.FORCE_COLOR = prevForceColor;
   }
+});
+
+test("summarizeError condenses Cloudflare 502 HTML pages into a readable summary", () => {
+  const cfErr = new Error(
+    '{"error":{"message":"<!DOCTYPE html>\\n<html><head><title>misakacloud.dev | 502: Bad gateway</title><link rel=\\"stylesheet\\" href=\\"/cdn-cgi/styles/main.css\\" /></head><body><div id=\\"cf-wrapper\\">Bad gateway</div></body></html>"}}',
+  );
+  const summary = summarizeError(cfErr);
+  assert.equal(summary.includes("<!DOCTYPE html>"), false);
+  assert.ok(summary.includes("Cloudflare 上游网关返回错误"));
+  assert.ok(summary.includes("misakacloud.dev | 502: Bad gateway"));
 });
