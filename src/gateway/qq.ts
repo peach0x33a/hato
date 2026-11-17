@@ -1,5 +1,5 @@
 import { readFileSync } from "node:fs";
-import { dirname } from "node:path";
+import { basename, dirname } from "node:path";
 import type { ImageContent } from "@earendil-works/pi-ai";
 import { ProxyAgent as UndiciProxyAgent, WebSocket as UndiciWebSocket } from "undici";
 import { resolveGatewayRetryConfig, type HatoConfig } from "../config/app.js";
@@ -73,18 +73,155 @@ interface QqC2CAttachment {
   content_type?: string;
   filename?: string;
   url?: string;
+  size?: number;
 }
 
 interface QqC2CMessageEvent {
   id: string;
   content?: string;
   timestamp?: string;
+  message_reference?: {
+    message_id?: string;
+  };
+  ark?: {
+    template_id?: number;
+    kv?: Array<{
+      key?: string;
+      value?: string;
+      obj?: Array<{
+        obj_kv?: Array<{ key?: string; value?: string }>;
+      }>;
+    }>;
+  };
   author?: {
     id?: string;
     user_openid?: string;
     union_openid?: string;
   };
   attachments?: QqC2CAttachment[];
+}
+
+const MAX_INBOUND_FILE_BYTES = 25 * 1024 * 1024;
+
+function inferExtensionFromContentType(mime?: string, filename?: string): string {
+  if (filename && /\.[A-Za-z0-9]{1,8}$/.test(filename)) {
+    return filename;
+  }
+  const lower = (mime ?? "").toLowerCase();
+  if (lower.includes("pdf")) return ".pdf";
+  if (lower.includes("json")) return ".json";
+  if (lower.includes("xml")) return ".xml";
+  if (lower.includes("zip")) return ".zip";
+  if (lower.includes("plain")) return ".txt";
+  if (lower.includes("png")) return ".png";
+  if (lower.includes("jpeg") || lower.includes("jpg")) return ".jpg";
+  if (lower.includes("webp")) return ".webp";
+  if (lower.includes("gif")) return ".gif";
+  return ".bin";
+}
+
+function decodeXmlEntities(text: string): string {
+  return text
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;|&apos;/g, "'")
+    .trim();
+}
+
+/**
+ * Extracts readable chat-forward entries from QQ JSON (`com.tencent.multimsg` / `messages`)
+ * or XML (`serviceID="35"` / `<msg>`) forward cards.
+ */
+export function parseQqForwardPayload(raw: string): string | null {
+  const trimmed = raw.trim();
+  if (!trimmed) return null;
+
+  if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
+    try {
+      const parsed = JSON.parse(trimmed) as Record<string, unknown>;
+      const lines: string[] = [];
+
+      const meta = (parsed.meta as Record<string, unknown> | undefined)?.detail as
+        | Record<string, unknown>
+        | undefined;
+      const news = Array.isArray(meta?.news) ? meta.news : undefined;
+      if (news && news.length > 0) {
+        const source = typeof meta?.source === "string" ? meta.source : "合并转发聊天记录";
+        lines.push(`[${source}]`);
+        for (const entry of news.slice(0, 30)) {
+          if (entry && typeof entry === "object" && typeof (entry as { text?: unknown }).text === "string") {
+            lines.push(`- ${(entry as { text: string }).text.trim()}`);
+          }
+        }
+      }
+
+      const records =
+        (Array.isArray(parsed.messages) ? parsed.messages : null) ??
+        (Array.isArray(parsed.records) ? parsed.records : null) ??
+        (Array.isArray(parsed) ? parsed : null);
+
+      if (records && records.length > 0) {
+        if (lines.length === 0) lines.push("[合并转发聊天记录]");
+        for (const item of records.slice(0, 50)) {
+          if (!item || typeof item !== "object") continue;
+          const rec = item as Record<string, unknown>;
+          const sender =
+            (typeof rec.sender === "string" && rec.sender) ||
+            (typeof rec.nickname === "string" && rec.nickname) ||
+            (typeof rec.author === "string" && rec.author) ||
+            "未知发送者";
+          const body =
+            (typeof rec.content === "string" && rec.content) ||
+            (typeof rec.text === "string" && rec.text) ||
+            (typeof rec.message === "string" && rec.message) ||
+            "";
+          if (body.trim()) {
+            lines.push(`${sender}: ${body.trim()}`);
+          }
+        }
+      }
+
+      if (lines.length > 0) {
+        return lines.join("\n");
+      }
+    } catch {
+      // fall through to XML/plain checks
+    }
+  }
+
+  if (/<msg[\s>]/i.test(trimmed) && /(multimsg|serviceID=["']35["']|<title[^>]*>|<summary[^>]*>)/i.test(trimmed)) {
+    const titles = [...trimmed.matchAll(/<title[^>]*>([\s\S]*?)<\/title>/gi)]
+      .map((m) => decodeXmlEntities(m[1] ?? ""))
+      .filter(Boolean);
+    const summaries = [...trimmed.matchAll(/<summary[^>]*>([\s\S]*?)<\/summary>/gi)]
+      .map((m) => decodeXmlEntities(m[1] ?? ""))
+      .filter(Boolean);
+    const lines = [...new Set([...titles, ...summaries])];
+    if (lines.length > 0) {
+      return `[合并转发聊天记录]\n${lines.map((l) => `- ${l}`).join("\n")}`;
+    }
+  }
+
+  return null;
+}
+
+function formatQqArkSummary(ark: QqC2CMessageEvent["ark"]): string | null {
+  if (!ark?.kv?.length) return null;
+  const parts: string[] = [];
+  for (const item of ark.kv) {
+    if (item.value?.trim()) {
+      parts.push(item.value.trim());
+    }
+    for (const obj of item.obj ?? []) {
+      const kvs = (obj.obj_kv ?? [])
+        .map((kv) => kv.value?.trim())
+        .filter((v): v is string => Boolean(v));
+      if (kvs.length > 0) parts.push(kvs.join(" · "));
+    }
+  }
+  return parts.length > 0 ? `[卡片消息]\n${parts.join("\n")}` : null;
 }
 
 interface PassiveReplyState {
@@ -314,6 +451,16 @@ export class QqAdapter implements ChannelAdapter {
         attachments: [{ kind: "image", filename: "image.png" }],
       }),
     );
+  }
+
+  async sendSticker(
+    platformUserId: string,
+    opts: { fileId?: string; localPath?: string; caption?: string },
+  ): Promise<void> {
+    if (!opts.localPath) {
+      throw new Error("QQ 无法仅通过 TG file_id 发送贴纸，缺少本地图片文件");
+    }
+    await this.sendFile(platformUserId, opts.localPath, basename(opts.localPath), opts.caption);
   }
 
   async sendFile(
@@ -564,6 +711,16 @@ export class QqAdapter implements ChannelAdapter {
 
     const attachments: InboundAttachment[] = [];
     const images: ImageContent[] = [];
+    const forwardNotes: string[] = [];
+
+    const parsedContentForward = parseQqForwardPayload(text);
+    if (parsedContentForward) {
+      forwardNotes.push(parsedContentForward);
+    }
+    const arkSummary = formatQqArkSummary(evt.ark);
+    if (arkSummary) {
+      forwardNotes.push(arkSummary);
+    }
 
     for (const att of evt.attachments ?? []) {
       const isImage = Boolean(att.content_type?.startsWith("image/"));
@@ -573,32 +730,68 @@ export class QqAdapter implements ChannelAdapter {
         mimeType: att.content_type,
       };
       attachments.push(item);
-      if (isImage && att.url) {
-        try {
-          const buf = await this.proxyRouter.runWithScope("gateway.qq", async () => {
-            const resp = await fetch(att.url!, { signal: AbortSignal.timeout(20_000) });
-            if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-            return Buffer.from(await resp.arrayBuffer());
-          });
+      if (!att.url) continue;
+      if (typeof att.size === "number" && att.size > MAX_INBOUND_FILE_BYTES) {
+        logWarn("QQ", `skipped oversized inbound attachment ${att.filename ?? ""} (${att.size} bytes)`);
+        continue;
+      }
+
+      try {
+        const buf = await this.proxyRouter.runWithScope("gateway.qq", async () => {
+          const resp = await fetch(att.url!, { signal: AbortSignal.timeout(25_000) });
+          if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+          return Buffer.from(await resp.arrayBuffer());
+        });
+
+        const dataDir = dirname(this.config.paths.sqlite);
+        const filenameHint = inferExtensionFromContentType(att.content_type, att.filename);
+        item.localPath = saveInboundMediaBuffer(dataDir, buf, filenameHint);
+
+        if (isImage) {
           const converted = await convertBufferToModelImage({
             buffer: buf,
-            filePath: att.filename || ".png",
+            filePath: filenameHint,
           });
           if (converted) {
             images.push(converted);
-            item.localPath = saveInboundMediaBuffer(
-              dirname(this.config.paths.sqlite),
-              buf,
-              att.filename || ".png",
-            );
           }
-        } catch (err) {
-          logWarn("QQ", `failed to download inbound image ${att.filename ?? ""}: ${summarizeError(err)}`);
+        } else if (buf.length <= 512 * 1024) {
+          const lowerMime = (att.content_type ?? "").toLowerCase();
+          const lowerName = (att.filename ?? "").toLowerCase();
+          if (
+            lowerMime.includes("json") ||
+            lowerMime.includes("xml") ||
+            lowerName.endsWith(".json") ||
+            lowerName.endsWith(".xml") ||
+            lowerName.includes("multimsg")
+          ) {
+            const parsedAtt = parseQqForwardPayload(buf.toString("utf8"));
+            if (parsedAtt) {
+              forwardNotes.push(parsedAtt);
+            }
+          }
         }
+      } catch (err) {
+        logWarn(
+          "QQ",
+          `failed to download inbound ${isImage ? "image" : "file"} ${att.filename ?? ""}: ${summarizeError(err)}`,
+        );
       }
     }
 
-    if (!text && attachments.length === 0) return;
+    const effectiveTextParts: string[] = [];
+    if (evt.message_reference?.message_id) {
+      effectiveTextParts.push(`[引用消息: ${evt.message_reference.message_id}]`);
+    }
+    if (text && !parsedContentForward) {
+      effectiveTextParts.push(text);
+    }
+    if (forwardNotes.length > 0) {
+      effectiveTextParts.push(...forwardNotes);
+    }
+    const effectiveText = effectiveTextParts.join("\n").trim();
+
+    if (!effectiveText && attachments.length === 0) return;
 
     console.log(
       formatGatewayMessageLog({
@@ -606,7 +799,7 @@ export class QqAdapter implements ChannelAdapter {
         channel: "qq",
         timeZone: this.config.owner.timezone,
         userSlug: this.config.owner.canonical_user_id,
-        text,
+        text: effectiveText,
         attachments,
       }),
     );
@@ -617,7 +810,7 @@ export class QqAdapter implements ChannelAdapter {
       platformUserId: userOpenId,
       platformMsgId: evt.id,
       canonicalUserId: this.config.owner.canonical_user_id,
-      text,
+      text: effectiveText,
       attachments,
       images: images.length > 0 ? images : undefined,
       timestampMs: tsMs,

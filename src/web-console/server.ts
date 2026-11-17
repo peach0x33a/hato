@@ -47,6 +47,7 @@ import {
   type TelegramUserProfileResult,
 } from "../setup/probe.js";
 import { parseSinceSpec, summarizeTurnTraces } from "../stats/metrics.js";
+import type { StickerService } from "../stickers/service.js";
 import { logInfo, summarizeError } from "../utils/logger.js";
 import {
   EXTERNAL_CLI_BACKENDS,
@@ -70,6 +71,7 @@ export interface WebConsoleServerDeps {
   getConfig: () => HatoConfig;
   getModelRegistry: () => ModelRegistry;
   getProxyRouter: () => ScopedProxyRouter;
+  getStickerService?: () => StickerService;
   getRepo: () => HatoRepository;
   getPersonaRuntime: () => PersonaRuntime;
   getBrowserRuntime: () => BrowserRuntime;
@@ -313,6 +315,81 @@ export class WebConsoleServer {
         }
         if (pathname === "/api/statics" && method === "GET") {
           this.handleStatics(parsedUrl, res);
+          return;
+        }
+        if (pathname === "/api/stickers" && method === "GET") {
+          const svc = this.deps.getStickerService?.();
+          if (!svc) {
+            sendJson(res, 200, { ok: true, stickers: [] });
+            return;
+          }
+          const uid = this.deps.getConfig().owner.canonical_user_id;
+          const q = parsedUrl.searchParams.get("q") ?? undefined;
+          const list = svc.getStore().list(uid, { query: q });
+          sendJson(res, 200, { ok: true, stickers: list });
+          return;
+        }
+        const stickerImageMatch = pathname.match(/^\/api\/stickers\/([^/]+)\/image$/);
+        if (stickerImageMatch && method === "GET") {
+          const svc = this.deps.getStickerService?.();
+          const uid = this.deps.getConfig().owner.canonical_user_id;
+          const id = decodeURIComponent(stickerImageMatch[1]!);
+          const rec = svc?.getStore().getById(uid, id);
+          if (!rec || !existsSync(rec.localPath)) {
+            sendJson(res, 404, { ok: false, error: "Sticker not found" });
+            return;
+          }
+          res.writeHead(200, {
+            "Content-Type": rec.mimeType || "image/webp",
+            "Cache-Control": "private, max-age=300",
+          });
+          res.end(readFileSync(rec.localPath));
+          return;
+        }
+        const stickerItemMatch = pathname.match(/^\/api\/stickers\/([^/]+)$/);
+        if (stickerItemMatch && method === "PATCH") {
+          const svc = this.deps.getStickerService?.();
+          if (!svc) {
+            sendJson(res, 503, { ok: false, error: "Sticker service unavailable" });
+            return;
+          }
+          const uid = this.deps.getConfig().owner.canonical_user_id;
+          const id = decodeURIComponent(stickerItemMatch[1]!);
+          const body = (await readJsonBody(req)) as {
+            caption?: string;
+            emotions?: string[];
+            scenes?: string[];
+            style?: string;
+          };
+          const updated = svc.getStore().updateMetadata(uid, id, {
+            ...(typeof body.caption === "string" ? { caption: body.caption.trim() } : {}),
+            ...(Array.isArray(body.emotions) ? { emotions: body.emotions.map((x) => String(x).trim()).filter(Boolean) } : {}),
+            ...(Array.isArray(body.scenes) ? { scenes: body.scenes.map((x) => String(x).trim()).filter(Boolean) } : {}),
+            ...(typeof body.style === "string" ? { style: body.style.trim() } : {}),
+            status: "ready",
+            errorMessage: null,
+          });
+          if (!updated) {
+            sendJson(res, 404, { ok: false, error: "Sticker not found" });
+            return;
+          }
+          sendJson(res, 200, { ok: true, sticker: updated });
+          return;
+        }
+        if (stickerItemMatch && method === "DELETE") {
+          const svc = this.deps.getStickerService?.();
+          if (!svc) {
+            sendJson(res, 503, { ok: false, error: "Sticker service unavailable" });
+            return;
+          }
+          const uid = this.deps.getConfig().owner.canonical_user_id;
+          const id = decodeURIComponent(stickerItemMatch[1]!);
+          const deleted = svc.deleteSticker(uid, id);
+          if (!deleted) {
+            sendJson(res, 404, { ok: false, error: "Sticker not found" });
+            return;
+          }
+          sendJson(res, 200, { ok: true });
           return;
         }
         if (pathname === "/api/tickets" && method === "GET") {

@@ -424,6 +424,7 @@ const SLOT_BADGE_STYLE: Record<string, string> = {
   curator: "border-emerald-500/25 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300",
   router: "border-sky-500/25 bg-sky-500/10 text-sky-700 dark:text-sky-300",
   hindsight_llm: "border-violet-500/25 bg-violet-500/10 text-violet-700 dark:text-violet-300",
+  vision: "border-rose-500/25 bg-rose-500/10 text-rose-700 dark:text-rose-300",
 };
 
 export function SlotBadge({ slot, className }: { slot: string; className?: string }) {

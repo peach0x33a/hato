@@ -85,7 +85,7 @@ export function FunctionSlotsPanel({
 
       <div className="grid grid-cols-1 gap-3.5 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5">
         {SLOT_DEFINITIONS.map((slot) => {
-          const currentValue = slots[slot.key];
+          const currentValue = slots[slot.key] ?? (slot.key === "vision" ? slots.persona : "");
           const matched = targetMap.get(currentValue);
           const isMissing = currentValue.length > 0 && !matched;
 

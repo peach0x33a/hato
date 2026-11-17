@@ -161,3 +161,27 @@ export const memorySyncRecords = sqliteTable("memory_sync_records", {
   createdAt: integer("created_at").notNull(),
   updatedAt: integer("updated_at").notNull(),
 });
+
+export const stickers = sqliteTable("stickers", {
+  id: text("id").primaryKey(),
+  canonicalUserId: text("canonical_user_id").notNull(),
+  source: text("source").notNull(), // "user_send" | "tg_pack" | "auto_save"
+  setName: text("set_name"),
+  emoji: text("emoji"),
+  tgFileId: text("tg_file_id"),
+  tgFileUniqueId: text("tg_file_unique_id"),
+  localPath: text("local_path").notNull(),
+  mimeType: text("mime_type").notNull().default("image/webp"),
+  sha256: text("sha256").notNull(),
+  isAnimated: integer("is_animated").notNull().default(0),
+  caption: text("caption").notNull().default(""),
+  emotionsJson: text("emotions_json").notNull().default("[]"),
+  scenesJson: text("scenes_json").notNull().default("[]"),
+  style: text("style").notNull().default(""),
+  status: text("status").notNull().default("pending"), // "pending" | "ready" | "failed"
+  errorMessage: text("error_message"),
+  useCount: integer("use_count").notNull().default(0),
+  lastUsedAt: integer("last_used_at"),
+  createdAt: integer("created_at").notNull(),
+  updatedAt: integer("updated_at").notNull(),
+});

@@ -63,6 +63,13 @@ export const SLOT_DEFINITIONS: SlotDefinition[] = [
     pillClass:
       "border-violet-500/30 bg-violet-500/10 text-violet-700 dark:text-violet-300",
   },
+  {
+    key: "vision",
+    label: "图像理解槽位（未配回退主对话）",
+    accentClass: "text-rose-600 dark:text-rose-400",
+    pillClass:
+      "border-rose-500/30 bg-rose-500/10 text-rose-700 dark:text-rose-300",
+  },
 ];
 
 export interface ProviderPreset {

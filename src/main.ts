@@ -35,6 +35,8 @@ import { MemoryEchoStore } from "./memory/memoryecho.js";
 import type { MemoryStore } from "./memory/store.js";
 import { PersonaRuntime } from "./persona/agent.js";
 import { probeTelegramGateway, updateTelegramBotProfile } from "./setup/probe.js";
+import { StickerService } from "./stickers/service.js";
+import { StickerStore } from "./stickers/store.js";
 import { logError, logInfo, logWarn, setLogTimezone, summarizeError } from "./utils/logger.js";
 import { WebConsoleServer } from "./web-console/server.js";
 import { WorkerDispatcher } from "./worker/backend.js";
@@ -56,6 +58,7 @@ async function main(): Promise<void> {
 
   const dbHandle = openDatabase(hatoConfig.paths.sqlite);
   const repo = new HatoRepository(dbHandle.db);
+  const stickerStore = new StickerStore(dbHandle.db);
 
   repo.ensureOwner({
     canonicalUserId: hatoConfig.owner.canonical_user_id,
@@ -114,6 +117,13 @@ async function main(): Promise<void> {
     proxyRouter,
   });
   const workerDispatcher = new WorkerDispatcher(builtinRunner, externalRunner);
+  const stickerService = new StickerService({
+    store: stickerStore,
+    getHatoConfig: () => hatoConfig,
+    getModelRegistry: () => modelRegistry,
+    getProxyRouter: () => proxyRouter,
+    getTelegramAdapter: () => tgAdapter,
+  });
   const ticketCoordinator = new TicketCoordinator({
     getHatoConfig: () => hatoConfig,
     repo,
@@ -122,6 +132,111 @@ async function main(): Promise<void> {
     bus,
   });
   personaRuntime.setDelegateHandler((input) => ticketCoordinator.enqueueDelegation(input));
+  personaRuntime.setStickerHandlers({
+    onSearch: async ({ canonicalUserId, query, emotion, limit }) => {
+      const matches = stickerStore.search(canonicalUserId, query, { emotion, limit });
+      if (matches.length === 0) {
+        return "表情包库目前还没有已就绪的表情包。";
+      }
+      return matches
+        .map(
+          (s) =>
+            `[${s.id}] 情绪:${s.emotions.join("/") || "通用"} | 描述:${s.caption} | 语境:${s.scenes.join("/") || "日常"}${s.tgFileId ? " | TG原生" : ""}`,
+        )
+        .join("\n");
+    },
+    onSend: async ({ canonicalUserId, stickerId, channel, strictChannel }) => {
+      const rec = stickerStore.getById(canonicalUserId, stickerId);
+      if (!rec) {
+        return { ok: false, message: `未找到表情包 ${stickerId}` };
+      }
+      if (channel === "web") {
+        return {
+          ok: false,
+          message: `Web Console 暂不支持发送贴纸气泡，本地路径为: ${rec.localPath}`,
+        };
+      }
+      const outbound = strictChannel
+        ? resolveStrictOutboundTarget(channel)
+        : resolveOutboundTarget(channel);
+      if (!outbound) {
+        return { ok: false, message: `${channel.toUpperCase()} 网关未就绪或未绑定 owner` };
+      }
+      if (outbound.adapter.sendSticker) {
+        await outbound.adapter.sendSticker(outbound.targetId, {
+          fileId: outbound.channel === "tg" ? rec.tgFileId ?? undefined : undefined,
+          localPath: rec.localPath,
+        });
+      } else if (outbound.adapter.sendFile) {
+        await outbound.adapter.sendFile(outbound.targetId, rec.localPath, basename(rec.localPath));
+      } else {
+        return { ok: false, message: `${outbound.channel.toUpperCase()} 网关不支持发送表情包` };
+      }
+      stickerStore.recordUsed(canonicalUserId, rec.id);
+      return {
+        ok: true,
+        message: `已发送表情包 ${rec.id} 到 ${outbound.channel.toUpperCase()}`,
+      };
+    },
+    onSave: async ({ canonicalUserId, path, packUrl, note, source }) => {
+      if (packUrl) {
+        const res = await stickerService.importTelegramPack({
+          canonicalUserId,
+          setNameOrUrl: packUrl,
+          onComplete: (summary) => {
+            const tgOut = resolveStrictOutboundTarget("tg");
+            const msg = `贴纸包「${summary.title}」导入完成：新增 ${summary.imported} 张，跳过重复 ${summary.skipped} 张${summary.failed > 0 ? `，失败 ${summary.failed} 张` : ""}。`;
+            if (tgOut) {
+              void tgOut.adapter.sendText(tgOut.targetId, msg).catch(() => undefined);
+            }
+          },
+        });
+        return {
+          ok: true,
+          message: `已开始后台导入 Telegram 贴纸包「${res.title}」(${res.setName})：共 ${res.total} 张，排队打标 ${res.queued} 张，跳过重复 ${res.skipped} 张。`,
+        };
+      }
+      if (!path) {
+        return { ok: false, message: "请提供本地图片/贴纸 path 或 TG 贴纸包 pack_url。" };
+      }
+      const saved = await stickerService.saveFromLocalFile({
+        canonicalUserId,
+        localPath: path,
+        source: source ?? "user_send",
+        note,
+        awaitTag: true,
+      });
+      return {
+        ok: true,
+        message: saved.deduplicated
+          ? `该表情包已在库中（${saved.record.id}）：${saved.record.caption}`
+          : `已保存并完成视觉标注（${saved.record.id}）：描述=${saved.record.caption}；情绪=${saved.record.emotions.join("/")}`,
+      };
+    },
+    onCollect: async ({ canonicalUserId, action }) => {
+      if (action === "start") {
+        stickerService.setCollectMode(canonicalUserId, true);
+        return {
+          ok: true,
+          message: "已开启批量收图模式：接下来用户发来的图片与贴纸都会自动入库并后台视觉打标。",
+        };
+      }
+      if (action === "stop") {
+        stickerService.setCollectMode(canonicalUserId, false);
+        const total = stickerStore.list(canonicalUserId).length;
+        return {
+          ok: true,
+          message: `已关闭批量收图模式，当前表情包库共 ${total} 张。`,
+        };
+      }
+      const active = stickerService.isCollectMode(canonicalUserId);
+      const total = stickerStore.list(canonicalUserId).length;
+      return {
+        ok: true,
+        message: `批量收图模式当前${active ? "开启中" : "未开启"}，库内共 ${total} 张。`,
+      };
+    },
+  });
   const resolveStrictOutboundTarget = (
     channel: "tg" | "qq",
   ): { channel: "tg" | "qq"; adapter: ChannelAdapter; targetId: string } | null => {
@@ -473,6 +588,40 @@ async function main(): Promise<void> {
         .catch(() => ({ handledByTicket: false as const }));
       if (routedToTicket.handledByTicket) {
         return;
+      }
+
+      if (stickerService.isCollectMode(uid)) {
+        const mediaItems = mergedBatch.attachments.filter(
+          (a) => (a.kind === "image" || a.kind === "sticker") && Boolean(a.localPath),
+        );
+        if (mediaItems.length > 0) {
+          let queuedCount = 0;
+          let dupCount = 0;
+          for (const item of mediaItems) {
+            try {
+              const saved = await stickerService.saveFromLocalFile({
+                canonicalUserId: uid,
+                localPath: item.localPath!,
+                source: "user_send",
+                setName: item.setName,
+                emoji: item.emoji,
+                tgFileId: item.tgFileId,
+                tgFileUniqueId: item.tgFileUniqueId,
+                isAnimated: item.isAnimated,
+                note: mergedBatch.combinedText || undefined,
+                awaitTag: false,
+              });
+              if (saved.deduplicated) dupCount++;
+              else queuedCount++;
+            } catch (err) {
+              logWarn("STICKER", `collect mode failed: ${summarizeError(err)}`);
+            }
+          }
+          const note = `[系统：批量收图模式已处理本条消息中的 ${mediaItems.length} 张表情包（新增排队打标 ${queuedCount} 张，跳过重复 ${dupCount} 张）]`;
+          mergedBatch.combinedText = mergedBatch.combinedText
+            ? `${mergedBatch.combinedText}\n${note}`
+            : note;
+        }
       }
 
       await adapter.sendTyping?.(targetId).catch(() => undefined);
@@ -883,6 +1032,7 @@ async function main(): Promise<void> {
     getConfig: () => hatoConfig,
     getModelRegistry: () => modelRegistry,
     getProxyRouter: () => proxyRouter,
+    getStickerService: () => stickerService,
     getRepo: () => repo,
     getPersonaRuntime: () => personaRuntime,
     getBrowserRuntime: () => browserRuntime,

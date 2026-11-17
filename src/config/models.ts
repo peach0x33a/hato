@@ -127,7 +127,14 @@ export function parseQualifiedModelTarget(targetInput: string): {
   };
 }
 
-export const MODEL_SLOTS = ["persona", "router", "curator", "worker", "hindsight_llm"] as const;
+export const MODEL_SLOTS = [
+  "persona",
+  "router",
+  "curator",
+  "worker",
+  "hindsight_llm",
+  "vision",
+] as const;
 export type ModelSlot = (typeof MODEL_SLOTS)[number];
 
 const ModelEntrySchema = Type.Object({
@@ -171,6 +178,7 @@ export const ModelsFileSchema = Type.Object({
     curator: Type.String({ minLength: 3 }),
     worker: Type.String({ minLength: 3 }),
     hindsight_llm: Type.String({ minLength: 3 }),
+    vision: Type.Optional(Type.String({ minLength: 3 })),
   }),
   providers: Type.Record(Type.String(), ProviderConfigSchema),
 });
@@ -404,7 +412,11 @@ function buildValidatedModelsCatalog(
   }
 
   for (const slot of MODEL_SLOTS) {
-    resolveTargetFromMap(nextMap, rawParsed.slots[slot], `slot "${slot}" in ${sourceLabel}`);
+    const rawTarget = rawParsed.slots[slot] ?? (slot === "vision" ? rawParsed.slots.persona : undefined);
+    if (!rawTarget) {
+      throw new Error(`Missing target for slot "${slot}" in ${sourceLabel}`);
+    }
+    resolveTargetFromMap(nextMap, rawTarget, `slot "${slot}" in ${sourceLabel}`);
   }
 
   return {
@@ -458,9 +470,10 @@ export class ModelRegistry {
     let overridesChanged = false;
 
     for (const slot of MODEL_SLOTS) {
+      const slotTargetRaw = parsed.slots[slot] ?? parsed.slots.persona;
       const normalizedSlotTarget = resolveTargetFromMap(
         nextMap,
-        parsed.slots[slot],
+        slotTargetRaw,
         `slot "${slot}" in ${absPath}`,
       ).target;
 
@@ -515,7 +528,13 @@ export class ModelRegistry {
   }
 
   resolveSlot(slot: ModelSlot): ResolvedModelSlot {
-    const rawTarget = this.slotOverrides[slot] ?? this.fileConfig.slots[slot];
+    const rawTarget =
+      this.slotOverrides[slot] ??
+      this.fileConfig.slots[slot] ??
+      (slot === "vision" ? this.slotOverrides.persona ?? this.fileConfig.slots.persona : undefined);
+    if (!rawTarget) {
+      throw new Error(`Slot "${slot}" is not configured`);
+    }
     const found = resolveTargetFromMap(this.modelsByTarget, rawTarget, `slot "${slot}"`);
     return {
       slot,

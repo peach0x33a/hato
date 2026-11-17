@@ -385,6 +385,7 @@ export interface ModelsFileConfig {
     curator: string;
     worker: string;
     hindsight_llm: string;
+    vision?: string;
   };
   providers: Record<string, ProviderConfig>;
 }
@@ -654,9 +655,53 @@ async function requestJson<T>(url: string, init?: RequestInit): Promise<T> {
   return parsed as T;
 }
 
+export interface StickerRecord {
+  id: string;
+  canonicalUserId: string;
+  source: "user_send" | "tg_pack" | "auto_save";
+  setName: string | null;
+  emoji: string | null;
+  tgFileId: string | null;
+  localPath: string;
+  mimeType: string;
+  isAnimated: boolean;
+  caption: string;
+  emotions: string[];
+  scenes: string[];
+  style: string;
+  status: "pending" | "ready" | "failed";
+  errorMessage: string | null;
+  useCount: number;
+  lastUsedAt: number | null;
+  createdAt: number;
+  updatedAt: number;
+}
+
 export const api = {
   getHealth: () => fetch("/api/health").then((r) => r.json() as Promise<HealthResponse>),
   getOverview: () => requestJson<OverviewResponse>("/api/overview"),
+  listStickers: (q?: string) =>
+    requestJson<{ ok: boolean; stickers: StickerRecord[] }>(
+      q?.trim() ? `/api/stickers?q=${encodeURIComponent(q.trim())}` : "/api/stickers",
+    ),
+  stickerImageUrl: (id: string) => {
+    const token = getStoredToken();
+    const base = `/api/stickers/${encodeURIComponent(id)}/image`;
+    return token ? `${base}?token=${encodeURIComponent(token)}` : base;
+  },
+  updateSticker: (
+    id: string,
+    patch: { caption?: string; emotions?: string[]; scenes?: string[]; style?: string },
+  ) =>
+    requestJson<{ ok: boolean; sticker: StickerRecord }>(`/api/stickers/${encodeURIComponent(id)}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(patch),
+    }),
+  deleteSticker: (id: string) =>
+    requestJson<{ ok: boolean }>(`/api/stickers/${encodeURIComponent(id)}`, {
+      method: "DELETE",
+    }),
   getPairingCode: (refresh = false) =>
     requestJson<{ ok: boolean; code: string; command: string }>(
       refresh ? "/api/pairing-code?refresh=1" : "/api/pairing-code",

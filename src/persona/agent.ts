@@ -128,6 +128,12 @@ export class PersonaRuntime {
         avatarPath?: string;
       }) => Promise<{ ok: boolean; message: string; details?: Record<string, unknown> }>)
     | null = null;
+  private stickerHandlers: {
+    onSearch: (input: { canonicalUserId: string; query: string; emotion?: string; limit?: number }) => Promise<string>;
+    onSend: (input: { canonicalUserId: string; stickerId: string; channel: InboundBatch["originChannel"]; strictChannel: boolean }) => Promise<{ ok: boolean; message: string }>;
+    onSave: (input: { canonicalUserId: string; path?: string; packUrl?: string; note?: string; source?: "user_send" | "auto_save" }) => Promise<{ ok: boolean; message: string }>;
+    onCollect: (input: { canonicalUserId: string; action: "start" | "stop" | "status" }) => Promise<{ ok: boolean; message: string }>;
+  } | null = null;
   private activeTurnOriginChannel: InboundBatch["originChannel"] = "tg";
 
   constructor(
@@ -270,6 +276,20 @@ export class PersonaRuntime {
     }
   }
 
+  setStickerHandlers(
+    handlers: {
+      onSearch: (input: { canonicalUserId: string; query: string; emotion?: string; limit?: number }) => Promise<string>;
+      onSend: (input: { canonicalUserId: string; stickerId: string; channel: InboundBatch["originChannel"]; strictChannel: boolean }) => Promise<{ ok: boolean; message: string }>;
+      onSave: (input: { canonicalUserId: string; path?: string; packUrl?: string; note?: string; source?: "user_send" | "auto_save" }) => Promise<{ ok: boolean; message: string }>;
+      onCollect: (input: { canonicalUserId: string; action: "start" | "stop" | "status" }) => Promise<{ ok: boolean; message: string }>;
+    } | null,
+  ): void {
+    this.stickerHandlers = handlers;
+    if (!this.activeTurn) {
+      this.syncTools();
+    }
+  }
+
   setBotProfileHandler(
     handler:
       | ((input: {
@@ -393,6 +413,44 @@ export class PersonaRuntime {
           }
         : {}),
       ...(this.botProfileHandler ? { onBotProfile: this.botProfileHandler } : {}),
+      ...(this.stickerHandlers
+        ? {
+            onStickerSearch: (input: { query: string; emotion?: string; limit?: number }) =>
+              this.stickerHandlers!.onSearch({
+                canonicalUserId,
+                query: input.query,
+                emotion: input.emotion,
+                limit: input.limit,
+              }),
+            onSendSticker: (input: { stickerId: string; channel?: "current" | "tg" | "qq" }) => {
+              const explicit = input.channel && input.channel !== "current" ? input.channel : undefined;
+              return this.stickerHandlers!.onSend({
+                canonicalUserId,
+                stickerId: input.stickerId,
+                channel: explicit ?? this.activeTurnOriginChannel,
+                strictChannel: Boolean(explicit),
+              });
+            },
+            onStickerSave: (input: {
+              path?: string;
+              packUrl?: string;
+              note?: string;
+              source?: "user_send" | "auto_save";
+            }) =>
+              this.stickerHandlers!.onSave({
+                canonicalUserId,
+                path: input.path,
+                packUrl: input.packUrl,
+                note: input.note,
+                source: input.source,
+              }),
+            onStickerCollect: (input: { action: "start" | "stop" | "status" }) =>
+              this.stickerHandlers!.onCollect({
+                canonicalUserId,
+                action: input.action,
+              }),
+          }
+        : {}),
       selfConfigDeps: {
         hatoConfigPath: this.hatoConfigPath,
         getHatoConfig: () => this.hatoConfig,

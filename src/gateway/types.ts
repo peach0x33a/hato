@@ -16,6 +16,11 @@ export interface InboundAttachment {
   mimeType?: string;
   localPath?: string;
   summary?: string;
+  tgFileId?: string;
+  tgFileUniqueId?: string;
+  setName?: string;
+  emoji?: string;
+  isAnimated?: boolean;
 }
 
 export interface InboundMessage {
@@ -64,6 +69,10 @@ export interface ChannelAdapter {
     replyToPlatformMsgId?: string,
   ): Promise<void>;
   sendPhoto?(platformUserId: string, photo: Buffer | string, caption?: string): Promise<void>;
+  sendSticker?(
+    platformUserId: string,
+    opts: { fileId?: string; localPath?: string; caption?: string },
+  ): Promise<void>;
   sendFile?(platformUserId: string, localPath: string, filename: string, caption?: string): Promise<void>;
   sendConfirm?(platformUserId: string, confirm: OutboundConfirmAction): Promise<void>;
 }

@@ -181,6 +181,33 @@ CREATE TABLE IF NOT EXISTS memory_sync_records (
 );
 CREATE INDEX IF NOT EXISTS idx_memory_sync_user_bank ON memory_sync_records (canonical_user_id, bank, created_at);
 CREATE INDEX IF NOT EXISTS idx_memory_sync_status ON memory_sync_records (canonical_user_id, status, updated_at);
+
+CREATE TABLE IF NOT EXISTS stickers (
+  id TEXT PRIMARY KEY,
+  canonical_user_id TEXT NOT NULL,
+  source TEXT NOT NULL,
+  set_name TEXT,
+  emoji TEXT,
+  tg_file_id TEXT,
+  tg_file_unique_id TEXT,
+  local_path TEXT NOT NULL,
+  mime_type TEXT NOT NULL DEFAULT 'image/webp',
+  sha256 TEXT NOT NULL,
+  is_animated INTEGER NOT NULL DEFAULT 0,
+  caption TEXT NOT NULL DEFAULT '',
+  emotions_json TEXT NOT NULL DEFAULT '[]',
+  scenes_json TEXT NOT NULL DEFAULT '[]',
+  style TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'pending',
+  error_message TEXT,
+  use_count INTEGER NOT NULL DEFAULT 0,
+  last_used_at INTEGER,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_stickers_user_status ON stickers (canonical_user_id, status, created_at);
+CREATE INDEX IF NOT EXISTS idx_stickers_sha256 ON stickers (canonical_user_id, sha256);
+CREATE INDEX IF NOT EXISTS idx_stickers_tg_unique ON stickers (canonical_user_id, tg_file_unique_id);
 `;
 
 export function openDatabase(sqlitePath: string): DbHandle {

@@ -158,6 +158,39 @@ const SendMessageParams = obj({
   caption: opt(str({ description: "Optional short caption when sending file_path" })),
 });
 
+const StickerSearchParams = obj({
+  query: str({ description: "Keywords describing desired mood, scene, text, or visual content" }),
+  emotion: opt(str({ description: "Optional emotion filter (e.g. 开心, 委屈, 吐槽, 贴贴)" })),
+  limit: opt(num({ description: "Max results to return (1-10, default 5)" })),
+});
+
+const SendStickerParams = obj({
+  sticker_id: str({ description: "Sticker ID returned by sticker_search (e.g. stk_...)" }),
+  channel: opt(
+    oneOf(["current", "tg", "qq"], {
+      description: "Target platform: 'current' (default), 'tg' (native sendSticker), or 'qq'",
+    }),
+  ),
+});
+
+const StickerSaveParams = obj({
+  path: opt(str({ description: "Local image/sticker file path from context to save and tag" })),
+  pack_url: opt(
+    str({
+      description:
+        "Telegram Sticker Pack URL (https://t.me/addstickers/...) or set_name to batch import",
+    }),
+  ),
+  note: opt(str({ description: "Optional context note / user description to aid vision tagging" })),
+  source: opt(oneOf(["user_send", "auto_save"])),
+});
+
+const StickerCollectParams = obj({
+  action: oneOf(["start", "stop", "status"], {
+    description: "Start, stop, or inspect batch sticker collection mode for incoming images/stickers",
+  }),
+});
+
 const BotProfileParams = obj({
   platform: oneOf(["tg", "qq"], { description: "Target bot platform: 'tg' or 'qq'" }),
   action: oneOf(["inspect", "update", "remove_avatar"], {
@@ -204,6 +237,24 @@ export function createPersonaReadOnlyTools(params: {
     ok: boolean;
     message: string;
   }>;
+  onStickerSearch?: (input: {
+    query: string;
+    emotion?: string;
+    limit?: number;
+  }) => Promise<string>;
+  onSendSticker?: (input: {
+    stickerId: string;
+    channel?: "current" | "tg" | "qq";
+  }) => Promise<{ ok: boolean; message: string }>;
+  onStickerSave?: (input: {
+    path?: string;
+    packUrl?: string;
+    note?: string;
+    source?: "user_send" | "auto_save";
+  }) => Promise<{ ok: boolean; message: string }>;
+  onStickerCollect?: (input: {
+    action: "start" | "stop" | "status";
+  }) => Promise<{ ok: boolean; message: string }>;
   onBotProfile?: (input: {
     platform: "tg" | "qq";
     action: "inspect" | "update" | "remove_avatar";
@@ -791,6 +842,81 @@ export function createPersonaReadOnlyTools(params: {
       },
     };
     tools.push(sendMessageTool);
+  }
+
+  if (params.onStickerSearch) {
+    const searchFn = params.onStickerSearch;
+    tools.push({
+      name: "sticker_search",
+      label: "搜索表情包",
+      description:
+        "按情绪、语境或画面描述检索已保存的表情包库，返回匹配的 sticker_id 与语义卡片。",
+      parameters: StickerSearchParams,
+      async execute(_toolCallId, input) {
+        const text = await searchFn({
+          query: input.query,
+          emotion: input.emotion,
+          limit: input.limit,
+        });
+        return { content: [{ type: "text", text }], details: { ok: true } };
+      },
+    });
+  }
+
+  if (params.onSendSticker) {
+    const sendStickerFn = params.onSendSticker;
+    tools.push({
+      name: "send_sticker",
+      label: "发送表情包",
+      description:
+        "发送指定 sticker_id 的表情包（TG 使用原生 sendSticker，QQ 发送对应图片）。可先调用 sticker_search 获取 sticker_id。",
+      parameters: SendStickerParams,
+      async execute(_toolCallId, input) {
+        const res = await sendStickerFn({
+          stickerId: input.sticker_id.trim(),
+          channel: input.channel,
+        });
+        return {
+          content: [{ type: "text", text: res.message }],
+          details: { ok: res.ok, stickerId: input.sticker_id },
+        };
+      },
+    });
+  }
+
+  if (params.onStickerSave) {
+    const saveFn = params.onStickerSave;
+    tools.push({
+      name: "sticker_save",
+      label: "保存表情包",
+      description:
+        "自主保存表情包或整套 Telegram Sticker Pack：传入本地图片/贴纸 path 保存单张，或传入 pack_url (如 https://t.me/addstickers/xxx 或 set_name) 批量导入整套贴纸包并自动视觉打标入库。",
+      parameters: StickerSaveParams,
+      async execute(_toolCallId, input) {
+        const res = await saveFn({
+          path: input.path?.trim() || undefined,
+          packUrl: input.pack_url?.trim() || undefined,
+          note: input.note?.trim() || undefined,
+          source: input.source,
+        });
+        return { content: [{ type: "text", text: res.message }], details: { ok: res.ok } };
+      },
+    });
+  }
+
+  if (params.onStickerCollect) {
+    const collectFn = params.onStickerCollect;
+    tools.push({
+      name: "sticker_collect",
+      label: "表情包收图模式",
+      description:
+        "开启或关闭批量收图模式。当用户说“我给你发一堆表情包你保存下来”时调用 start，用户后续发来的图片/贴纸会自动入库打标；发完后调用 stop。",
+      parameters: StickerCollectParams,
+      async execute(_toolCallId, input) {
+        const res = await collectFn({ action: input.action });
+        return { content: [{ type: "text", text: res.message }], details: { ok: res.ok } };
+      },
+    });
   }
 
   if (params.onBotProfile) {

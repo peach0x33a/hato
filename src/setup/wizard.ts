@@ -51,6 +51,7 @@ const SLOT_DESCRIPTIONS: Record<ModelSlot, string> = {
   curator: "curator（异步记忆提炼与附件摘要）",
   worker: "worker（工程执行与写脚本）",
   hindsight_llm: "hindsight_llm（记忆抽取与反思）",
+  vision: "vision（图像理解与表情包打标，未配则回退 persona）",
 };
 
 function guardCancel<T>(value: T): Exclude<T, symbol> {

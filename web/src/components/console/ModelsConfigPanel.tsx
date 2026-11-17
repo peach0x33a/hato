@@ -344,8 +344,9 @@ export function ModelsConfigPanel({
       setSlots((prev) => {
         const nextSlots = { ...prev };
         (Object.keys(nextSlots) as SlotKey[]).forEach((key) => {
-          if (nextSlots[key].startsWith(prefix)) {
-            nextSlots[key] = `${patch.name}/${nextSlots[key].slice(prefix.length)}`;
+          const cur = nextSlots[key];
+          if (cur && cur.startsWith(prefix)) {
+            nextSlots[key] = `${patch.name}/${cur.slice(prefix.length)}`;
           }
         });
         return nextSlots;

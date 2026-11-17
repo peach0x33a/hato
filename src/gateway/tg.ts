@@ -325,6 +325,35 @@ export class TelegramAdapter implements ChannelAdapter {
     );
   }
 
+  async sendSticker(
+    platformUserId: string,
+    opts: { fileId?: string; localPath?: string; caption?: string },
+  ): Promise<void> {
+    if (opts.fileId) {
+      await this.runWithTelegramRetry(() =>
+        this.bot.api.sendSticker(Number(platformUserId), opts.fileId!),
+      );
+      return;
+    }
+    if (opts.localPath) {
+      if (opts.localPath.toLowerCase().endsWith(".webp")) {
+        await this.runWithTelegramRetry(() =>
+          this.bot.api.sendSticker(Number(platformUserId), new InputFile(opts.localPath!)),
+        );
+      } else {
+        await this.sendPhoto(platformUserId, opts.localPath, opts.caption);
+      }
+    }
+  }
+
+  async getStickerSet(name: string) {
+    return this.runWithTelegramRetry(() => this.bot.api.getStickerSet(name));
+  }
+
+  async downloadFileById(fileId: string): Promise<{ buffer: Buffer; filePath: string } | null> {
+    return this.downloadTelegramFileBuffer(fileId);
+  }
+
   async sendConfirm(platformUserId: string, confirm: OutboundConfirmAction): Promise<void> {
     const keyboard = new InlineKeyboard()
       .text(confirm.confirmLabel ?? "✅ 确认执行", `hato_confirm:yes:${confirm.ticketId}`)
@@ -487,6 +516,11 @@ export class TelegramAdapter implements ChannelAdapter {
               downloaded.buffer,
               downloaded.filePath || candidate.fallbackExt,
             );
+            stickerAtt.tgFileId = msg.sticker.file_id;
+            stickerAtt.tgFileUniqueId = msg.sticker.file_unique_id;
+            stickerAtt.setName = msg.sticker.set_name;
+            stickerAtt.emoji = msg.sticker.emoji;
+            stickerAtt.isAnimated = Boolean(msg.sticker.is_animated || msg.sticker.is_video);
           }
           break;
         }
