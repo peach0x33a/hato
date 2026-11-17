@@ -17,6 +17,7 @@ import {
   type ChatSseEvent,
   type SlotView,
   type StoredMessageRecord,
+  type TicketSummary,
   type TurnTelemetry,
   type TurnTraceRecord,
 } from "@/api";
@@ -35,6 +36,7 @@ import {
 } from "@/components/agents/message";
 import { PromptInput } from "@/components/agents/prompt-input";
 import { ApiBadge, SlotBadge } from "@/components/console/ConsolePrimitives";
+import { MarkdownContent } from "@/components/console/MarkdownContent";
 import { StaticsPanel } from "@/components/console/StaticsPanel";
 import { TrajectoryPanel } from "@/components/console/TrajectoryPanel";
 import {
@@ -81,7 +83,7 @@ export interface ChatPanelProps {
 function mapStoredToUi(records: StoredMessageRecord[]): UiChatItem[] {
   return records.map((rec) => ({
     id: rec.id,
-    role: rec.role,
+    role: rec.role === "executed_event" ? "system" : rec.role,
     bubbles:
       rec.bubbles && rec.bubbles.length > 0
         ? rec.bubbles
@@ -90,6 +92,31 @@ function mapStoredToUi(records: StoredMessageRecord[]): UiChatItem[] {
           : [],
     createdAt: rec.createdAt,
   }));
+}
+
+const ACTIVE_TICKET_STATUSES = new Set([
+  "routing",
+  "pending",
+  "running",
+  "needs_input",
+  "awaiting_confirm",
+]);
+
+function formatTicketStatusLabel(status: string): string {
+  switch (status) {
+    case "routing":
+      return "路由规划中";
+    case "pending":
+      return "排队中";
+    case "running":
+      return "后台执行中";
+    case "needs_input":
+      return "等待补充说明";
+    case "awaiting_confirm":
+      return "等待确认执行";
+    default:
+      return status;
+  }
 }
 
 function formatClock(ms: number): string {
@@ -131,6 +158,9 @@ export function ChatPanel({
   const [latestTrace, setLatestTrace] = useState<TurnTraceRecord | null>(null);
   const [traceLoading, setTraceLoading] = useState(false);
   const [slashBusy, setSlashBusy] = useState(false);
+  const [activeTickets, setActiveTickets] = useState<TicketSummary[]>([]);
+  const [ticketActionBusy, setTicketActionBusy] = useState<string | null>(null);
+  const prevActiveCountRef = useRef(0);
   const abortRef = useRef<AbortController | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
@@ -173,9 +203,68 @@ export function ChatPanel({
     }
   };
 
+  const syncTicketsAndHistory = async (targetSessionId = selectedSessionId) => {
+    if (targetSessionId) return;
+    try {
+      const ticketRes = await api.getTickets();
+      const nextActive = ticketRes.tickets.filter((t) => ACTIVE_TICKET_STATUSES.has(t.status));
+      const hadActive = prevActiveCountRef.current > 0;
+      prevActiveCountRef.current = nextActive.length;
+      setActiveTickets(nextActive);
+
+      if (nextActive.length > 0 || hadActive) {
+        const h = await api.getChatHistory(null);
+        setItems(mapStoredToUi(h.messages));
+        setSlots(h.slots);
+        setSummaryText(h.summaryText || "");
+        onPendingTakeoverChange(h.pendingTakeover);
+        if (hadActive && nextActive.length === 0) {
+          setSessionEpoch((n) => n + 1);
+        }
+      }
+    } catch {
+      // Ignore transient poll errors.
+    }
+  };
+
   useEffect(() => {
     void loadHistory(selectedSessionId);
+    if (!selectedSessionId) {
+      void syncTicketsAndHistory(null);
+    } else {
+      setActiveTickets([]);
+      prevActiveCountRef.current = 0;
+    }
   }, [selectedSessionId]);
+
+  useEffect(() => {
+    if (selectedSessionId || activeTickets.length === 0) return;
+    const timer = window.setInterval(() => {
+      void syncTicketsAndHistory(null);
+    }, 2500);
+    return () => window.clearInterval(timer);
+  }, [selectedSessionId, activeTickets.length]);
+
+  const handleConfirmTicket = async (ticketId: string, approved: boolean) => {
+    setTicketActionBusy(ticketId);
+    try {
+      const res = await api.confirmTicket(ticketId, approved);
+      onToast({
+        title: approved ? "已确认执行" : "已取消工单",
+        description: res.message,
+        status: "info",
+      });
+      await syncTicketsAndHistory(null);
+    } catch (err) {
+      onToast({
+        title: "工单确认失败",
+        description: err instanceof Error ? err.message : String(err),
+        status: "error",
+      });
+    } finally {
+      setTicketActionBusy(null);
+    }
+  };
 
   const readFileAsPendingImage = (file: File): Promise<PendingImage | null> =>
     new Promise((resolve) => {
@@ -383,6 +472,8 @@ export function ChatPanel({
             );
           } else if (evt.type === "done") {
             onPendingTakeoverChange(evt.pendingTakeover);
+            setSessionEpoch((n) => n + 1);
+            void syncTicketsAndHistory(selectedSessionId);
           } else if (evt.type === "error") {
             onToast({ title: "消息发送失败", description: evt.message, status: "error" });
             setItems((prev) =>
@@ -412,7 +503,7 @@ export function ChatPanel({
       variant="underline"
       value={subTab}
       onValueChange={(v) => setSubTab(v as "chat" | "trajectory" | "stats")}
-      className="flex h-full min-h-0 flex-col gap-0"
+      className="flex h-full min-h-0 min-w-0 w-full flex-col gap-0 overflow-hidden"
     >
       {/* Flat Top Header: 对话 | 轨迹 | 统计 + Model & Quick Actions */}
       <div className="flex min-h-11 shrink-0 flex-wrap items-center justify-between gap-2 border-b border-border bg-background px-3 py-1 sm:px-4">
@@ -619,7 +710,67 @@ export function ChatPanel({
         </div>
       )}
 
-      <TabsContent value="chat" className="mt-0 flex min-h-0 flex-1 flex-col gap-0">
+      <TabsContent value="chat" className="mt-0 flex min-h-0 min-w-0 flex-1 flex-col gap-0 overflow-hidden">
+        {activeTickets.length > 0 && !readonlySession && (
+          <div className="shrink-0 border-b border-border/80 bg-muted/25 px-3 py-2 sm:px-6">
+            <div className="mx-auto flex max-w-3xl flex-col gap-1.5">
+              {activeTickets.map((tk) => (
+                <div
+                  key={tk.id}
+                  className="flex flex-wrap items-center justify-between gap-2 text-xs"
+                >
+                  <div className="flex min-w-0 items-center gap-2">
+                    <AnimatedBadge
+                      status={
+                        tk.status === "awaiting_confirm" || tk.status === "needs_input"
+                          ? "warning"
+                          : "neutral"
+                      }
+                      size="sm"
+                      pulse={tk.status === "running" || tk.status === "routing"}
+                    >
+                      {formatTicketStatusLabel(tk.status)}
+                    </AnimatedBadge>
+                    <span className="truncate font-medium text-foreground">
+                      {tk.briefTitle}
+                    </span>
+                    <span className="hidden shrink-0 rounded border border-border/70 bg-background px-1.5 py-0.5 font-mono text-[10px] text-muted-foreground sm:inline">
+                      {tk.backend}
+                    </span>
+                    {tk.progressNote && (
+                      <span className="truncate text-[11px] text-muted-foreground">
+                        · {tk.progressNote}
+                      </span>
+                    )}
+                  </div>
+                  {tk.status === "awaiting_confirm" && (
+                    <div className="flex shrink-0 items-center gap-1.5">
+                      <Button
+                        type="button"
+                        size="sm"
+                        className="h-6 px-2 text-[11px]"
+                        disabled={ticketActionBusy === tk.id}
+                        onClick={() => void handleConfirmTicket(tk.id, true)}
+                      >
+                        允许执行
+                      </Button>
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="sm"
+                        className="h-6 px-2 text-[11px]"
+                        disabled={ticketActionBusy === tk.id}
+                        onClick={() => void handleConfirmTicket(tk.id, false)}
+                      >
+                        取消
+                      </Button>
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
         {pendingTakeover && (
           <div className="shrink-0 border-b border-amber-500/25 bg-amber-500/5 px-3 py-2 sm:px-6">
             <div className="mx-auto max-w-3xl">
@@ -736,14 +887,24 @@ export function ChatPanel({
                   </MessageHeader>
 
                   {item.bubbles.length > 0 && (
-                    <MessageBubbleGroup spacing={item.role === "assistant" ? "default" : "compact"}>
+                    <MessageBubbleGroup spacing="compact">
                       {item.bubbles.map((text, bIdx) => (
                         <MessageBubble
                           key={`${item.id}-b-${bIdx}`}
-                          variant={item.role === "user" ? "soft" : "ghost"}
+                          variant={item.role === "user" ? "tint" : "soft"}
                         >
-                          <MessageBubbleContent className="whitespace-pre-wrap break-words text-sm leading-relaxed">
-                            {text}
+                          <MessageBubbleContent
+                            className={
+                              item.role === "user"
+                                ? "whitespace-pre-wrap break-words text-sm leading-relaxed"
+                                : "break-words text-sm leading-relaxed"
+                            }
+                          >
+                            {item.role === "assistant" ? (
+                              <MarkdownContent content={text} />
+                            ) : (
+                              text
+                            )}
                           </MessageBubbleContent>
                         </MessageBubble>
                       ))}
@@ -869,7 +1030,7 @@ export function ChatPanel({
         )}
       </TabsContent>
 
-      <TabsContent value="trajectory" className="mt-0 flex min-h-0 flex-1 flex-col">
+      <TabsContent value="trajectory" className="mt-0 flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
         {subTab === "trajectory" && (
           <TrajectoryPanel
             onToast={onToast}
@@ -879,7 +1040,7 @@ export function ChatPanel({
         )}
       </TabsContent>
 
-      <TabsContent value="stats" className="mt-0 flex min-h-0 flex-1 flex-col">
+      <TabsContent value="stats" className="mt-0 flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
         {subTab === "stats" && (
           <StaticsPanel
             onToast={onToast}

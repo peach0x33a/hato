@@ -1,7 +1,7 @@
 import type { ExternalCliAdapter, ExternalCliStreamEvent } from "./types.js";
 
-export const agyCliAdapter: ExternalCliAdapter = {
-  backend: "agy",
+export const antigravityCliAdapter: ExternalCliAdapter = {
+  backend: "antigravity-cli",
 
   buildStartArgs({ prompt, overlay, schemaPath }) {
     const args = [`-p=${prompt}`, "--output-format", "stream-json"];
@@ -33,7 +33,7 @@ export const agyCliAdapter: ExternalCliAdapter = {
       if (event === "init") {
         return {
           sessionId,
-          progressNote: "已初始化 agy 会话",
+          progressNote: "已初始化 Antigravity CLI 会话",
         };
       }
 
@@ -74,7 +74,7 @@ export const agyCliAdapter: ExternalCliAdapter = {
           finalText: response,
           error:
             status && status !== "SUCCESS"
-              ? errMsg || `agy status=${status}`
+              ? errMsg || `antigravity-cli status=${status}`
               : errMsg,
           done: true,
         };

@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import http from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -16,6 +17,7 @@ import { HatoRepository } from "../src/db/repo.js";
 import { CompactionManager } from "../src/memory/compaction.js";
 import { PersonaRuntime } from "../src/persona/agent.js";
 import { createDefaultHatoConfig } from "../src/setup/presets.js";
+import { fetchTelegramUserProfiles } from "../src/setup/probe.js";
 import { WebConsoleServer } from "../src/web-console/server.js";
 
 function parseSseFrames(raw: string): Array<Record<string, unknown>> {
@@ -549,7 +551,45 @@ hindsight_llm = "faux-provider/faux-persona-1"
     assert.equal(cliProbeJson.hatoOnlyScope, true);
     assert.deepEqual(
       cliProbeJson.probes.map((p) => p.backend),
-      ["codex", "agy", "opencode-v2", "external-pi", "claude-code"],
+      ["codex-cli", "antigravity-cli", "opencode-v2", "external-pi", "claude-code"],
+    );
+
+    repo.createTicket({
+      id: "t_web_1",
+      canonicalUserId: "owner",
+      status: "running",
+      backend: "opencode-v2",
+      briefTitle: "查天气 Python 脚本",
+      originChannel: "web",
+      progressNote: "正在编写脚本",
+    });
+    const ticketsRes = await fetch(`${baseUrl}/api/tickets`, { headers: authHeaders });
+    assert.equal(ticketsRes.status, 200);
+    const ticketsJson = (await ticketsRes.json()) as {
+      ok: boolean;
+      tickets: Array<{ id: string; status: string; backend: string; originChannel: string }>;
+    };
+    assert.equal(ticketsJson.ok, true);
+    assert.equal(ticketsJson.tickets.length, 1);
+    assert.equal(ticketsJson.tickets[0]?.id, "t_web_1");
+    assert.equal(ticketsJson.tickets[0]?.originChannel, "web");
+
+    repo.appendRawMessage({
+      canonicalUserId: "owner",
+      channel: "web",
+      role: "executed_event",
+      content: "[工单 t_web_1 · 查天气 Python 脚本] (done): 内部执行日志",
+      createdAt: Date.now() + 100,
+    });
+    const historyAfterTicketRes = await fetch(`${baseUrl}/api/chat/history`, { headers: authHeaders });
+    const historyAfterTicketJson = (await historyAfterTicketRes.json()) as {
+      ok: boolean;
+      messages: Array<{ role: string; content: string }>;
+    };
+    assert.equal(historyAfterTicketJson.ok, true);
+    assert.equal(
+      historyAfterTicketJson.messages.some((m) => m.content.includes("内部执行日志")),
+      false,
     );
   } finally {
     delete process.env[tokenEnvName];
@@ -557,5 +597,72 @@ hindsight_llm = "faux-provider/faux-persona-1"
     await server.stop();
     dbHandle.close();
     rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("fetchTelegramUserProfiles fetches displayName, username, and avatarDataUrl via Bot API", async () => {
+  const tinyPng = Buffer.from(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+    "base64",
+  );
+  const mockTg = http.createServer((req, res) => {
+    const url = req.url ?? "";
+    if (url.startsWith("/botMOCK_TOKEN/getChat?")) {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(
+        JSON.stringify({
+          ok: true,
+          result: {
+            id: 123456789,
+            first_name: "Alice",
+            last_name: "Hato",
+            username: "alice_hato",
+            photo: { small_file_id: "file_small_1" },
+          },
+        }),
+      );
+      return;
+    }
+    if (url.startsWith("/botMOCK_TOKEN/getFile?file_id=file_small_1")) {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ ok: true, result: { file_path: "photos/avatar.png" } }));
+      return;
+    }
+    if (url === "/file/botMOCK_TOKEN/photos/avatar.png") {
+      res.writeHead(200, { "Content-Type": "image/png" });
+      res.end(tinyPng);
+      return;
+    }
+    res.writeHead(404, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ ok: false, description: "Not found" }));
+  });
+
+  await new Promise<void>((resolveListen) => mockTg.listen(0, "127.0.0.1", () => resolveListen()));
+  const addr = mockTg.address() as { port: number };
+  const proxyRouter = new ScopedProxyRouter([]);
+
+  try {
+    const profiles = await fetchTelegramUserProfiles({
+      baseUrl: `http://127.0.0.1:${addr.port}`,
+      botToken: "MOCK_TOKEN",
+      userIds: ["123456789", "123456789"],
+      proxyRouter,
+    });
+    assert.equal(profiles.length, 1);
+    assert.equal(profiles[0]?.ok, true);
+    assert.equal(profiles[0]?.displayName, "Alice Hato");
+    assert.equal(profiles[0]?.username, "alice_hato");
+    assert.equal(profiles[0]?.avatarDataUrl, `data:image/png;base64,${tinyPng.toString("base64")}`);
+
+    const noToken = await fetchTelegramUserProfiles({
+      baseUrl: `http://127.0.0.1:${addr.port}`,
+      botToken: "",
+      userIds: ["123456789"],
+      proxyRouter,
+    });
+    assert.equal(noToken[0]?.ok, false);
+    assert.match(noToken[0]?.error ?? "", /Bot Token/);
+  } finally {
+    await new Promise<void>((resolveClose) => mockTg.close(() => resolveClose()));
   }
 });

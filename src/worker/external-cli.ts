@@ -3,16 +3,16 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { dirname, join, resolve } from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
-import { resolveSkillsDir, type HatoConfig } from "../config/app.js";
+import { isWorkerBackendEnabled, resolveSkillsDir, type HatoConfig } from "../config/app.js";
 import type { McpConfig } from "../config/mcp.js";
 import type { ScopedProxyRouter } from "../config/proxy.js";
 import { computeContextToken } from "../dispatch/context-slice.js";
 import type { WorkerMandate, WorkerResult } from "../dispatch/schema.js";
 import { selectWorkerSkills } from "../skills/loader.js";
 import { logInfo, logWarn, summarizeError } from "../utils/logger.js";
-import { agyCliAdapter } from "./adapters/agy.js";
+import { antigravityCliAdapter } from "./adapters/antigravity-cli.js";
 import { claudeCodeCliAdapter } from "./adapters/claude-code.js";
-import { codexCliAdapter } from "./adapters/codex.js";
+import { codexCliAdapter } from "./adapters/codex-cli.js";
 import { externalPiCliAdapter } from "./adapters/external-pi.js";
 import { openCodeV2CliAdapter } from "./adapters/opencode-v2.js";
 import type { ExternalCliAdapter } from "./adapters/types.js";
@@ -37,8 +37,8 @@ export interface ExternalCliRunnerDeps {
 }
 
 const ADAPTERS: Record<ExternalCliBackend, ExternalCliAdapter> = {
-  codex: codexCliAdapter,
-  agy: agyCliAdapter,
+  "codex-cli": codexCliAdapter,
+  "antigravity-cli": antigravityCliAdapter,
   "opencode-v2": openCodeV2CliAdapter,
   "external-pi": externalPiCliAdapter,
   "claude-code": claudeCodeCliAdapter,
@@ -46,6 +46,7 @@ const ADAPTERS: Record<ExternalCliBackend, ExternalCliAdapter> = {
 
 const WORKER_RESULT_JSON_SCHEMA = {
   type: "object",
+  additionalProperties: false,
   properties: {
     status: { type: "string", enum: ["done", "needs_input", "failed"] },
     narration_hint: { type: "string" },
@@ -53,6 +54,7 @@ const WORKER_RESULT_JSON_SCHEMA = {
       type: "array",
       items: {
         type: "object",
+        additionalProperties: false,
         properties: {
           title: { type: "string" },
           format: { type: "string", enum: ["code", "text", "markdown"] },
@@ -65,6 +67,7 @@ const WORKER_RESULT_JSON_SCHEMA = {
       type: "array",
       items: {
         type: "object",
+        additionalProperties: false,
         properties: {
           path: { type: "string" },
           filename: { type: "string" },
@@ -75,9 +78,17 @@ const WORKER_RESULT_JSON_SCHEMA = {
     },
     required_secrets: { type: "array", items: { type: "string" } },
     caveats: { type: "array", items: { type: "string" } },
-    question: { type: "string" },
+    question: { type: ["string", "null"] },
   },
-  required: ["status", "narration_hint"],
+  required: [
+    "status",
+    "narration_hint",
+    "verbatim_blocks",
+    "artifacts",
+    "required_secrets",
+    "caveats",
+    "question",
+  ],
 };
 
 const PROGRESS_THROTTLE_MS = 1200;
@@ -162,6 +173,18 @@ export class ExternalCliRunner implements ExecutionRunner {
     }
 
     const hatoConfig = this.deps.getHatoConfig();
+    if (!isWorkerBackendEnabled(hatoConfig, backend)) {
+      return {
+        ticket_id: ticket.ticketId,
+        status: "failed",
+        narration_hint: `外部 CLI 后端 "${backend}" 已在设置中禁用，请改用已启用的后端。`,
+        verbatim_blocks: [],
+        artifacts: [],
+        required_secrets: [],
+        caveats: [`backend "${backend}" is disabled in config`],
+      };
+    }
+
     if (backend === "opencode-v2") {
       const check = await this.checkOpenCodeV2Gate(hatoConfig);
       if (!check.ok) {
@@ -204,7 +227,7 @@ export class ExternalCliRunner implements ExecutionRunner {
     });
 
     let schemaPath: string | undefined;
-    if (backend === "codex" || backend === "agy" || backend === "claude-code") {
+    if (backend === "codex-cli" || backend === "antigravity-cli" || backend === "claude-code") {
       const runtimeDir = resolve(
         dirname(hatoConfig.paths.workspaces_dir),
         "worker-cli",

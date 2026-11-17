@@ -1,16 +1,17 @@
 import {
+  ArrowLeft,
   Bot,
   Compass,
   Cpu,
   FileText,
   History,
-  KeyRound,
   Lock,
   MessageSquare,
   PanelLeft,
   RefreshCw,
-  Settings2,
+  Settings,
 } from "lucide-react";
+import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import { ThemeProvider } from "next-themes";
 import { useCallback, useEffect, useState } from "react";
 import {
@@ -26,8 +27,11 @@ import { ConsoleInput } from "@/components/console/ConsolePrimitives";
 import { ModelsConfigPanel } from "@/components/console/ModelsConfigPanel";
 import { PromptPanel } from "@/components/console/PromptPanel";
 import { RemoteBrowserPanel } from "@/components/console/RemoteBrowserPanel";
-import { RuntimeConfigPanel } from "@/components/console/RuntimeConfigPanel";
-import { SecretsAndProbePanel } from "@/components/console/SecretsAndProbePanel";
+import {
+  SettingsPanel,
+  type SettingsSectionId,
+  VALID_SETTINGS_SECTIONS,
+} from "@/components/console/SettingsPanel";
 import { AnimatedBadge } from "@/components/motion/animated-badge";
 import {
   AnimatedToastStack,
@@ -43,30 +47,106 @@ import {
 } from "@/components/motion/card";
 import { SharedLayoutBg } from "@/components/motion/shared-layout-bg";
 import { ThemeToggle } from "@/components/motion/theme-toggle";
+import { EASE_OUT } from "@/lib/ease";
 
-type ConsoleTab =
-  | "chat"
-  | "browser"
-  | "models"
-  | "runtime"
-  | "prompt"
-  | "secrets";
+type ConsoleTab = "chat" | "browser" | "models" | "prompt" | "settings";
 
 const NAV_ITEMS: Array<{
-  id: ConsoleTab;
+  id: Exclude<ConsoleTab, "settings">;
   label: string;
   icon: typeof MessageSquare;
 }> = [
   { id: "chat", label: "对话", icon: MessageSquare },
   { id: "browser", label: "远程浏览器", icon: Compass },
   { id: "models", label: "模型与供应商", icon: Cpu },
-  { id: "runtime", label: "网关与代理", icon: Settings2 },
-  { id: "prompt", label: "人设提示词", icon: FileText },
-  { id: "secrets", label: "密钥与自检", icon: KeyRound },
+  { id: "prompt", label: "提示词与层级管理", icon: FileText },
 ];
 
+const VALID_TABS = new Set<ConsoleTab>(["chat", "browser", "models", "prompt", "settings"]);
+
+const ACTIVE_TAB_STORAGE_KEY = "hato.activeTab";
+const SETTINGS_SECTION_STORAGE_KEY = "hato.settingsSection";
+
+function isValidConsoleTab(value: string | null | undefined): value is ConsoleTab {
+  return Boolean(value && VALID_TABS.has(value as ConsoleTab));
+}
+
+function isValidSettingsSection(value: string | null | undefined): value is SettingsSectionId {
+  return Boolean(value && VALID_SETTINGS_SECTIONS.has(value as SettingsSectionId));
+}
+
+function readStoredSettingsSection(): SettingsSectionId {
+  try {
+    const stored = window.localStorage.getItem(SETTINGS_SECTION_STORAGE_KEY);
+    if (isValidSettingsSection(stored)) {
+      return stored;
+    }
+  } catch {
+    // Ignore storage restrictions.
+  }
+  return "general";
+}
+
+function parseRouteHash(rawHash: string): {
+  tab?: ConsoleTab;
+  settingsSection?: SettingsSectionId;
+} {
+  const clean = rawHash.replace(/^#\/?/, "").trim();
+  if (!clean) return {};
+  if (clean === "runtime") {
+    return { tab: "settings", settingsSection: "general" };
+  }
+  if (clean === "secrets") {
+    return { tab: "settings", settingsSection: "secrets" };
+  }
+  if (clean === "settings" || clean.startsWith("settings/")) {
+    const sub = clean.slice("settings/".length);
+    return {
+      tab: "settings",
+      settingsSection: isValidSettingsSection(sub) ? sub : undefined,
+    };
+  }
+  if (isValidConsoleTab(clean)) {
+    return { tab: clean };
+  }
+  return {};
+}
+
+function readInitialRoute(): { tab: ConsoleTab; settingsSection: SettingsSectionId } {
+  const fallbackSection = readStoredSettingsSection();
+  try {
+    const fromHash = parseRouteHash(window.location.hash);
+    if (fromHash.tab) {
+      return {
+        tab: fromHash.tab,
+        settingsSection: fromHash.settingsSection ?? fallbackSection,
+      };
+    }
+    const storedTab = window.localStorage.getItem(ACTIVE_TAB_STORAGE_KEY);
+    if (storedTab === "runtime") {
+      return { tab: "settings", settingsSection: "general" };
+    }
+    if (storedTab === "secrets") {
+      return { tab: "settings", settingsSection: "secrets" };
+    }
+    if (isValidConsoleTab(storedTab)) {
+      return { tab: storedTab, settingsSection: fallbackSection };
+    }
+  } catch {
+    // Ignore storage or location restrictions.
+  }
+  return { tab: "chat", settingsSection: fallbackSection };
+}
+
 function ConsoleShell() {
-  const [activeTab, setActiveTab] = useState<ConsoleTab>("chat");
+  const [initialRoute] = useState(readInitialRoute);
+  const [activeTab, setActiveTab] = useState<ConsoleTab>(initialRoute.tab);
+  const [lastNonSettingsTab, setLastNonSettingsTab] = useState<Exclude<ConsoleTab, "settings">>(
+    initialRoute.tab === "settings" ? "chat" : initialRoute.tab,
+  );
+  const [settingsSection, setSettingsSection] = useState<SettingsSectionId>(
+    initialRoute.settingsSection,
+  );
   const [sidebarCollapsed, setSidebarCollapsed] = useState<boolean>(() => {
     try {
       return window.localStorage.getItem("hato.sidebarCollapsed") === "1";
@@ -84,6 +164,42 @@ function ConsoleShell() {
   const [tokenInput, setTokenInput] = useState(getStoredToken);
   const [reloadState, setReloadState] = useState<ButtonState>("idle");
   const { toasts, showToast, dismissToast } = useAnimatedToastStack({ limit: 4 });
+  const reduceMotion = useReducedMotion();
+  const isSettings = activeTab === "settings";
+  const workspaceTab: Exclude<ConsoleTab, "settings"> = isSettings
+    ? lastNonSettingsTab
+    : activeTab;
+
+  useEffect(() => {
+    if (activeTab !== "settings") {
+      setLastNonSettingsTab(activeTab);
+    }
+    try {
+      window.localStorage.setItem(ACTIVE_TAB_STORAGE_KEY, activeTab);
+      window.localStorage.setItem(SETTINGS_SECTION_STORAGE_KEY, settingsSection);
+      const nextHash =
+        activeTab === "settings" ? `#settings/${settingsSection}` : `#${activeTab}`;
+      if (window.location.hash !== nextHash) {
+        window.history.replaceState(null, "", nextHash);
+      }
+    } catch {
+      // Ignore storage or history restrictions.
+    }
+  }, [activeTab, settingsSection]);
+
+  useEffect(() => {
+    const onHashChange = () => {
+      const parsed = parseRouteHash(window.location.hash);
+      if (parsed.tab) {
+        setActiveTab(parsed.tab);
+      }
+      if (parsed.settingsSection) {
+        setSettingsSection(parsed.settingsSection);
+      }
+    };
+    window.addEventListener("hashchange", onHashChange);
+    return () => window.removeEventListener("hashchange", onHashChange);
+  }, []);
 
   const toggleSidebar = () => {
     setSidebarCollapsed((prev) => {
@@ -234,16 +350,28 @@ function ConsoleShell() {
     <div className="flex h-screen flex-col bg-background text-foreground">
       <header className="flex h-11 shrink-0 items-center justify-between gap-3 border-b border-border/80 bg-background px-3 sm:px-4">
         <div className="flex min-w-0 items-center gap-2.5">
-          <button
-            type="button"
-            onClick={toggleSidebar}
-            title={sidebarCollapsed ? "展开侧边栏" : "收起侧边栏"}
-            aria-label={sidebarCollapsed ? "展开侧边栏" : "收起侧边栏"}
-            data-testid="sidebar-toggle"
-            className="hidden size-7 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground lg:inline-flex"
-          >
-            <PanelLeft className="size-4" />
-          </button>
+          {activeTab === "settings" ? (
+            <button
+              type="button"
+              onClick={() => setActiveTab(lastNonSettingsTab)}
+              title="返回控制台"
+              aria-label="返回控制台"
+              className="inline-flex size-7 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+            >
+              <ArrowLeft className="size-4" />
+            </button>
+          ) : (
+            <button
+              type="button"
+              onClick={toggleSidebar}
+              title={sidebarCollapsed ? "展开侧边栏" : "收起侧边栏"}
+              aria-label={sidebarCollapsed ? "展开侧边栏" : "收起侧边栏"}
+              data-testid="sidebar-toggle"
+              className="hidden size-7 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground lg:inline-flex"
+            >
+              <PanelLeft className="size-4" />
+            </button>
+          )}
           <div className="grid size-6 shrink-0 place-items-center rounded-md bg-primary/12 text-primary">
             <Bot className="size-3.5" />
           </div>
@@ -309,22 +437,35 @@ function ConsoleShell() {
         </div>
       </header>
 
-      <div className="flex min-h-0 flex-1 flex-col lg:flex-row">
-        <aside
-          data-sidebar-collapsed={sidebarCollapsed ? "true" : "false"}
-          className={`flex shrink-0 flex-col border-b border-border/80 bg-muted/20 p-2 transition-[width] duration-150 lg:border-r lg:border-b-0 ${
-            sidebarCollapsed ? "lg:w-[52px]" : "lg:w-52"
-          }`}
+      <div className="relative flex min-h-0 flex-1 overflow-hidden">
+        <motion.div
+          inert={isSettings}
+          aria-hidden={isSettings}
+          animate={
+            isSettings
+              ? reduceMotion
+                ? { opacity: 0 }
+                : { opacity: 0.3, scale: 0.985 }
+              : { opacity: 1, scale: 1 }
+          }
+          transition={reduceMotion ? { duration: 0.1 } : { duration: 0.22, ease: EASE_OUT }}
+          className="flex min-h-0 min-w-0 w-full flex-1 flex-col overflow-hidden lg:flex-row"
         >
-          <SharedLayoutBg
-            as="div"
-            inset={0}
-            pillClassName="rounded-md bg-muted"
-            className="flex shrink-0 gap-1 overflow-x-auto lg:flex-col"
+          <aside
+            data-sidebar-collapsed={sidebarCollapsed ? "true" : "false"}
+            className={`flex shrink-0 flex-row items-center gap-1 border-b border-border/80 bg-muted/20 p-2 transition-[width] duration-150 lg:flex-col lg:items-stretch lg:gap-0 lg:border-r lg:border-b-0 ${
+              sidebarCollapsed ? "lg:w-[52px]" : "lg:w-52"
+            }`}
           >
-            {NAV_ITEMS.map((item) => {
-              const Icon = item.icon;
-              const isActive = activeTab === item.id;
+            <SharedLayoutBg
+              as="div"
+              inset={0}
+              pillClassName="rounded-md bg-muted"
+              className="flex min-w-0 flex-1 gap-1 overflow-x-auto lg:flex-none lg:flex-col"
+            >
+              {NAV_ITEMS.map((item) => {
+                const Icon = item.icon;
+                const isActive = workspaceTab === item.id;
               return (
                 <button
                   key={item.id}
@@ -385,18 +526,18 @@ function ConsoleShell() {
                     setSelectedSessionId(null);
                     setActiveTab("chat");
                   }}
-                  className={`flex w-full items-center justify-between rounded-md px-2 py-1.5 text-left text-xs transition-colors ${
-                    activeTab === "chat" && selectedSessionId === null
-                      ? "bg-muted font-medium text-foreground"
-                      : "text-muted-foreground hover:bg-muted/60 hover:text-foreground"
-                  }`}
-                >
-                  <span className="truncate">当前会话</span>
-                  <span className="size-1.5 shrink-0 rounded-full bg-emerald-500" />
-                </button>
+                    className={`flex w-full items-center justify-between rounded-md px-2 py-1.5 text-left text-xs transition-colors ${
+                      workspaceTab === "chat" && selectedSessionId === null
+                        ? "bg-muted font-medium text-foreground"
+                        : "text-muted-foreground hover:bg-muted/60 hover:text-foreground"
+                    }`}
+                  >
+                    <span className="truncate">当前会话</span>
+                    <span className="size-1.5 shrink-0 rounded-full bg-emerald-500" />
+                  </button>
 
-                {sessions.map((sess) => {
-                  const isSel = activeTab === "chat" && selectedSessionId === sess.id;
+                  {sessions.map((sess) => {
+                    const isSel = workspaceTab === "chat" && selectedSessionId === sess.id;
                   const shortDate = new Date(sess.endedAt).toLocaleDateString("zh-CN", {
                     month: "2-digit",
                     day: "2-digit",
@@ -427,111 +568,143 @@ function ConsoleShell() {
               </div>
             </div>
           )}
-        </aside>
 
-        <main className="min-h-0 flex-1 overflow-y-auto bg-background">
-          {activeTab === "chat" && (
-            <div className="flex h-full min-h-0 w-full flex-col">
-              <ChatPanel
-                onToast={notify}
-                pendingTakeover={pendingTakeover}
-                onPendingTakeoverChange={setPendingTakeover}
-                onOpenBrowserPanel={() => setActiveTab("browser")}
-                onAuthError={() => setAuthNeeded(true)}
-                selectedSessionId={selectedSessionId}
-                onSelectSession={setSelectedSessionId}
-                onSessionsChanged={() => void refreshSessions()}
-              />
-            </div>
-          )}
+          {/* Bottom-pinned Settings Trigger (matching reference skeleton) */}
+          <div className="shrink-0 border-l border-border/75 pl-1 lg:mt-auto lg:border-t lg:border-l-0 lg:pt-2 lg:pl-0">
+            <button
+              type="button"
+              title="设置"
+              aria-label="设置"
+              onClick={() => setActiveTab("settings")}
+              className={`flex h-8 shrink-0 items-center rounded-md text-muted-foreground transition-colors hover:bg-muted/60 hover:text-foreground lg:w-full ${
+                sidebarCollapsed ? "justify-center px-2.5 lg:px-0" : "gap-2.5 px-2.5 text-left"
+              }`}
+            >
+              <Settings className="size-4 shrink-0" />
+              <span className={`truncate text-xs ${sidebarCollapsed ? "lg:hidden" : ""}`}>
+                设置
+              </span>
+            </button>
+          </div>
+          </aside>
 
-          {activeTab === "browser" && (
-            <div className="flex h-full min-h-0 w-full flex-col p-3 sm:p-5">
-              <RemoteBrowserPanel
-                onToast={notify}
-                onPendingTakeoverChange={setPendingTakeover}
-                onGoToChatAndResume={() => {
-                  setActiveTab("chat");
-                  notify({
-                    title: "已解除挂起状态",
-                    description: "回到对话后可点击继续任务，或发送下一步指令。",
-                    status: "success",
-                  });
-                }}
-              />
-            </div>
-          )}
-
-          {activeTab === "models" && configSnap && (
-            <ModelsConfigPanel
-              initialConfig={configSnap.modelsConfig}
-              secretStates={configSnap.secretStates}
-              onToast={notify}
-              onSaved={(next) => {
-                setConfigSnap((prev) => (prev ? { ...prev, modelsConfig: next } : prev));
-              }}
-              onSecretsUpdated={(nextStates) => {
-                setConfigSnap((prev) =>
-                  prev ? { ...prev, secretStates: nextStates } : prev,
-                );
-              }}
-            />
-          )}
-
-          {activeTab === "prompt" && configSnap && (
-            <PromptPanel
-              promptPath={configSnap.promptPath}
-              initialPrompt={configSnap.promptText}
-              promptLayers={configSnap.promptLayers}
-              onToast={notify}
-              onSaved={(nextPrompt) => {
-                setConfigSnap((prev) =>
-                  prev ? { ...prev, promptText: nextPrompt } : prev,
-                );
-              }}
-              onLayersSynced={(next) => {
-                setConfigSnap((prev) =>
-                  prev
-                    ? {
-                        ...prev,
-                        hatoConfig: next.hatoConfig ?? prev.hatoConfig,
-                        promptPath: next.promptPath ?? prev.promptPath,
-                        promptText: next.promptText ?? prev.promptText,
-                        promptLayers: next.promptLayers ?? prev.promptLayers,
-                      }
-                    : prev,
-                );
-              }}
-            />
-          )}
-
-          {(activeTab === "runtime" ||
-            activeTab === "secrets") && (
-            <div className="mx-auto flex w-full max-w-4xl flex-col gap-6 px-4 py-6 sm:px-6">
-              {activeTab === "runtime" && configSnap && (
-                <RuntimeConfigPanel
-                  initialConfig={configSnap.hatoConfig}
+          <main
+            className={`min-h-0 min-w-0 max-w-full flex-1 bg-background ${
+              workspaceTab === "chat" ? "overflow-hidden" : "overflow-y-auto overflow-x-hidden"
+            }`}
+          >
+            {workspaceTab === "chat" && (
+              <div className="flex h-full min-h-0 min-w-0 w-full flex-col">
+                <ChatPanel
                   onToast={notify}
-                  onSaved={(next) => {
-                    setConfigSnap((prev) => (prev ? { ...prev, hatoConfig: next } : prev));
+                  pendingTakeover={pendingTakeover}
+                  onPendingTakeoverChange={setPendingTakeover}
+                  onOpenBrowserPanel={() => setActiveTab("browser")}
+                  onAuthError={() => setAuthNeeded(true)}
+                  selectedSessionId={selectedSessionId}
+                  onSelectSession={setSelectedSessionId}
+                  onSessionsChanged={() => void refreshSessions()}
+                />
+              </div>
+            )}
+
+            {workspaceTab === "browser" && (
+              <div className="flex h-full min-h-0 w-full flex-col p-3 sm:p-5">
+                <RemoteBrowserPanel
+                  onToast={notify}
+                  onPendingTakeoverChange={setPendingTakeover}
+                  onGoToChatAndResume={() => {
+                    setActiveTab("chat");
+                    notify({
+                      title: "已解除挂起状态",
+                      description: "回到对话后可点击继续任务，或发送下一步指令。",
+                      status: "success",
+                    });
                   }}
                 />
-              )}
+              </div>
+            )}
 
-              {activeTab === "secrets" && configSnap && (
-                <SecretsAndProbePanel
+            {workspaceTab === "models" && configSnap && (
+              <ModelsConfigPanel
+                initialConfig={configSnap.modelsConfig}
+                secretStates={configSnap.secretStates}
+                onToast={notify}
+                onSaved={(next) => {
+                  setConfigSnap((prev) => (prev ? { ...prev, modelsConfig: next } : prev));
+                }}
+                onSecretsUpdated={(nextStates) => {
+                  setConfigSnap((prev) =>
+                    prev ? { ...prev, secretStates: nextStates } : prev,
+                  );
+                }}
+              />
+            )}
+
+            {workspaceTab === "prompt" && configSnap && (
+              <PromptPanel
+                promptPath={configSnap.promptPath}
+                initialPrompt={configSnap.promptText}
+                promptLayers={configSnap.promptLayers}
+                onToast={notify}
+                onSaved={(nextPrompt) => {
+                  setConfigSnap((prev) =>
+                    prev ? { ...prev, promptText: nextPrompt } : prev,
+                  );
+                }}
+                onLayersSynced={(next) => {
+                  setConfigSnap((prev) =>
+                    prev
+                      ? {
+                          ...prev,
+                          hatoConfig: next.hatoConfig ?? prev.hatoConfig,
+                          promptPath: next.promptPath ?? prev.promptPath,
+                          promptText: next.promptText ?? prev.promptText,
+                          promptLayers: next.promptLayers ?? prev.promptLayers,
+                        }
+                      : prev,
+                  );
+                }}
+              />
+            )}
+          </main>
+        </motion.div>
+
+        <AnimatePresence>
+          {isSettings && (
+            <motion.div
+              key="settings-view"
+              initial={reduceMotion ? { opacity: 0 } : { opacity: 0, y: 12, scale: 0.992 }}
+              animate={{ opacity: 1, y: 0, scale: 1 }}
+              exit={reduceMotion ? { opacity: 0 } : { opacity: 0, y: 10, scale: 0.992 }}
+              transition={reduceMotion ? { duration: 0.1 } : { duration: 0.22, ease: EASE_OUT }}
+              className="absolute inset-0 z-20 flex min-h-0 bg-background"
+            >
+              {configSnap ? (
+                <SettingsPanel
+                  initialConfig={configSnap.hatoConfig}
                   secretStates={configSnap.secretStates}
+                  activeSection={settingsSection}
+                  onSectionChange={setSettingsSection}
+                  onBack={() => setActiveTab(lastNonSettingsTab)}
                   onToast={notify}
+                  onSavedConfig={(next) => {
+                    setConfigSnap((prev) => (prev ? { ...prev, hatoConfig: next } : prev));
+                  }}
                   onSecretsUpdated={(nextStates) => {
                     setConfigSnap((prev) =>
                       prev ? { ...prev, secretStates: nextStates } : prev,
                     );
                   }}
                 />
+              ) : (
+                <div className="flex h-full w-full items-center justify-center text-xs text-muted-foreground">
+                  正在加载设置…
+                </div>
               )}
-            </div>
+            </motion.div>
           )}
-        </main>
+        </AnimatePresence>
       </div>
 
       <AnimatedToastStack toasts={toasts} onDismiss={dismissToast} fixed />

@@ -5,7 +5,11 @@ import { join } from "node:path";
 import test from "node:test";
 import { fauxAssistantMessage, fauxProvider, fauxToolCall } from "@earendil-works/pi-ai";
 import { EventBus } from "../src/bus/actor-bus.js";
-import { loadHatoConfig } from "../src/config/app.js";
+import {
+  listEnabledWorkerBackends,
+  loadHatoConfig,
+  resolveEffectiveDefaultBackend,
+} from "../src/config/app.js";
 import { ModelRegistry } from "../src/config/models.js";
 import { ScopedProxyRouter } from "../src/config/proxy.js";
 import { writeHatoConfig } from "../src/config/store.js";
@@ -263,10 +267,114 @@ hindsight_llm = "faux-router/r1"
     assert.equal(emittedResults.length, 1);
     assert.equal(emittedResults[0]!.status, "done");
     assert.match(emittedResults[0]!.narration_hint, /hello\.py/);
+
+    const routerTraces = repo.listTurnTraces({ canonicalUserId: "owner", slot: "router", limit: 10 });
+    assert.ok(routerTraces.length >= 1);
+    assert.match(routerTraces[0]!.timeCardText, /Router Input Context/);
+    assert.ok(routerTraces[0]!.stepsJson.includes('"kind":"assistant"'));
+
+    const workerTraces = repo.listTurnTraces({ canonicalUserId: "owner", slot: "worker", limit: 10 });
+    assert.ok(workerTraces.length >= 1);
+    assert.match(workerTraces[0]!.userPreview ?? "", /工单/);
+    assert.ok(workerTraces[0]!.stepsJson.includes("hello.py"));
     assert.equal(emittedResults[0]!.artifacts.length, 1);
     const artifactPath = emittedResults[0]!.artifacts[0]!.path;
     assert.equal(existsSync(artifactPath), true);
     assert.match(readFileSync(artifactPath, "utf8"), /Hello Hato/);
+  } finally {
+    dbHandle.close();
+    rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("listEnabledWorkerBackends and NeutralRouter exclude disabled external CLIs even when default_backend references them", async () => {
+  const cfg = createDefaultHatoConfig();
+  cfg.worker.default_backend = "opencode-v2";
+  cfg.worker.external_cli.opencode_v2 = { enabled: false };
+  cfg.worker.external_cli.codex_cli = { enabled: false };
+  cfg.worker.external_cli.antigravity_cli = { enabled: true };
+  cfg.worker.external_cli.external_pi = { enabled: false };
+  cfg.worker.external_cli.claude_code = { enabled: false };
+
+  const enabled = listEnabledWorkerBackends(cfg);
+  assert.deepEqual(enabled, ["antigravity-cli", "builtin-pi"]);
+  assert.equal(resolveEffectiveDefaultBackend(cfg), "antigravity-cli");
+
+  const tempDir = mkdtempSync(join(tmpdir(), "hato-disabled-cli-"));
+  const modelsToml = join(tempDir, "models.toml");
+  writeFileSync(
+    modelsToml,
+    `[slots]
+persona = "faux-router/r1"
+router = "faux-router/r1"
+curator = "faux-router/r1"
+worker = "faux-router/r1"
+hindsight_llm = "faux-router/r1"
+
+[providers]
+`,
+    "utf8",
+  );
+
+  const fauxRouter = fauxProvider({
+    api: "hato-faux-router-disabled",
+    provider: "faux-router",
+    models: [{ id: "r1", name: "R1" }],
+    tokensPerSecond: 10_000,
+  });
+  let observedUserPrompt = "";
+  fauxRouter.setResponses([
+    (ctx) => {
+      observedUserPrompt = JSON.stringify(ctx.messages);
+      return fauxAssistantMessage(
+        JSON.stringify({
+          decision: "ticket",
+          backend: "opencode-v2",
+          brief_title: "尝试调用被禁用后端",
+          context_range: { from_msg_id: "m1", to_msg_id: "m1" },
+          workspace_mode: "isolated",
+        }),
+      );
+    },
+  ]);
+
+  const dbHandle = openDatabase(":memory:");
+  try {
+    const repo = new HatoRepository(dbHandle.db);
+    repo.ensureOwner({
+      canonicalUserId: "owner",
+      timezone: "Asia/Shanghai",
+      proactiveChannel: "tg",
+    });
+    repo.appendRawMessage({
+      canonicalUserId: "owner",
+      channel: "web",
+      role: "user",
+      content: "帮我改一下仓库代码",
+      createdAt: Date.now(),
+    });
+    const registry = new ModelRegistry(modelsToml, repo, {
+      extraProviders: [fauxRouter.provider],
+    });
+    const router = new NeutralRouter({
+      getHatoConfig: () => cfg,
+      getMcpConfig: () => ({ servers: {} }),
+      modelRegistry: registry,
+      proxyRouter: new ScopedProxyRouter([]),
+      repo,
+    });
+
+    const decision = await router.routeDelegation({
+      canonicalUserId: "owner",
+      hint: "改仓库代码",
+    });
+
+    assert.equal(observedUserPrompt.includes("[default_backend]: antigravity-cli"), true);
+    assert.equal(observedUserPrompt.includes("[enabled_backends]: antigravity-cli, builtin-pi"), true);
+    assert.equal(decision.decision, "ticket");
+    if (decision.decision === "ticket") {
+      assert.equal(decision.backend, "antigravity-cli");
+    }
   } finally {
     dbHandle.close();
     rmSync(tempDir, { recursive: true, force: true });

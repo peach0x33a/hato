@@ -50,7 +50,7 @@ const MODE_OPTIONS: Array<{ id: TimelineMode; label: string; icon: typeof Clock 
 const DEFAULT_SLOT_OPTIONS = [
   { value: "__all__", label: "全部调用" },
   { value: "persona", label: "persona · 主对话" },
-  { value: "worker", label: "worker · 浏览器" },
+  { value: "worker", label: "worker · 后台执行" },
   { value: "curator", label: "curator · 记忆压缩" },
   { value: "router", label: "router · 路由" },
   { value: "hindsight_llm", label: "hindsight_llm · 反思" },
@@ -163,7 +163,7 @@ function getKindBadge(kind: LedgerKind, slot: string): { text: string; cls: stri
   if (kind === "input") {
     if (slot === "worker") {
       return {
-        text: "浏览",
+        text: "任务",
         cls: "border-cyan-500/35 bg-cyan-500/15 text-cyan-700 dark:text-cyan-300",
       };
     }
@@ -471,9 +471,9 @@ export function TrajectoryPanel({ onToast, sessionEpoch = 0, sessionId = null }:
   }, [activeStep]);
 
   return (
-    <div className="flex min-h-0 flex-1 flex-col overflow-hidden bg-background">
+    <div className="flex h-full min-h-0 min-w-0 max-w-full flex-1 flex-col overflow-hidden bg-background">
       {/* 1. Flat Sticky Toolbar */}
-      <div className="flex shrink-0 flex-wrap items-center justify-between gap-2 border-b border-border bg-background px-3 py-1.5">
+      <div className="flex min-w-0 shrink-0 flex-wrap items-center justify-between gap-2 border-b border-border bg-background px-3 py-1.5">
         <div className="flex flex-wrap items-center gap-2">
           <div className="flex items-center rounded-md bg-muted/50 p-0.5">
             {MODE_OPTIONS.map((m) => {
@@ -539,7 +539,7 @@ export function TrajectoryPanel({ onToast, sessionEpoch = 0, sessionId = null }:
               value={searchText}
               onChange={(e) => setSearchText(e.target.value)}
               placeholder="搜索输出、工具、模型…"
-              className="h-7 w-40 rounded-md border border-border/70 bg-muted/20 pr-6 pl-6 text-[11px] text-foreground outline-none transition-colors focus:border-ring focus:bg-background sm:w-52"
+              className="h-7 w-36 rounded-md border border-border/70 bg-muted/20 pr-6 pl-6 text-[11px] text-foreground outline-none transition-colors focus:border-ring focus:bg-background sm:w-44"
             />
             {searchText && (
               <button
@@ -579,7 +579,7 @@ export function TrajectoryPanel({ onToast, sessionEpoch = 0, sessionId = null }:
 
       {/* 2. Compact 3-Track Swimlane */}
       {filteredTraces.length > 0 && (
-        <div className="flex h-[54px] shrink-0 overflow-hidden border-b border-border bg-background">
+        <div className="flex h-[54px] min-w-0 shrink-0 overflow-hidden border-b border-border bg-background">
           <div className="flex w-11 shrink-0 select-none flex-col justify-between border-r border-border bg-muted/15 px-1.5 py-1 text-right text-[10px] leading-none text-muted-foreground">
             <span>输入</span>
             <span>模型</span>
@@ -677,7 +677,7 @@ export function TrajectoryPanel({ onToast, sessionEpoch = 0, sessionId = null }:
           暂无匹配的轨迹记录。发送对话或运行浏览器任务后即可在此追踪每次调用与输出。
         </div>
       ) : (
-        <div className="flex min-h-0 flex-1 flex-col overflow-hidden md:flex-row">
+        <div className="flex min-h-0 min-w-0 max-w-full flex-1 flex-col overflow-hidden md:flex-row">
           {/* Left: High-Density Event Ledger */}
           <div className="min-h-0 min-w-0 flex-1 overflow-y-auto divide-y divide-border/50">
             {ledgerEvents.map((ev) => {
@@ -698,7 +698,7 @@ export function TrajectoryPanel({ onToast, sessionEpoch = 0, sessionId = null }:
                     setInspectorTab("overview");
                     setInspectorOpen(true);
                   }}
-                  className={`flex min-h-8 w-full items-center gap-2 px-3 py-1.5 text-left text-xs transition-colors ${
+                  className={`flex min-h-8 w-full min-w-0 items-center gap-2 overflow-hidden px-3 py-1.5 text-left text-xs transition-colors ${
                     isSelected
                       ? "bg-primary/10 text-foreground"
                       : "hover:bg-muted/35 text-foreground/90"
@@ -758,7 +758,7 @@ export function TrajectoryPanel({ onToast, sessionEpoch = 0, sessionId = null }:
 
           {/* Right/Bottom: Responsive Flat Inspector Drawer */}
           {inspectorOpen && selectedTrace && (
-            <aside className="flex h-[52%] min-h-0 w-full shrink-0 flex-col overflow-hidden border-t border-border bg-background md:h-auto md:w-[360px] md:border-t-0 md:border-l lg:w-[440px]">
+            <aside className="flex h-[52%] min-h-0 min-w-0 w-full shrink-0 flex-col overflow-hidden border-t border-border bg-background md:h-auto md:w-[340px] md:border-t-0 md:border-l lg:w-[400px] xl:w-[440px]">
               <div className="flex h-9 shrink-0 items-center justify-between gap-2 border-b border-border px-3">
                 <div className="flex min-w-0 items-center gap-1.5">
                   {(() => {
@@ -816,7 +816,7 @@ export function TrajectoryPanel({ onToast, sessionEpoch = 0, sessionId = null }:
                 ))}
               </div>
 
-              <div className="min-h-0 flex-1 overflow-y-auto p-3.5 text-xs">
+              <div className="min-h-0 min-w-0 flex-1 overflow-y-auto overflow-x-hidden p-3.5 text-xs">
                 {inspectorTab === "overview" && selectedEvent?.kind === "input" && (
                   <div className="flex flex-col gap-3.5 divide-y divide-border/60">
                     <div className="grid grid-cols-[64px_1fr] gap-y-1.5 pb-3 text-[11px]">

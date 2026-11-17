@@ -34,16 +34,13 @@ import { cn } from "@/lib/utils";
 const UNFOLD_SPRING = {
   type: "spring",
   visualDuration: 0.2,
-  bounce: 0.12,
+  bounce: 0.08,
 } as const;
 // Exits are faster than entrances: the panel folds back on a short ease.
-const UNFOLD_EXIT = { duration: 0.2, ease: EASE_OUT } as const;
-const RADIUS = 12;
-// How far the open panel sits from the trigger once it has pulled away.
-const GAP = 8;
+const UNFOLD_EXIT = { duration: 0.16, ease: EASE_OUT } as const;
+const RADIUS = 8;
 // The surface starts as a thin lip flush against the trigger's edge.
-const LIP = 8;
-const lerp = (a: number, b: number, t: number) => a + (b - a) * t;
+const LIP = 4;
 
 const ITEM_VARIANTS: Variants = {
   // A shared short reveal keeps late rows in long, scrolled lists ready with
@@ -59,9 +56,10 @@ interface SelectContextValue {
   open: boolean;
   setOpen: (open: boolean) => void;
   select: (value: string) => void;
-  register: (value: string, label: string, disabled: boolean) => void;
+  register: (value: string, label: string, disabled: boolean, icon?: ReactNode) => void;
   unregister: (value: string) => void;
   labelFor: (value: string | undefined) => string | undefined;
+  iconFor: (value: string | undefined) => ReactNode | undefined;
   rows: ListboxRow[];
   /** Closes the panel; focus inside it returns to the trigger. */
   close: () => void;
@@ -126,6 +124,7 @@ export function Select({
   const [labels, setLabels] = useState<
     Map<string, { label: string; disabled: boolean }>
   >(new Map());
+  const iconsRef = useRef<Map<string, ReactNode>>(new Map());
   const [placement, setPlacement] = useState<Placement>("bottom");
 
   const controlled = value !== undefined;
@@ -163,14 +162,23 @@ export function Select({
     [controlled, onValueChange, close],
   );
 
-  const register = useCallback((v: string, label: string, disabled: boolean) => {
-    setLabels((m) => {
-      const entry = m.get(v);
-      if (entry?.label === label && entry.disabled === disabled) return m;
-      return new Map(m).set(v, { label, disabled });
-    });
-  }, []);
+  const register = useCallback(
+    (v: string, label: string, disabled: boolean, icon?: ReactNode) => {
+      if (icon !== undefined) {
+        iconsRef.current.set(v, icon);
+      } else {
+        iconsRef.current.delete(v);
+      }
+      setLabels((m) => {
+        const entry = m.get(v);
+        if (entry?.label === label && entry.disabled === disabled) return m;
+        return new Map(m).set(v, { label, disabled });
+      });
+    },
+    [],
+  );
   const unregister = useCallback((v: string) => {
+    iconsRef.current.delete(v);
     setLabels((m) => {
       if (!m.has(v)) return m;
       const next = new Map(m);
@@ -224,6 +232,7 @@ export function Select({
       register,
       unregister,
       labelFor: (v) => (v === undefined ? undefined : labels.get(v)?.label),
+      iconFor: (v) => (v === undefined ? undefined : iconsRef.current.get(v)),
       rows,
       close,
       reduce,
@@ -269,14 +278,9 @@ export interface SelectTriggerProps {
 export function SelectTrigger({ className, children }: SelectTriggerProps) {
   const ctx = useSelectContext("SelectTrigger");
   const isTop = ctx.placement === "top";
-  // The edge facing the panel flattens while the panel is attached to it and
-  // rounds back as the panel pulls away — the two pinch apart — on the same
-  // curve the panel moves on. The far edge stays rounded.
-  const nearRadius = useTransform(
-    ctx.progress,
-    [0, 0.2, 0.4, 1],
-    [RADIUS, 0, 0, RADIUS],
-  );
+  // Stay seamlessly joined to the panel: flatten the facing edge once open.
+  const nearRadius = useTransform(ctx.progress, [0, 0.14, 1], [RADIUS, 0, 0]);
+  const resolvedNearRadius = ctx.reduce ? (ctx.open ? 0 : RADIUS) : nearRadius;
   const rotate = useTransform(ctx.progress, (p) =>
     ctx.reduce ? (ctx.open ? 180 : 0) : Math.min(1, Math.max(0, p)) * 180,
   );
@@ -299,10 +303,10 @@ export function SelectTrigger({ className, children }: SelectTriggerProps) {
         }
       }}
       style={{
-        borderTopLeftRadius: ctx.reduce || !isTop ? RADIUS : nearRadius,
-        borderTopRightRadius: ctx.reduce || !isTop ? RADIUS : nearRadius,
-        borderBottomLeftRadius: ctx.reduce || isTop ? RADIUS : nearRadius,
-        borderBottomRightRadius: ctx.reduce || isTop ? RADIUS : nearRadius,
+        borderTopLeftRadius: isTop ? resolvedNearRadius : RADIUS,
+        borderTopRightRadius: isTop ? resolvedNearRadius : RADIUS,
+        borderBottomLeftRadius: !isTop ? resolvedNearRadius : RADIUS,
+        borderBottomRightRadius: !isTop ? resolvedNearRadius : RADIUS,
       }}
       className={cn(
         "relative z-10 flex w-full items-center justify-between gap-2 border border-border bg-background px-3 py-2 text-sm text-foreground outline-none transition-colors",
@@ -315,7 +319,7 @@ export function SelectTrigger({ className, children }: SelectTriggerProps) {
       <motion.span
         aria-hidden
         style={{ rotate }}
-        className="text-muted-foreground"
+        className="shrink-0 text-muted-foreground"
       >
         <ChevronDown className="h-4 w-4" />
       </motion.span>
@@ -331,11 +335,17 @@ export interface SelectValueProps {
 export function SelectValue({ placeholder, className }: SelectValueProps) {
   const ctx = useSelectContext("SelectValue");
   const label = ctx.labelFor(ctx.value);
+  const icon = ctx.iconFor(ctx.value);
   return (
     <span
-      className={cn(label ? "text-foreground" : "text-muted-foreground", className)}
+      className={cn(
+        "inline-flex min-w-0 items-center gap-2 truncate",
+        label ? "text-foreground" : "text-muted-foreground",
+        className,
+      )}
     >
-      {label ?? placeholder ?? "Select"}
+      {icon ? <span className="inline-flex shrink-0 items-center">{icon}</span> : null}
+      <span className="truncate">{label ?? placeholder ?? "Select"}</span>
     </span>
   );
 }
@@ -402,27 +412,17 @@ export function SelectContent({ className, children }: SelectContentProps) {
   // corner writes can paint; only the gap uses a transform. All read one
   // progress value, with no animated layout properties.
   const ready = height > 0 && !reduce;
-  const fromY = ready ? (isTop ? GAP : -GAP) : 0;
-  const detach = useTransform(progress, [0.4, 1], [0, 1]);
-  const y = useTransform(detach, (d) => lerp(fromY, 0, d));
-  const nearRadius = useTransform(detach, (d) => (ready ? RADIUS * d : RADIUS));
-  const borderRadius = useTransform(nearRadius, (near) =>
-    isTop
-      ? `${RADIUS}px ${RADIUS}px ${near}px ${near}px`
-      : `${near}px ${near}px ${RADIUS}px ${RADIUS}px`,
-  );
-  const clipPath = useTransform([progress, nearRadius], ([p, near]: number[]) => {
+  const connectedRadius = isTop
+    ? `${RADIUS}px ${RADIUS}px 0px 0px`
+    : `0px 0px ${RADIUS}px ${RADIUS}px`;
+  const clipPath = useTransform(progress, (p: number) => {
     if (!ready) return "none";
-    // Clamp overshoot so the clip never extends into the trigger or exposes
-    // overflowing children. At rest remove it so the native shadow is whole.
+    // Unfold seamlessly out of the trigger edge with connected corners.
     const reveal = Math.min(1, Math.max(0, p));
     if (reveal === 1) return "none";
     const hidden = Math.max(0, (height - LIP) * (1 - reveal));
     const inset = isTop ? `${hidden}px 0 0 0` : `0 0 ${hidden}px 0`;
-    const corners = isTop
-      ? `${RADIUS}px ${RADIUS}px ${near}px ${near}px`
-      : `${near}px ${near}px ${RADIUS}px ${RADIUS}px`;
-    return `inset(${inset} round ${corners})`;
+    return `inset(${inset} round ${connectedRadius})`;
   });
   // The surface materialises over its first frames rather than popping in as
   // a lip; with reduced motion the fade is the whole entrance.
@@ -446,16 +446,14 @@ export function SelectContent({ className, children }: SelectContentProps) {
         visibility: present ? undefined : "hidden",
         maxHeight: present ? undefined : 0,
         borderWidth: present ? undefined : 0,
-        y,
         clipPath,
-        borderRadius,
+        borderRadius: connectedRadius,
         opacity,
         pointerEvents: open ? "auto" : "none",
-        marginTop: isTop ? 0 : GAP,
-        marginBottom: isTop ? GAP : 0,
+        marginTop: isTop ? 0 : -1,
+        marginBottom: isTop ? -1 : 0,
       }}
-      // flush against the trigger, then separates into its own rounded pill;
-      // sits above or below depending on available space
+      // stays docked flush against the trigger with shared 1px border seam
       className={cn(
         "absolute left-0 right-0 z-20 overflow-hidden border border-border bg-background shadow-lg",
         isTop ? "bottom-full" : "top-full",
@@ -466,7 +464,7 @@ export function SelectContent({ className, children }: SelectContentProps) {
         <motion.div
           initial={false}
           animate={open ? "show" : "hidden"}
-          className="p-1"
+          className="max-h-60 overflow-y-auto p-1"
         >
           {children}
         </motion.div>
@@ -477,6 +475,8 @@ export function SelectContent({ className, children }: SelectContentProps) {
 
 export interface SelectItemProps {
   value: string;
+  label?: string;
+  icon?: ReactNode;
   disabled?: boolean;
   className?: string;
   children: ReactNode;
@@ -484,6 +484,8 @@ export interface SelectItemProps {
 
 export function SelectItem({
   value,
+  label: labelProp,
+  icon,
   disabled = false,
   className,
   children,
@@ -491,11 +493,11 @@ export function SelectItem({
   const ctx = useSelectContext("SelectItem");
   const activeId = useContext(ActiveOptionContext);
   const selected = ctx.value === value;
-  const label = typeof children === "string" ? children : value;
+  const label = labelProp ?? (typeof children === "string" ? children : value);
 
   useLayoutEffect(() => {
-    ctx.register(value, label, disabled);
-  }, [ctx.register, value, label, disabled]);
+    ctx.register(value, label, disabled, icon);
+  }, [ctx.register, value, label, disabled, icon]);
   useLayoutEffect(() => () => ctx.unregister(value), [ctx.unregister, value]);
 
   return (
@@ -510,7 +512,7 @@ export function SelectItem({
         data-listbox-id={value}
         onClick={() => ctx.select(value)}
         className={cn(
-          "flex w-full items-center justify-between gap-2 rounded-lg px-2.5 py-1.5 text-left text-sm outline-none transition-colors",
+          "flex w-full items-center justify-between gap-2 rounded-md px-2.5 py-1.5 text-left text-sm outline-none transition-colors",
           selected
             ? "bg-muted text-foreground"
             : "text-muted-foreground hover:bg-muted hover:text-foreground focus-visible:bg-muted",
@@ -518,7 +520,10 @@ export function SelectItem({
           className,
         )}
       >
-        {children}
+        <span className="inline-flex min-w-0 items-center gap-2">
+          {icon ? <span className="inline-flex shrink-0 items-center">{icon}</span> : null}
+          <span className="truncate">{children}</span>
+        </span>
         {selected ? <Check className="h-3.5 w-3.5 shrink-0" /> : null}
       </button>
     </motion.div>

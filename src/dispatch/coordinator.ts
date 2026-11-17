@@ -37,6 +37,7 @@ export class TicketCoordinator {
     originChannel: ChannelName;
     hint: string;
     urgency?: "normal" | "high";
+    deliverFiles?: boolean;
   }): { ticketId: string; status: "routing" } {
     const cfg = this.deps.getHatoConfig();
     const ticketId = `t_${randomBytes(4).toString("hex")}`;
@@ -211,6 +212,7 @@ export class TicketCoordinator {
       originChannel: ChannelName;
       hint: string;
       urgency?: "normal" | "high";
+      deliverFiles?: boolean;
     },
   ): Promise<void> {
     const decision = await this.deps.router.routeDelegation({
@@ -219,7 +221,13 @@ export class TicketCoordinator {
       urgency: params.urgency,
     });
 
-    await this.applyRouterDecision(ticketId, params.canonicalUserId, params.originChannel, decision);
+    await this.applyRouterDecision(
+      ticketId,
+      params.canonicalUserId,
+      params.originChannel,
+      decision,
+      params.deliverFiles,
+    );
   }
 
   private async applyRouterDecision(
@@ -227,6 +235,7 @@ export class TicketCoordinator {
     canonicalUserId: string,
     originChannel: ChannelName,
     decision: RouterDecision,
+    deliverFiles?: boolean,
   ): Promise<void> {
     if (decision.decision === "schedule_op") {
       let applied = false;
@@ -302,6 +311,9 @@ export class TicketCoordinator {
     const cfg = this.deps.getHatoConfig();
     const contextId = `ctx_${ticketId}`;
     const mandate = buildMandateFromRouterDecision(cfg, ticketId, decision);
+    if (deliverFiles) {
+      mandate.deliver_files = true;
+    }
 
     this.deps.repo.updateTicket(ticketId, {
       status: "running",
@@ -318,6 +330,7 @@ export class TicketCoordinator {
     logInfo("DISPATCH", `ticket=${ticketId} backend=${decision.backend} ctx=${contextId}`);
 
     let result: WorkerResult;
+    const workerStartPerf = performance.now();
     try {
       result = await this.deps.dispatcher.execute(
         {
@@ -350,6 +363,17 @@ export class TicketCoordinator {
       };
     }
 
+    this.recordWorkerTrace({
+      ticketId,
+      canonicalUserId,
+      backend: decision.backend,
+      briefTitle: decision.brief_title,
+      mandate,
+      contextRange: decision.context_range,
+      result,
+      latencyMs: Math.max(1, Math.round(performance.now() - workerStartPerf)),
+    });
+
     await this.handleWorkerOutcome(ticketId, canonicalUserId, originChannel, decision.brief_title, result);
   }
 
@@ -360,6 +384,7 @@ export class TicketCoordinator {
     userReply: string,
   ): Promise<void> {
     let result: WorkerResult;
+    const workerStartPerf = performance.now();
     try {
       result = await this.deps.dispatcher.resume(ticket, mandate, userReply, {
         onSessionId: (sid) => {
@@ -381,6 +406,17 @@ export class TicketCoordinator {
       };
     }
 
+    this.recordWorkerTrace({
+      ticketId: ticket.ticketId,
+      canonicalUserId: ticket.canonicalUserId,
+      backend: ticket.backend,
+      briefTitle: ticket.briefTitle,
+      mandate,
+      userReply,
+      result,
+      latencyMs: Math.max(1, Math.round(performance.now() - workerStartPerf)),
+    });
+
     await this.handleWorkerOutcome(
       ticket.ticketId,
       ticket.canonicalUserId,
@@ -388,6 +424,73 @@ export class TicketCoordinator {
       ticket.briefTitle,
       result,
     );
+  }
+
+  private recordWorkerTrace(params: {
+    ticketId: string;
+    canonicalUserId: string;
+    backend: string;
+    briefTitle: string;
+    mandate: WorkerMandate;
+    contextRange?: { from_msg_id: string; to_msg_id: string };
+    userReply?: string;
+    result: WorkerResult;
+    latencyMs: number;
+  }): void {
+    const outputParts = [params.result.narration_hint];
+    for (const block of params.result.verbatim_blocks) {
+      outputParts.push(`**${block.title}**\n${block.content}`);
+    }
+    if (params.result.artifacts.length > 0) {
+      outputParts.push(
+        `产物: ${params.result.artifacts.map((a) => `${a.filename} (${a.path})`).join(", ")}`,
+      );
+    }
+    if (params.result.caveats.length > 0) {
+      outputParts.push(`注意: ${params.result.caveats.join("；")}`);
+    }
+    const outputText = outputParts.filter(Boolean).join("\n\n").trim();
+
+    this.deps.repo.insertTurnTrace({
+      canonicalUserId: params.canonicalUserId,
+      slot: "worker",
+      provider: params.backend,
+      modelId: params.ticketId,
+      api: "worker-cli",
+      inputTokens: 0,
+      outputTokens: 0,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+      cacheHitRate: 0,
+      ttftMs: null,
+      tps: null,
+      userPreview: `[工单 ${params.ticketId}] ${params.briefTitle}`,
+      recalledIds: [],
+      timeCardText: [
+        `ticket_id: ${params.ticketId}`,
+        `backend: ${params.backend}`,
+        `status: ${params.result.status}`,
+        `workspace_mode: ${params.mandate.workspace_mode}`,
+        `workspace_dir: ${params.mandate.workspace_dir}`,
+        params.contextRange
+          ? `context_range: ${params.contextRange.from_msg_id} .. ${params.contextRange.to_msg_id}`
+          : "",
+        params.userReply ? `user_reply: ${params.userReply}` : "",
+      ]
+        .filter(Boolean)
+        .join("\n"),
+      toolCalls: [],
+      steps: [
+        {
+          step: 1,
+          kind: "assistant",
+          text: outputText || `status=${params.result.status}`,
+          stopReason: params.result.status === "failed" ? "error" : "stop",
+          toolCalls: [],
+        },
+      ],
+      latencyMs: params.latencyMs,
+    });
   }
 
   private async handleWorkerOutcome(

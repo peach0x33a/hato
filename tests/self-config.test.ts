@@ -142,6 +142,8 @@ hindsight_llm = "faux-provider/model-a"
     assert.ok(inspectRes.summary.includes("USER_RULE_TOP"));
     assert.ok(inspectRes.summary.includes("原始人设"));
     assert.ok(inspectRes.summary.includes('"system_chars": 16'));
+    assert.ok(inspectRes.summary.includes('"worker_runtime"'));
+    assert.ok(inspectRes.summary.includes('"effective_default_backend"'));
 
     // 2. Patch allowed fields (debounce_ms + prompts.order)
     const patchRes = await runSelfConfigAction(deps, {

@@ -31,7 +31,7 @@ flowchart LR
     COMP -- "Ticket(context_id) + Mandate(skills/mcp)" --> DB[("SQLite (唯一事实源)")]
     DB --> W["Worker Dispatcher (ExecutionRunner)"]
     W -- "模式 1: builtin-pi (工具拉取 ctx)" --> BOX["工单容器 hato-t_xxx (无 API Key)"]
-    W -- "模式 2: external-cli (Scoped MCP 拉取 ctx)" --> EXT["Codex / agy / OpenCode / external-pi / CC"]
+    W -- "模式 2: external-cli (Scoped MCP 拉取 ctx)" --> EXT["Codex CLI / Antigravity CLI / OpenCode V2 / Pi / CC"]
     DB -. "context_id 受限只读切片" .-> W
     BOX -- "部署确认后" --> JOBS["常驻容器 hato-jobs"]
     EXT -- "产出的常驻脚本确认后" --> JOBS
@@ -109,7 +109,7 @@ Persona（`pi-agent-core` `Agent`）**禁止直接接触 shell、文件系统或
 * **Router 只输出 3 个确定性决策（TypeBox 严格 Schema）：**
   * **分支 A — `ScheduleOps`（确定性调度修改）：** 若仅涉及“把上次那个脚本改到 8 点半 / 暂停 / 恢复 / 删除”且无需改代码，直接输出调度操作指令，1 秒内确定性执行，不启动 Worker。
   * **分支 B — `Ticket`（工单 + 受限上下文引用）：**
-    1. **`backend` 与 `Mandate`：** 选择 `codex` / `agy` / `opencode-v2` / `external-pi` / `claude-code` / `builtin-pi`（裸 `opencode` 标记为不支持），固化工作目录（隔离沙箱或已授权 `allowed_repos`）、网络模式、超时、`skills` 与 `allowed_mcp_servers` 授权清单、`confirm_before` 动作清单；
+    1. **`backend` 与 `Mandate`：** 选择 `codex-cli` / `antigravity-cli` / `opencode-v2` / `external-pi` / `claude-code` / `builtin-pi`（裸 `opencode` 标记为不支持），固化工作目录（隔离沙箱或已授权 `allowed_repos`）、网络模式、超时、`skills` 与 `allowed_mcp_servers` 授权清单、`confirm_before` 动作清单；
     2. **`brief_title`：** 仅用于工单看板展示的一句话短标题（不代替详细需求）；
     3. **`context_range: { from_msg_id, to_msg_id }`：** 圈定与本次任务相关的连续起止消息区间。**区间内整段原文原样保留**（不做单条裁剪，宁可让强编码模型自行略过一句“我去拿外卖”，也不误删看似闲聊的约束条件），并签发绑定到该工单的只读 **`context_id`**（如 `ctx_0042`）。
 
@@ -265,7 +265,7 @@ defer_after_chat_minutes = 5
 max_unanswered_streak = 2
 
 [worker]
-default_backend = "codex"         # 支持: codex | agy | opencode-v2 | external-pi | claude-code | builtin-pi（裸 opencode 不支持）
+default_backend = "codex-cli"     # 支持: codex-cli | antigravity-cli | opencode-v2 | external-pi | claude-code | builtin-pi（裸 opencode 不支持）
 workspace_ttl_days = 14
 
 [worker.sandbox]
@@ -282,13 +282,13 @@ host_mcp_allowlist = []             # 可选放行的本机已有 MCP 名称白�
 permission_preset = "auto_safe"     # "follow_host" | "auto_safe" | "yolo" | "read_only" | "custom"
                                     # 仅对 Hato 拉起的 Worker 子进程生效，绝不修改本机原配置文件
 
-[worker.external_cli.codex]
+[worker.external_cli.codex_cli]
 enabled = true
 # 留空时跟随 permission_preset 自动映射；手动设置时覆盖 preset（枚举由 CLI 动态探测）
 # sandbox = "workspace-write"       # read-only | workspace-write | danger-full-access
 # approval = "approve-for-me"       # host | approve-for-me | bypass
 
-[worker.external_cli.agy]
+[worker.external_cli.antigravity_cli]
 enabled = true
 # mode = "auto"                     # 动态读取: accept-edits | auto | plan
 # skip_permissions = false
@@ -546,15 +546,15 @@ Hato 在业务层定义统一的 `MemoryStore` 接口，底层默认接 **Hindsi
 * **原生确定性状态机：** 订阅 `pi-agent-core` 事件流实时更新 `tickets.progress_note`；通过显式工具 `ask_user(question)`（挂起进 `needs_input` 并持久化消息现场）与 `finish_task(result)`（TypeBox 校验产出 `Result JSON`）直接收口；命中 `Mandate.confirm_before` 或 MCP `confirm_tools` 时可在工具执行前原生拦截并等待 TG Inline Keyboard 确认。
 * **容器资源限额：** `--memory 512m --cpus 1 --pids-limit 256`，默认网络受限（按 `Mandate` 控制 `none` / `allowlist` / `egress`）。
 
-### 8.2 模式二：`external-cli`（优先接入梯度：`codex` → `agy` → `opencode-v2` → `external-pi` → `claude-code`）
+### 8.2 模式二：`external-cli`（优先接入梯度：`codex-cli` → `antigravity-cli` → `opencode-v2` → `external-pi` → `claude-code`）
 适合对已有项目仓库做多文件开发、跑全套测试、修复杂 Bug，或复用本机已配好的中转站与 CLI 订阅。Hato 在此模式下作为**“受控上下文提供方 + 隔离覆写层 + 会话编排网关”**：
 
 #### 1. 接入优先级与后端适配矩阵
 
 | 梯队 | 后端 | Headless 流式启动 | 会话续跑 | 本机配置继承与隔离覆写（Overlay） |
 |---|---|---|---|---|
-| **Tier 1** | **`codex`** | `codex exec --json` | `codex exec resume <thread_id>` | 影子 `CODEX_HOME`：软链 `~/.codex/auth.json`，读取 `~/.codex/config.toml` 保留 `[model_providers.*]` 与模型配置，剔除个人 `[mcp_servers.*]` 后写入 `hato_context` 与授权 Worker MCP |
-| **Tier 1** | **`agy`** | `agy -p "<prompt>" --output-format stream-json --json-schema <schema> --disable-slash-commands` | `agy --conversation <id> -p "<reply>"` | 继承 `~/.gemini/` 认证与模型设置；通过 `--settings <ticket_settings.json>` 临时会话覆写；后续可按需切换 `agy acp`（支持 `--gemini-dir` / `--app-data-dir` 彻底隔离） |
+| **Tier 1** | **`codex-cli`** | `codex exec --json` | `codex exec resume <thread_id>` | 影子 `CODEX_HOME`：软链 `~/.codex/auth.json`，读取 `~/.codex/config.toml` 保留 `[model_providers.*]` 与模型配置，剔除个人 `[mcp_servers.*]` 后写入 `hato_context` 与授权 Worker MCP |
+| **Tier 1** | **`antigravity-cli`** | `agy -p "<prompt>" --output-format stream-json --json-schema <schema> --disable-slash-commands` | `agy --conversation <id> -p "<reply>"` | 继承 `~/.gemini/` 认证与模型设置；通过 `--settings <ticket_settings.json>` 临时会话覆写；后续可按需切换 `agy acp`（支持 `--gemini-dir` / `--app-data-dir` 彻底隔离） |
 | **Tier 1** | **`opencode-v2`** | `opencode run --standalone --format json`（**强制校验 OpenCode V2**，裸 `opencode` v1 标记为不支持） | `opencode run --standalone -s <session_id>` | **强制 `--standalone`** 隔离后台共享 service；继承本机 auth/provider，覆写隔离个人 MCP 与 Skills；后续亦支持 `opencode acp` |
 | **Tier 2** | **`external-pi`** | 独立安装的 `pi` CLI（JSON/RPC 模式） | 按 `session` 参数续跑 | 预留同构 `ExternalCliAdapter` 槽位，独立于 Hato 内置 `pi-agent-core` |
 | **Tier 3** | **`claude-code`** | `claude -p "<prompt>" --output-format stream-json --strict-mcp-config --mcp-config <ticket_mcp.json>` | `claude -p "<reply>" --resume <session_id>` | 继承本机认证与 `settings.json` 中转环境；`--strict-mcp-config` 锁死仅加载工单 MCP，必要时辅以影子 `CLAUDE_CONFIG_DIR` |
@@ -674,7 +674,7 @@ Hato/
 │  │  ├─ overlay.ts            # 本机配置继承 + 个人 MCP/Skills 剥离 + 仅 Hato 生效的权限模式渲染
 │  │  ├─ builtin-pi.ts         # 内置模式: pi-agent-core 循环（工单级模型快照 + 上下文拉取工具）
 │  │  ├─ external-cli.ts       # 外部 CLI 统一执行器 + 流式进度解析 + resume 续跑
-│  │  ├─ adapters/             # codex.ts / agy.ts / opencode-v2.ts / external-pi.ts / claude-code.ts
+│  │  ├─ adapters/             # codex-cli.ts / antigravity-cli.ts / opencode-v2.ts / external-pi.ts / claude-code.ts
 │  │  ├─ result-normalizer.ts  # 外部 CLI 输出 + 文件 diff 归一化为标准 Result JSON
 │  │  ├─ sandbox.ts            # Rootless Docker 生命周期与 docker exec 工具封装
 │  │  └─ cleanup.ts            # 14 天临时工作区回收
@@ -710,7 +710,7 @@ Hato/
 ### Phase 2：双区 Skills / MCP 底座、“三道墙”与第一梯队 External CLI 骨架
 * 实现 **Personal / Worker 双区 `SkillLoader`**（Persona 静态索引 + `read_skill`）与 **`config/mcp.toml` + 轻量 `McpClientPool`**（先接通 Persona 区，预留 Worker 授权过滤）。
 * 实现 `delegate()` 快速入队、中立轻路由器 **Router**（TypeBox 校验 + 区间圈定 + `Mandate` 能力授权）与 `ScheduleOps` 分流、`context_slice`（原样保留 + `reply_to` 穿透 + 有限回溯）及 **Result 三分流**（`narration_hint` + `verbatim_blocks` + `artifacts`）。
-* 实现 `ExecutionRunner`、`Scoped Context MCP`（`src/mcp/context-server.ts`）、`cli-probe` 动态模式探测与 Web Console 模式配置（`permission_preset` + 单后端原生模式覆写，**仅对 Hato 生效**）、`overlay` 本机配置继承剥离，优先打通第一梯队 **`codex` → `agy` → `opencode-v2`**（强制校验 V2 版本，拒绝裸 `opencode`）及 `builtin-pi` 轻量模式。
+* 实现 `ExecutionRunner`、`Scoped Context MCP`（`src/mcp/context-server.ts`）、`cli-probe` 动态模式探测与 Web Console 模式配置（`permission_preset` + 单后端原生模式覆写，**仅对 Hato 生效**）、`overlay` 本机配置继承剥离，优先打通第一梯队 **`codex-cli` → `antigravity-cli` → `opencode-v2`**（强制校验 V2 版本，拒绝裸 `opencode`）及 `builtin-pi` 轻量模式。
 
 ### Phase 3：第二/三梯队 External CLI、异步追问路由与容器沙箱
 * 接入第二梯队 **`external-pi`**（独立安装的 `pi` CLI）与第三梯队 **`claude-code`**。

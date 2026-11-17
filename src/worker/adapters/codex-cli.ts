@@ -1,7 +1,7 @@
 import type { ExternalCliAdapter, ExternalCliStreamEvent } from "./types.js";
 
 export const codexCliAdapter: ExternalCliAdapter = {
-  backend: "codex",
+  backend: "codex-cli",
 
   buildStartArgs({ prompt, workspaceDir, overlay, schemaPath }) {
     const args = ["exec", "--json", "--skip-git-repo-check", "-C", workspaceDir];
@@ -31,12 +31,12 @@ export const codexCliAdapter: ExternalCliAdapter = {
       const type = typeof obj.type === "string" ? obj.type : "";
 
       if (type === "thread.started" && typeof obj.thread_id === "string") {
-        return { sessionId: obj.thread_id, progressNote: "已建立 Codex 会话" };
+        return { sessionId: obj.thread_id, progressNote: "已建立 Codex CLI 会话" };
       }
 
       if (type === "turn.failed") {
         const errObj = obj.error as { message?: string } | undefined;
-        return { error: errObj?.message || "Codex turn failed" };
+        return { error: errObj?.message || "Codex CLI turn failed" };
       }
 
       if (type === "error" && typeof obj.message === "string") {

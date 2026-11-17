@@ -24,6 +24,7 @@ const IGNORED_ARTIFACT_NAMES = new Set([
   "_hato_stream.jsonl",
   "_hato_result_schema.json",
 ]);
+const IGNORED_ARTIFACT_EXTENSIONS = new Set([".jsonl", ".log", ".tmp", ".bak"]);
 
 /**
  * Snapshot regular files in an isolated workspace before worker execution
@@ -209,6 +210,7 @@ function collectNewArtifacts(
     const baseName = rel.split("/").pop() ?? rel;
     if (IGNORED_ARTIFACT_NAMES.has(baseName)) continue;
     const ext = baseName.includes(".") ? `.${baseName.split(".").pop()!.toLowerCase()}` : "";
+    if (IGNORED_ARTIFACT_EXTENSIONS.has(ext)) continue;
     artifacts.push({
       path: resolve(workspaceDir, rel),
       filename: baseName,

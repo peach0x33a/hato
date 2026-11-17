@@ -13,6 +13,7 @@ import {
   Send,
   Trash2,
 } from "lucide-react";
+import { ConsoleSelect } from "@/components/console/ConsolePrimitives";
 import {
   API_OVERRIDE_OPTIONS,
   formatTokenCount,
@@ -345,11 +346,11 @@ export function ModelRow({
       <AnimatePresence initial={false}>
         {isExpanded ? (
           <motion.div
-            initial={prefersReducedMotion ? false : { opacity: 0, height: 0 }}
-            animate={{ opacity: 1, height: "auto" }}
-            exit={prefersReducedMotion ? undefined : { opacity: 0, height: 0 }}
+            initial={prefersReducedMotion ? false : { opacity: 0, height: 0, overflow: "hidden" }}
+            animate={{ opacity: 1, height: "auto", transitionEnd: { overflow: "visible" } }}
+            exit={prefersReducedMotion ? undefined : { opacity: 0, height: 0, overflow: "hidden" }}
             transition={{ duration: 0.16, ease: [0.16, 1, 0.3, 1] }}
-            className="overflow-hidden"
+            style={prefersReducedMotion ? undefined : { overflow: "hidden" }}
           >
             <div className="mt-2.5 mb-2 flex flex-col gap-4 rounded-lg border border-zinc-200/80 bg-zinc-50/50 p-4 dark:border-zinc-800/80 dark:bg-[#0b1014]/50">
               {/* Section 1: Model ID & Display Name */}
@@ -544,29 +545,18 @@ export function ModelRow({
               {/* Section 3: Protocol Override, Base URL Override & Custom Headers */}
               <div className="grid grid-cols-1 gap-3.5 border-t border-zinc-200/80 pt-3.5 md:grid-cols-3 dark:border-zinc-800/80">
                 <div className="flex flex-col gap-1.5">
-                  <label
-                    htmlFor={`api-override-${model.uid}`}
-                    className="text-xs font-medium text-zinc-600 dark:text-zinc-400"
-                  >
+                  <span className="text-xs font-medium text-zinc-600 dark:text-zinc-400">
                     覆盖协议
-                  </label>
-                  <div className="relative">
-                    <select
-                      id={`api-override-${model.uid}`}
-                      value={model.advanced.apiOverride}
-                      onChange={(e) =>
-                        onUpdateAdvanced({ apiOverride: e.target.value })
-                      }
-                      className="h-9 w-full appearance-none rounded-lg border border-zinc-200 bg-white pr-8 pl-3 text-xs text-zinc-900 focus:border-emerald-500 focus:outline-none dark:border-zinc-800 dark:bg-[#090d10] dark:text-zinc-100"
-                    >
-                      {API_OVERRIDE_OPTIONS.map((opt) => (
-                        <option key={opt.value} value={opt.value}>
-                          {opt.label}
-                        </option>
-                      ))}
-                    </select>
-                    <ChevronDown className="pointer-events-none absolute top-1/2 right-2.5 h-3.5 w-3.5 -translate-y-1/2 text-zinc-400" />
-                  </div>
+                  </span>
+                  <ConsoleSelect
+                    value={model.advanced.apiOverride}
+                    onValueChange={(next) => onUpdateAdvanced({ apiOverride: next })}
+                    options={API_OVERRIDE_OPTIONS.map((opt) => ({
+                      value: opt.value,
+                      label: opt.label,
+                    }))}
+                    triggerClassName="bg-white border-zinc-200 dark:border-zinc-800 dark:bg-[#090d10]"
+                  />
                 </div>
 
                 <div className="flex flex-col gap-1.5">

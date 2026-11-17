@@ -21,6 +21,7 @@ import type { ScopedProxyRouter } from "../config/proxy.js";
 import { getOptionalSecret, reloadSecretEnv } from "../config/secrets.js";
 import { mergeEnvFile, readEnvMap, writeHatoConfig, writeModelsConfig } from "../config/store.js";
 import type { HatoRepository } from "../db/repo.js";
+import type { TicketCoordinator } from "../dispatch/coordinator.js";
 import { formatGatewayMessageLog } from "../gateway/msg-log.js";
 import type { CompactionManager } from "../memory/compaction.js";
 import type { MemoryCurator } from "../memory/curator.js";
@@ -33,15 +34,20 @@ import {
   upsertPromptBlock,
 } from "../persona/prompts.js";
 import {
+  fetchTelegramUserProfiles,
   probeAdHocModel,
   probeModelSlot,
   probeTavilySearch,
   probeTelegramGateway,
+  type TelegramUserProfileResult,
 } from "../setup/probe.js";
 import { parseSinceSpec, summarizeTurnTraces } from "../stats/metrics.js";
 import { logInfo, summarizeError } from "../utils/logger.js";
 import {
+  EXTERNAL_CLI_BACKENDS,
   probeAllExternalClis,
+  probeExternalCliModels,
+  type ExternalCliBackend,
   type ExternalCliProbeEntry,
 } from "../worker/cli-probe.js";
 
@@ -64,6 +70,7 @@ export interface WebConsoleServerDeps {
   getBrowserRuntime: () => BrowserRuntime;
   getCompactionManager: () => CompactionManager;
   getMemoryCurator?: () => MemoryCurator;
+  getTicketCoordinator?: () => TicketCoordinator;
   getActorLock: () => ActorLock;
   getSlashDeps: (canonicalUserId: string) => SlashCommandDeps;
   reloadAll: () => Promise<WebConsoleReloadResult>;
@@ -96,6 +103,10 @@ export class WebConsoleServer {
   private readonly startedAtMs = Date.now();
   private readonly envPath: string;
   private readonly staticDir: string;
+  private readonly tgProfileCache = new Map<
+    string,
+    { expiresAt: number; profile: TelegramUserProfileResult }
+  >();
 
   constructor(private readonly deps: WebConsoleServerDeps) {
     this.envPath = deps.envPath ?? ".env";
@@ -228,12 +239,28 @@ export class WebConsoleServer {
           await this.handleProbe(req, res);
           return;
         }
+        if (pathname === "/api/gateway/telegram/users" && method === "POST") {
+          await this.handleTelegramUsersLookup(req, res);
+          return;
+        }
         if (pathname === "/api/worker/cli-probe" && (method === "GET" || method === "POST")) {
           await this.handleWorkerCliProbe(res);
           return;
         }
+        if (pathname === "/api/worker/cli-models" && method === "GET") {
+          await this.handleWorkerCliModels(parsedUrl, res);
+          return;
+        }
         if (pathname === "/api/statics" && method === "GET") {
           this.handleStatics(parsedUrl, res);
+          return;
+        }
+        if (pathname === "/api/tickets" && method === "GET") {
+          this.handleListTickets(res);
+          return;
+        }
+        if (pathname === "/api/tickets/confirm" && method === "POST") {
+          await this.handleTicketConfirm(req, res);
           return;
         }
         if (pathname === "/api/browser/status" && method === "GET") {
@@ -341,7 +368,11 @@ export class WebConsoleServer {
       rawMessages = repo.getHotMessages(uid, wm.compactedUntilTs);
     }
 
-    const messages = rawMessages.map((m) => ({
+    const visibleMessages = rawMessages.filter(
+      (m) => !(m.role === "executed_event" && /^\[?工单\s/.test(m.content)),
+    );
+
+    const messages = visibleMessages.map((m) => ({
       ...m,
       bubbles:
         m.role === "assistant"
@@ -471,8 +502,20 @@ export class WebConsoleServer {
       const compactionManager = this.deps.getCompactionManager();
       const personaRuntime = this.deps.getPersonaRuntime();
       const actorLock = this.deps.getActorLock();
+      const ticketCoordinator = this.deps.getTicketCoordinator?.();
 
       await actorLock.run(uid, async () => {
+        if (ticketCoordinator) {
+          const routed = await ticketCoordinator
+            .tryRouteInboundToTicket(batch)
+            .catch(() => ({ handledByTicket: false as const }));
+          if (routed.handledByTicket) {
+            const ackBubbles = [`已收到补充说明，正在继续执行工单 ${routed.ticketId ?? ""}…`];
+            emit({ type: "assistant_bubbles", bubbles: ackBubbles });
+            return;
+          }
+        }
+
         const output = await personaRuntime.handleUserBatch(batch, loadedImages, {
           sendPhotoToUser: async (photo, caption) => {
             const dataUrl = `data:image/png;base64,${photo.toString("base64")}`;
@@ -906,6 +949,76 @@ export class WebConsoleServer {
     sendJson(res, 200, { ok: true, results });
   }
 
+  private async handleTelegramUsersLookup(
+    req: IncomingMessage,
+    res: ServerResponse,
+  ): Promise<void> {
+    const body = (await readJsonBody(req).catch(() => ({}))) as {
+      userIds?: unknown;
+      refresh?: unknown;
+    };
+    const hato = this.deps.getConfig();
+    const refresh = body.refresh === true;
+    const rawIds = Array.isArray(body.userIds)
+      ? body.userIds.filter((v): v is string | number => typeof v === "string" || typeof v === "number")
+      : hato.owner.channels.tg.user_ids;
+
+    const cleanIds: string[] = [];
+    const seen = new Set<string>();
+    for (const raw of rawIds) {
+      const id = String(raw).trim();
+      if (!id || seen.has(id)) continue;
+      seen.add(id);
+      cleanIds.push(id);
+      if (cleanIds.length >= 25) break;
+    }
+
+    const baseUrl = hato.gateway.telegram.base_url.replace(/\/+$/, "");
+    const envMap = readEnvMap(this.envPath);
+    const botToken =
+      envMap[hato.gateway.telegram.bot_token_env]?.trim() ||
+      process.env[hato.gateway.telegram.bot_token_env]?.trim() ||
+      "";
+
+    const now = Date.now();
+    const resultsById = new Map<string, TelegramUserProfileResult>();
+    const missingIds: string[] = [];
+
+    for (const id of cleanIds) {
+      const cacheKey = `${baseUrl}::${id}`;
+      const cached = !refresh ? this.tgProfileCache.get(cacheKey) : undefined;
+      if (cached && cached.expiresAt > now) {
+        resultsById.set(id, cached.profile);
+      } else {
+        missingIds.push(id);
+      }
+    }
+
+    if (missingIds.length > 0) {
+      const fetched = await fetchTelegramUserProfiles({
+        baseUrl,
+        botToken,
+        userIds: missingIds,
+        proxyRouter: this.deps.getProxyRouter(),
+      });
+      const ttlMs = 5 * 60_000;
+      for (const profile of fetched) {
+        resultsById.set(profile.id, profile);
+        if (profile.ok) {
+          this.tgProfileCache.set(`${baseUrl}::${profile.id}`, {
+            expiresAt: Date.now() + ttlMs,
+            profile,
+          });
+        }
+      }
+    }
+
+    const profiles = cleanIds
+      .map((id) => resultsById.get(id))
+      .filter((p): p is TelegramUserProfileResult => Boolean(p));
+    sendJson(res, 200, { ok: true, profiles });
+  }
+
   private async handleTestModel(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const body = (await readJsonBody(req)) as {
       providerSlug?: unknown;
@@ -987,6 +1100,49 @@ export class WebConsoleServer {
       permissionPreset: resolved.permissionPreset,
       probes,
     });
+  }
+
+  private async handleWorkerCliModels(url: URL, res: ServerResponse): Promise<void> {
+    const rawBackend = url.searchParams.get("backend")?.trim() ?? "";
+    if (!EXTERNAL_CLI_BACKENDS.includes(rawBackend as ExternalCliBackend)) {
+      sendJson(res, 400, { ok: false, error: `不支持的后端: ${rawBackend || "(空)"}` });
+      return;
+    }
+    const backend = rawBackend as ExternalCliBackend;
+    const models = await probeExternalCliModels(backend, this.deps.getConfig());
+    sendJson(res, 200, { ok: true, backend, models });
+  }
+
+  private handleListTickets(res: ServerResponse): void {
+    const repo = this.deps.getRepo();
+    const uid = this.deps.getConfig().owner.canonical_user_id;
+    const tickets = repo.listTickets(uid, 15).map((t) => ({
+      id: t.id,
+      status: t.status,
+      backend: t.backend,
+      briefTitle: t.briefTitle,
+      originChannel: t.originChannel,
+      progressNote: t.progressNote,
+      createdAt: t.createdAt,
+      updatedAt: t.updatedAt,
+    }));
+    sendJson(res, 200, { ok: true, tickets });
+  }
+
+  private async handleTicketConfirm(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    const coordinator = this.deps.getTicketCoordinator?.();
+    if (!coordinator) {
+      sendJson(res, 503, { ok: false, error: "当前实例未启用后台工单协调器" });
+      return;
+    }
+    const body = (await readJsonBody(req)) as { ticketId?: unknown; approved?: unknown };
+    const ticketId = typeof body.ticketId === "string" ? body.ticketId.trim() : "";
+    if (!ticketId) {
+      sendJson(res, 400, { ok: false, error: "ticketId 不能为空" });
+      return;
+    }
+    const message = await coordinator.handleConfirmAction(ticketId, Boolean(body.approved));
+    sendJson(res, 200, { ok: true, message });
   }
 
   private handleStatics(url: URL, res: ServerResponse): void {
@@ -1233,10 +1389,17 @@ export class WebConsoleServer {
     const ext = extname(targetPath).toLowerCase();
     const contentType = MIME_TYPES[ext] ?? "application/octet-stream";
     const bytes = readFileSync(targetPath);
+    const cacheControl =
+      ext === ".html"
+        ? "no-store, no-cache, must-revalidate"
+        : cleanRel.startsWith("assets/")
+          ? "public, max-age=31536000, immutable"
+          : "no-cache";
 
     res.writeHead(200, {
       "Content-Type": contentType,
       "Content-Length": bytes.byteLength,
+      "Cache-Control": cacheControl,
     });
     if (headOnly) {
       res.end();

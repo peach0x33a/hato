@@ -5,8 +5,8 @@ import { join } from "node:path";
 import test from "node:test";
 import { ScopedProxyRouter } from "../src/config/proxy.js";
 import { createDefaultHatoConfig } from "../src/setup/presets.js";
-import { agyCliAdapter } from "../src/worker/adapters/agy.js";
-import { codexCliAdapter } from "../src/worker/adapters/codex.js";
+import { antigravityCliAdapter } from "../src/worker/adapters/antigravity-cli.js";
+import { codexCliAdapter } from "../src/worker/adapters/codex-cli.js";
 import { openCodeV2CliAdapter } from "../src/worker/adapters/opencode-v2.js";
 import { ExternalCliRunner } from "../src/worker/external-cli.js";
 import {
@@ -14,7 +14,7 @@ import {
   snapshotWorkspaceFiles,
 } from "../src/worker/result-normalizer.js";
 
-test("Tier 1 CLI adapters parse real NDJSON formats and build start/resume args", () => {
+test("CLI adapters parse real NDJSON formats and build start/resume args", () => {
   const codexStart = codexCliAdapter.parseStreamLine(
     '{"type":"thread.started","thread_id":"th_123"}',
   );
@@ -28,15 +28,15 @@ test("Tier 1 CLI adapters parse real NDJSON formats and build start/resume args"
   );
   assert.equal(codexMsg?.finalText, "All tests pass");
 
-  const agyInit = agyCliAdapter.parseStreamLine(
+  const agyInit = antigravityCliAdapter.parseStreamLine(
     '{"event":"init","conversation_id":"conv_99","init":{"cwd":"/tmp"}}',
   );
   assert.equal(agyInit?.sessionId, "conv_99");
-  const agyDelta = agyCliAdapter.parseStreamLine(
+  const agyDelta = antigravityCliAdapter.parseStreamLine(
     '{"event":"step_update","step_update":{"conversation_id":"conv_99","step_index":1,"state":"ACTIVE","step_type":"agent_response","text_delta":"2"}}',
   );
   assert.equal(agyDelta?.textDelta, "2");
-  const agyDone = agyCliAdapter.parseStreamLine(
+  const agyDone = antigravityCliAdapter.parseStreamLine(
     '{"event":"result","result":{"conversation_id":"conv_99","status":"SUCCESS","response":"2\\n"}}',
   );
   assert.equal(agyDone?.finalText, "2\n");
@@ -91,12 +91,12 @@ test("normalizeExternalCliResult detects artifacts, needs_input questions, and _
   }
 });
 
-test("ExternalCliRunner runs mocked agy/codex stream and enforces OpenCode V2 gate", async () => {
+test("ExternalCliRunner runs mocked antigravity-cli/codex-cli stream and enforces OpenCode V2 gate", async () => {
   const tempDir = mkdtempSync(join(tmpdir(), "hato-ext-runner-"));
   const cfg = createDefaultHatoConfig();
   cfg.paths.workspaces_dir = join(tempDir, "workspaces");
   cfg.paths.sqlite = join(tempDir, "hato.db");
-  cfg.worker.external_cli.agy = {
+  cfg.worker.external_cli.antigravity_cli = {
     enabled: true,
     command: process.execPath,
   };
@@ -169,7 +169,7 @@ console.log(JSON.stringify({ event: "result", result: { conversation_id: "agy_co
       {
         ticketId: "t_agy_ok",
         canonicalUserId: "owner",
-        backend: "agy",
+        backend: "antigravity-cli",
         briefTitle: "写脚本",
         contextId: "ctx_t_agy_ok",
         externalSessionId: null,

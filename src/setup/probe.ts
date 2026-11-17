@@ -122,6 +122,205 @@ export async function probeTelegramGateway(params: {
   }
 }
 
+export interface TelegramUserProfileResult {
+  id: string;
+  ok: boolean;
+  firstName?: string;
+  lastName?: string;
+  username?: string;
+  displayName?: string;
+  avatarDataUrl?: string;
+  error?: string;
+}
+
+const MAX_TELEGRAM_AVATAR_BYTES = 512 * 1024;
+
+function inferImageMimeType(filePath: string, headerType: string | null): string {
+  const cleanHeader = headerType?.split(";")[0]?.trim().toLowerCase() ?? "";
+  if (cleanHeader.startsWith("image/")) {
+    return cleanHeader;
+  }
+  const lower = filePath.toLowerCase();
+  if (lower.endsWith(".png")) return "image/png";
+  if (lower.endsWith(".webp")) return "image/webp";
+  if (lower.endsWith(".gif")) return "image/gif";
+  return "image/jpeg";
+}
+
+async function fetchSingleTelegramUserProfile(params: {
+  cleanBaseUrl: string;
+  token: string;
+  userId: string;
+  proxyRouter: ScopedProxyRouter;
+  timeoutMs: number;
+}): Promise<TelegramUserProfileResult> {
+  const { cleanBaseUrl, token, userId, proxyRouter, timeoutMs } = params;
+  const scope = "gateway.telegram";
+
+  try {
+    const chatUrl = `${cleanBaseUrl}/bot${token}/getChat?chat_id=${encodeURIComponent(userId)}`;
+    const chatRes = await proxyRouter.scopedFetch(
+      chatUrl,
+      { method: "GET", signal: AbortSignal.timeout(timeoutMs) },
+      scope,
+    );
+    const chatData = (await chatRes.json().catch(() => null)) as {
+      ok?: boolean;
+      description?: string;
+      result?: {
+        id?: number;
+        first_name?: string;
+        last_name?: string;
+        username?: string;
+        title?: string;
+        photo?: {
+          small_file_id?: string;
+          big_file_id?: string;
+        };
+      };
+    } | null;
+
+    if (!chatRes.ok || !chatData?.ok || !chatData.result) {
+      return {
+        id: userId,
+        ok: false,
+        error: chatData?.description
+          ? `Telegram HTTP ${chatRes.status}: ${chatData.description}`
+          : `Telegram HTTP ${chatRes.status}`,
+      };
+    }
+
+    const r = chatData.result;
+    const firstName = r.first_name?.trim() || undefined;
+    const lastName = r.last_name?.trim() || undefined;
+    const username = r.username?.trim() || undefined;
+    const fullName = [firstName, lastName].filter(Boolean).join(" ").trim();
+    const displayName =
+      fullName || r.title?.trim() || (username ? `@${username}` : undefined);
+
+    let fileId = r.photo?.small_file_id?.trim() || r.photo?.big_file_id?.trim() || "";
+    if (!fileId && /^\d+$/.test(userId)) {
+      try {
+        const photosUrl = `${cleanBaseUrl}/bot${token}/getUserProfilePhotos?user_id=${encodeURIComponent(userId)}&limit=1`;
+        const photosRes = await proxyRouter.scopedFetch(
+          photosUrl,
+          { method: "GET", signal: AbortSignal.timeout(timeoutMs) },
+          scope,
+        );
+        const photosData = (await photosRes.json().catch(() => null)) as {
+          ok?: boolean;
+          result?: {
+            photos?: Array<Array<{ file_id?: string }>>;
+          };
+        } | null;
+        const firstSizes = photosData?.ok ? photosData.result?.photos?.[0] : undefined;
+        if (firstSizes && firstSizes.length > 0) {
+          fileId = firstSizes[0]?.file_id?.trim() || "";
+        }
+      } catch {
+        // Photo lookup fallback is optional; keep user name/id.
+      }
+    }
+
+    let avatarDataUrl: string | undefined;
+    if (fileId) {
+      try {
+        const getFileUrl = `${cleanBaseUrl}/bot${token}/getFile?file_id=${encodeURIComponent(fileId)}`;
+        const fileRes = await proxyRouter.scopedFetch(
+          getFileUrl,
+          { method: "GET", signal: AbortSignal.timeout(timeoutMs) },
+          scope,
+        );
+        const fileData = (await fileRes.json().catch(() => null)) as {
+          ok?: boolean;
+          result?: { file_path?: string };
+        } | null;
+        const filePath = fileData?.ok ? fileData.result?.file_path?.trim() : undefined;
+        if (filePath) {
+          const cleanPath = filePath.replace(/^\/+/, "");
+          const downloadUrl = `${cleanBaseUrl}/file/bot${token}/${cleanPath}`;
+          const imgRes = await proxyRouter.scopedFetch(
+            downloadUrl,
+            { method: "GET", signal: AbortSignal.timeout(timeoutMs) },
+            scope,
+          );
+          if (imgRes.ok) {
+            const buf = await imgRes.arrayBuffer();
+            if (buf.byteLength > 0 && buf.byteLength <= MAX_TELEGRAM_AVATAR_BYTES) {
+              const mime = inferImageMimeType(cleanPath, imgRes.headers.get("content-type"));
+              avatarDataUrl = `data:${mime};base64,${Buffer.from(buf).toString("base64")}`;
+            }
+          }
+        }
+      } catch {
+        // Avatar download failure should not hide user name/username.
+      }
+    }
+
+    return {
+      id: userId,
+      ok: true,
+      firstName,
+      lastName,
+      username,
+      displayName,
+      avatarDataUrl,
+    };
+  } catch (err) {
+    return {
+      id: userId,
+      ok: false,
+      error: err instanceof Error ? err.message : String(err),
+    };
+  }
+}
+
+/**
+ * Fetch Telegram user profile metadata (display name, username, avatar data URL)
+ * via Bot API under the `gateway.telegram` proxy scope.
+ */
+export async function fetchTelegramUserProfiles(params: {
+  baseUrl: string;
+  botToken: string;
+  userIds: Array<string | number>;
+  proxyRouter: ScopedProxyRouter;
+  timeoutMs?: number;
+}): Promise<TelegramUserProfileResult[]> {
+  const cleanBaseUrl = params.baseUrl.replace(/\/+$/, "");
+  const token = params.botToken.trim();
+  const seen = new Set<string>();
+  const uniqueIds: string[] = [];
+  for (const raw of params.userIds) {
+    const id = String(raw).trim();
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    uniqueIds.push(id);
+    if (uniqueIds.length >= 25) break;
+  }
+
+  if (uniqueIds.length === 0) return [];
+  if (!token) {
+    return uniqueIds.map((id) => ({
+      id,
+      ok: false,
+      error: "Bot Token 未配置",
+    }));
+  }
+
+  const timeoutMs = params.timeoutMs ?? 8_000;
+  return Promise.all(
+    uniqueIds.map((userId) =>
+      fetchSingleTelegramUserProfile({
+        cleanBaseUrl,
+        token,
+        userId,
+        proxyRouter: params.proxyRouter,
+        timeoutMs,
+      }),
+    ),
+  );
+}
+
 export interface AdHocModelProbeResult {
   ok: boolean;
   target: string;

@@ -80,6 +80,7 @@ args = ["-y", "@upstash/context7-mcp"]
     hatoConfig.worker.external_cli.reuse_host_auth_and_provider = true;
     hatoConfig.worker.external_cli.inherit_host_mcp = false;
     hatoConfig.worker.external_cli.host_mcp_allowlist = ["context7"];
+    hatoConfig.worker.external_cli.env = { PIP_INDEX_URL: "https://pypi.tuna.tsinghua.edu.cn/simple" };
 
     const mcpConfig: McpConfig = {
       servers: {
@@ -118,9 +119,9 @@ args = ["-y", "@upstash/context7-mcp"]
       MEMORYECHO_API_KEY: "must-never-leak-2",
     };
 
-    // 1. Codex overlay (isolated workspace)
+    // 1. Codex CLI overlay (isolated workspace)
     const codexOverlay = prepareExternalCliOverlay({
-      backend: "codex",
+      backend: "codex-cli",
       ticketId: "t_0001",
       workspaceDir: ticketWorkspace,
       isHostRepo: false,
@@ -165,9 +166,9 @@ args = ["-y", "@upstash/context7-mcp"]
       true,
     );
 
-    // 2. agy overlay against real host repo: must NOT dirty hostRepoDir
+    // 2. Antigravity CLI overlay against real host repo: must NOT dirty hostRepoDir
     const agyOverlay = prepareExternalCliOverlay({
-      backend: "agy",
+      backend: "antigravity-cli",
       ticketId: "t_0002",
       workspaceDir: hostRepoDir,
       isHostRepo: true,
@@ -215,6 +216,11 @@ args = ["-y", "@upstash/context7-mcp"]
     assert.ok(ocJson.mcp.hato_context);
     assert.ok(ocJson.mcp.worker_gh);
     assert.equal("personal_notes" in ocJson.mcp, false);
+    assert.deepEqual(ocJson.permissions, [{ action: "*", resource: "*", effect: "allow" }]);
+    assert.equal(
+      ocOverlay.env.PIP_INDEX_URL,
+      "https://pypi.tuna.tsinghua.edu.cn/simple",
+    );
   } finally {
     delete process.env.TEST_WORKER_MCP_KEY;
     rmSync(tempDir, { recursive: true, force: true });

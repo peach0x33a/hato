@@ -2,8 +2,8 @@ import { Type, type Static } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
 
 export const WORKER_BACKENDS = [
-  "codex",
-  "agy",
+  "codex-cli",
+  "antigravity-cli",
   "opencode-v2",
   "external-pi",
   "claude-code",
@@ -11,8 +11,8 @@ export const WORKER_BACKENDS = [
 ] as const;
 
 export const WorkerBackendSchema = Type.Union([
-  Type.Literal("codex"),
-  Type.Literal("agy"),
+  Type.Literal("codex-cli"),
+  Type.Literal("antigravity-cli"),
   Type.Literal("opencode-v2"),
   Type.Literal("external-pi"),
   Type.Literal("claude-code"),
@@ -41,6 +41,7 @@ export const MandateSchema = Type.Object({
   skills: Type.Array(Type.String()),
   allowed_mcp_servers: Type.Array(Type.String()),
   confirm_before: Type.Array(Type.String()),
+  deliver_files: Type.Optional(Type.Boolean()),
 });
 export type WorkerMandate = Static<typeof MandateSchema>;
 

@@ -12,6 +12,7 @@ import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { parse as parseToml, stringify as stringifyToml } from "smol-toml";
 import {
+  resolveExternalCliCustomEnv,
   resolveWorkerExternalCliConfig,
   type HatoConfig,
 } from "../config/app.js";
@@ -177,8 +178,10 @@ export function prepareExternalCliOverlay(
     }
   }
 
-  if (params.backend === "codex") {
-    const shadowCodexHome = resolve(runtimeRootDir, "codex", ticketToken);
+  const customEnv = resolveExternalCliCustomEnv(params.hatoConfig);
+
+  if (params.backend === "codex-cli") {
+    const shadowCodexHome = resolve(runtimeRootDir, "codex-cli", ticketToken);
     mkdirSync(shadowCodexHome, { recursive: true });
 
     if (extCfg.reuseHostAuthAndProvider) {
@@ -267,6 +270,7 @@ export function prepareExternalCliOverlay(
         baseEnv: params.baseEnv,
         workerProxyEnv: params.workerProxyEnv,
         extraEnv: {
+          ...customEnv,
           ...mcpSecretEnv,
           CODEX_HOME: shadowCodexHome,
         },
@@ -276,8 +280,8 @@ export function prepareExternalCliOverlay(
     };
   }
 
-  if (params.backend === "agy") {
-    const agyOverlayDir = resolve(runtimeRootDir, "agy", ticketToken);
+  if (params.backend === "antigravity-cli") {
+    const agyOverlayDir = resolve(runtimeRootDir, "antigravity-cli", ticketToken);
     mkdirSync(agyOverlayDir, { recursive: true });
 
     const mcpServersMap = buildStandardMcpServersMap({
@@ -309,7 +313,10 @@ export function prepareExternalCliOverlay(
       env: buildCleanWorkerEnv({
         baseEnv: params.baseEnv,
         workerProxyEnv: params.workerProxyEnv,
-        extraEnv: mcpSecretEnv,
+        extraEnv: {
+          ...customEnv,
+          ...mcpSecretEnv,
+        },
       }),
       stagedSkillsDir,
       generatedFiles,
@@ -383,6 +390,9 @@ export function prepareExternalCliOverlay(
     const nextOpenCodeObj: Record<string, unknown> = {
       ...baseOpenCodeObj,
       mcp: nextMcp,
+      ...(resolvedMode.effectiveOptions.permission_mode === "full_access"
+        ? { permissions: [{ action: "*", resource: "*", effect: "allow" }] }
+        : {}),
     };
     const overlayConfigPath = join(ocOverlayDir, "opencode.json");
     writeFileSync(overlayConfigPath, `${JSON.stringify(nextOpenCodeObj, null, 2)}\n`, "utf8");
@@ -397,6 +407,7 @@ export function prepareExternalCliOverlay(
         baseEnv: params.baseEnv,
         workerProxyEnv: params.workerProxyEnv,
         extraEnv: {
+          ...customEnv,
           ...mcpSecretEnv,
           OPENCODE_CONFIG: overlayConfigPath,
         },
@@ -430,7 +441,10 @@ export function prepareExternalCliOverlay(
       env: buildCleanWorkerEnv({
         baseEnv: params.baseEnv,
         workerProxyEnv: params.workerProxyEnv,
-        extraEnv: mcpSecretEnv,
+        extraEnv: {
+          ...customEnv,
+          ...mcpSecretEnv,
+        },
       }),
       stagedSkillsDir,
       generatedFiles,
@@ -445,7 +459,10 @@ export function prepareExternalCliOverlay(
     env: buildCleanWorkerEnv({
       baseEnv: params.baseEnv,
       workerProxyEnv: params.workerProxyEnv,
-      extraEnv: mcpSecretEnv,
+      extraEnv: {
+        ...customEnv,
+        ...mcpSecretEnv,
+      },
     }),
     stagedSkillsDir,
     generatedFiles,
@@ -454,8 +471,8 @@ export function prepareExternalCliOverlay(
 
 function resolveBackendCommand(backend: ExternalCliBackend, config: HatoConfig): string {
   const ext = config.worker.external_cli;
-  if (backend === "codex") return ext.codex?.command?.trim() || "codex";
-  if (backend === "agy") return ext.agy?.command?.trim() || "agy";
+  if (backend === "codex-cli") return ext.codex_cli?.command?.trim() || "codex";
+  if (backend === "antigravity-cli") return ext.antigravity_cli?.command?.trim() || "agy";
   if (backend === "opencode-v2") return ext.opencode_v2?.command?.trim() || "opencode";
   if (backend === "external-pi") return ext.external_pi?.command?.trim() || "pi";
   return ext.claude_code?.command?.trim() || "claude";

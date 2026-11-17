@@ -140,6 +140,7 @@ export function ConsoleFormRow({
 export interface ConsoleSelectOption {
   value: string;
   label: string;
+  icon?: ReactNode;
 }
 
 export interface ConsoleSelectProps {
@@ -151,6 +152,7 @@ export interface ConsoleSelectProps {
   size?: "sm" | "md";
   disabled?: boolean;
   className?: string;
+  triggerClassName?: string;
 }
 
 export function ConsoleSelect({
@@ -162,6 +164,7 @@ export function ConsoleSelect({
   size = "md",
   disabled,
   className,
+  triggerClassName,
 }: ConsoleSelectProps) {
   const [open, setOpen] = useState(false);
 
@@ -179,15 +182,23 @@ export function ConsoleSelect({
       >
         <SelectTrigger
           className={cn(
-            "rounded-lg border-input bg-transparent px-2.5 py-0 text-xs transition-colors hover:bg-muted/35",
+            "border-input bg-transparent px-2.5 py-0 text-xs transition-colors hover:bg-muted/35",
+            open && "bg-background",
             size === "sm" ? "h-8" : "h-9",
+            triggerClassName,
           )}
         >
           <SelectValue placeholder={placeholder} className="text-xs" />
         </SelectTrigger>
-        <SelectContent className="z-50 max-h-60 overflow-y-auto rounded-lg shadow-sm">
+        <SelectContent className="z-50 shadow-sm">
           {options.map((opt) => (
-            <SelectItem key={opt.value} value={opt.value} className="text-xs">
+            <SelectItem
+              key={opt.value}
+              value={opt.value}
+              label={opt.label}
+              icon={opt.icon}
+              className="text-xs"
+            >
               {opt.label}
             </SelectItem>
           ))}

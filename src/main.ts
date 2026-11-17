@@ -1,3 +1,4 @@
+import { basename } from "node:path";
 import { ActorLock, EventBus } from "./bus/actor-bus.js";
 import { BrowserRuntime } from "./browser/runtime.js";
 import { tryHandleSlashCommand } from "./commands/slash.js";
@@ -20,9 +21,10 @@ import { openDatabase } from "./db/client.js";
 import { HatoRepository } from "./db/repo.js";
 import { TicketCoordinator } from "./dispatch/coordinator.js";
 import { NeutralRouter } from "./dispatch/router.js";
+import { parseWorkerMandate } from "./dispatch/schema.js";
 import { MessageDebouncer, mergeInboundBatches } from "./gateway/debouncer.js";
 import { TelegramAdapter } from "./gateway/tg.js";
-import type { InboundBatch } from "./gateway/types.js";
+import type { ChannelName, InboundBatch } from "./gateway/types.js";
 import { McpClientPool } from "./mcp/pool.js";
 import { CompactionManager } from "./memory/compaction.js";
 import { MemoryCurator } from "./memory/curator.js";
@@ -115,6 +117,23 @@ async function main(): Promise<void> {
     bus,
   });
   personaRuntime.setDelegateHandler((input) => ticketCoordinator.enqueueDelegation(input));
+  personaRuntime.setSendFileHandler(async ({ channel, path, caption }) => {
+    const tgTargetId = resolveTgTarget();
+    if (channel === "web") {
+      return {
+        ok: false,
+        message: `Web Console 暂不支持直接发送文件附件，本地路径为: ${path}`,
+      };
+    }
+    if (!tgAdapter || !tgTargetId) {
+      return {
+        ok: false,
+        message: `Telegram 网关未就绪或未绑定 owner，无法发送文件: ${path}`,
+      };
+    }
+    await tgAdapter.sendFile(tgTargetId, path, basename(path), caption);
+    return { ok: true, message: `已发送文件到 Telegram: ${basename(path)}` };
+  });
 
   const compactionManager = new CompactionManager(
     {
@@ -356,9 +375,14 @@ async function main(): Promise<void> {
     return first !== undefined ? String(first) : null;
   };
 
-  bus.on("ticket_result", async ({ canonicalUserId, briefTitle, result }) => {
+  bus.on("ticket_result", async ({ canonicalUserId, originChannel, briefTitle, result }) => {
     const tgTargetId = resolveTgTarget();
-    if (!tgAdapter || !tgTargetId) return;
+    const hasTg = Boolean(tgAdapter && tgTargetId);
+    const deliverToTg = hasTg && originChannel !== "web";
+    if (!deliverToTg && originChannel !== "web") {
+      // Allow offline/TG-disabled sessions to still record background results for Web Console.
+    }
+    const deliveryChannel: ChannelName = originChannel === "web" || !hasTg ? "web" : originChannel;
 
     await actorLock.run(canonicalUserId, async () => {
       const caveatText =
@@ -367,52 +391,103 @@ async function main(): Promise<void> {
         result.required_secrets.length > 0
           ? `\n所需环境变量密钥（勿发聊天窗口，请在 .env 配置）：${result.required_secrets.join(", ")}`
           : "";
+      const artifactNames =
+        result.artifacts.length > 0
+          ? `\n生成文件（如需发给用户可调用 send_file）：${result.artifacts.map((a) => `${a.filename} (${a.path})`).join(", ")}`
+          : "";
       const summary = `[工单 ${result.ticket_id} · ${briefTitle}] (${result.status}): ${result.narration_hint}${caveatText}${secretsNote}`;
 
       const bubbles = await personaRuntime.narrateBackgroundEvent({
         canonicalUserId,
-        channel: "tg",
+        channel: deliveryChannel,
         eventSummary: summary,
-        promptInstruction: `[系统事件：后台工单 "${briefTitle}" (${result.ticket_id}) 已结束，状态=${result.status}。请用自然口吻转述结果要点：${result.narration_hint}${caveatText}${secretsNote}]`,
+        promptInstruction: `[系统事件：后台任务 "${briefTitle}" (${result.ticket_id}) 已结束，状态=${result.status}。请用自然日常口吻直接告诉用户结果要点（除非出错或用户要求，不要主动报工单号，也不要倾倒冗长执行日志）：${result.narration_hint}${artifactNames}${caveatText}${secretsNote}]`,
       });
-      await tgAdapter!.sendBubbles(tgTargetId, bubbles, hatoConfig.gateway.bubbles.delay_ms_range);
+      if (deliverToTg) {
+        await tgAdapter!.sendBubbles(tgTargetId!, bubbles, hatoConfig.gateway.bubbles.delay_ms_range);
+      }
 
-      // Wall 3: send verbatim blocks and artifacts directly bypassing Persona so technical details stay intact.
+      // Wall 3: only send failure diagnostics or explicit code/diff blocks unprompted;
+      // prose "执行输出详情" reports stay in DB / trace for on-demand inspection via inspect_tickets.
+      const webVerbatimParts: string[] = [];
       for (const block of result.verbatim_blocks) {
+        const shouldAutoEmit =
+          result.status !== "done" ||
+          block.format === "code" ||
+          block.title.includes("git diff");
+        if (!shouldAutoEmit) continue;
         const text =
           block.format === "code"
             ? `**${block.title}**\n\`\`\`\n${block.content}\n\`\`\``
             : `**${block.title}**\n${block.content}`;
-        await tgAdapter!.sendText(tgTargetId, text);
+        webVerbatimParts.push(text);
+        if (deliverToTg) {
+          await tgAdapter!.sendText(tgTargetId!, text);
+        }
       }
+      const ticketRow = repo.getTicket(result.ticket_id);
+      const deliverFiles = Boolean(
+        parseWorkerMandate(ticketRow?.mandateJson ?? null)?.deliver_files,
+      );
       for (const artifact of result.artifacts) {
-        await tgAdapter!.sendFile(tgTargetId, artifact.path, artifact.filename).catch((err) => {
-          logWarn("TG", `failed to send artifact ${artifact.filename}: ${summarizeError(err)}`);
+        if (deliverToTg && (artifact.send_as === "photo" || deliverFiles)) {
+          await tgAdapter!.sendFile(tgTargetId!, artifact.path, artifact.filename).catch((err) => {
+            logWarn("TG", `failed to send artifact ${artifact.filename}: ${summarizeError(err)}`);
+          });
+        }
+      }
+
+      if (!deliverToTg && webVerbatimParts.length > 0) {
+        repo.appendRawMessage({
+          canonicalUserId,
+          channel: deliveryChannel,
+          role: "assistant",
+          content: webVerbatimParts.join("\n\n"),
+          createdAt: Date.now(),
         });
+        personaRuntime.refreshTranscriptFromDb();
       }
     });
   });
 
-  bus.on("ticket_needs_input", async ({ canonicalUserId, ticketId, briefTitle, question }) => {
+  bus.on("ticket_needs_input", async ({ canonicalUserId, originChannel, ticketId, briefTitle, question }) => {
     const tgTargetId = resolveTgTarget();
-    if (!tgAdapter || !tgTargetId) return;
+    const hasTg = Boolean(tgAdapter && tgTargetId);
+    const deliverToTg = hasTg && originChannel !== "web";
+    const deliveryChannel: ChannelName = originChannel === "web" || !hasTg ? "web" : originChannel;
+
     await actorLock.run(canonicalUserId, async () => {
       const bubbles = await personaRuntime.narrateBackgroundEvent({
         canonicalUserId,
-        channel: "tg",
+        channel: deliveryChannel,
         eventSummary: `工单 ${ticketId} (${briefTitle}) 需要补充信息: ${question}`,
         promptInstruction: `[系统事件：后台工单 "${briefTitle}" (${ticketId}) 需要用户补充以下信息后继续：${question}。请自然转达给用户。]`,
       });
-      await tgAdapter!.sendBubbles(tgTargetId, bubbles, hatoConfig.gateway.bubbles.delay_ms_range);
+      if (deliverToTg) {
+        await tgAdapter!.sendBubbles(tgTargetId!, bubbles, hatoConfig.gateway.bubbles.delay_ms_range);
+      }
     });
   });
 
-  bus.on("ticket_confirm_required", async ({ ticketId, briefTitle, promptText }) => {
+  bus.on("ticket_confirm_required", async ({ canonicalUserId, originChannel, ticketId, briefTitle, promptText }) => {
     const tgTargetId = resolveTgTarget();
-    if (!tgAdapter || !tgTargetId) return;
-    await tgAdapter.sendConfirm(tgTargetId, {
-      ticketId,
-      promptText: `工单 ${ticketId} (${briefTitle}) 请求确认高危操作：\n${promptText}`,
+    const hasTg = Boolean(tgAdapter && tgTargetId);
+    if (hasTg && originChannel !== "web") {
+      await tgAdapter!.sendConfirm(tgTargetId!, {
+        ticketId,
+        promptText: `工单 ${ticketId} (${briefTitle}) 请求确认高危操作：\n${promptText}`,
+      });
+      return;
+    }
+    await actorLock.run(canonicalUserId, async () => {
+      repo.appendRawMessage({
+        canonicalUserId,
+        channel: originChannel === "web" || !hasTg ? "web" : originChannel,
+        role: "executed_event",
+        content: `[工单 ${ticketId} · ${briefTitle}] 等待确认执行：${promptText}`,
+        createdAt: Date.now(),
+      });
+      personaRuntime.refreshTranscriptFromDb();
     });
   });
 
@@ -525,6 +600,7 @@ async function main(): Promise<void> {
     getBrowserRuntime: () => browserRuntime,
     getCompactionManager: () => compactionManager,
     getMemoryCurator: () => memoryCurator,
+    getTicketCoordinator: () => ticketCoordinator,
     getActorLock: () => actorLock,
     getSlashDeps: (uid) => buildSlashDeps(uid),
     reloadAll,

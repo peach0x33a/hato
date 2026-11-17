@@ -238,18 +238,56 @@ export function runDateMath(query: DateMathQuery, nowMs: number, defaultTimezone
   return `${formatted.fullStamp} (${targetTz} · ${formatted.periodZh})`;
 }
 
-export function runInspectTickets(repo: HatoRepository, canonicalUserId: string, ticketId?: string): string {
+export function runInspectTickets(
+  repo: HatoRepository,
+  canonicalUserId: string,
+  ticketId?: string,
+  includeDetails = false,
+): string {
   const rows = repo.listTickets(canonicalUserId, 20);
   const filtered = ticketId ? rows.filter((t) => t.id === ticketId) : rows.slice(0, 10);
   if (filtered.length === 0) {
     return ticketId ? `未找到工单 ${ticketId}。` : "当前没有任何工单记录。";
   }
+  const showDetail = includeDetails || Boolean(ticketId);
   return filtered
-    .map((t) => {
+    .map((t, index) => {
       const note = t.progressNote ? ` | 进度: ${t.progressNote}` : "";
-      return `- [${t.id}] (${t.status} · ${t.backend}) ${t.briefTitle}${note}`;
+      const head = `- [${t.id}] (${t.status} · ${t.backend}) ${t.briefTitle}${note}`;
+      if (!showDetail || (!ticketId && index > 0) || !t.resultJson) {
+        return head;
+      }
+      try {
+        const parsed = JSON.parse(t.resultJson) as {
+          narration_hint?: string;
+          verbatim_blocks?: Array<{ title?: string; format?: string; content?: string }>;
+          artifacts?: Array<{ filename?: string; path?: string }>;
+          caveats?: string[];
+        };
+        const parts = [head];
+        if (parsed.narration_hint) {
+          parts.push(`  摘要: ${parsed.narration_hint}`);
+        }
+        if (Array.isArray(parsed.artifacts) && parsed.artifacts.length > 0) {
+          parts.push(
+            `  产物: ${parsed.artifacts.map((a) => `${a.filename ?? ""} (${a.path ?? ""})`).join(", ")}`,
+          );
+        }
+        if (Array.isArray(parsed.verbatim_blocks) && parsed.verbatim_blocks.length > 0) {
+          for (const b of parsed.verbatim_blocks) {
+            if (!b?.content) continue;
+            parts.push(`  【${b.title || "执行输出详情"}】\n${b.content}`);
+          }
+        }
+        if (Array.isArray(parsed.caveats) && parsed.caveats.length > 0) {
+          parts.push(`  注意: ${parsed.caveats.join("；")}`);
+        }
+        return parts.join("\n");
+      } catch {
+        return head;
+      }
     })
-    .join("\n");
+    .join("\n\n");
 }
 
 export function runListSchedules(repo: HatoRepository, canonicalUserId: string, timeZone: string): string {

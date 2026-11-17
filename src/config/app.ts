@@ -205,12 +205,15 @@ export const HatoConfigSchema = Type.Object({
   worker: Type.Object({
     default_backend: Type.Union([
       Type.Literal("builtin-pi"),
-      Type.Literal("codex"),
-      Type.Literal("agy"),
+      Type.Literal("codex-cli"),
+      Type.Literal("antigravity-cli"),
       Type.Literal("opencode-v2"),
       Type.Literal("external-pi"),
       Type.Literal("claude-code"),
     ]),
+    routing_mode: Type.Optional(
+      Type.Union([Type.Literal("smart"), Type.Literal("always_default")]),
+    ),
     workspace_ttl_days: Type.Number({ minimum: 1 }),
     sandbox: Type.Object({
       image: Type.String({ minLength: 1 }),
@@ -225,7 +228,8 @@ export const HatoConfigSchema = Type.Object({
       host_mcp_allowlist: Type.Optional(Type.Array(Type.String())),
       permission_preset: Type.Optional(ExternalCliPermissionPresetSchema),
       timeout_ms: Type.Optional(Type.Number({ minimum: 1000 })),
-      codex: Type.Optional(
+      env: Type.Optional(Type.Record(Type.String({ minLength: 1 }), Type.String())),
+      codex_cli: Type.Optional(
         Type.Object({
           enabled: Type.Optional(Type.Boolean()),
           command: Type.Optional(Type.String({ minLength: 1 })),
@@ -234,7 +238,7 @@ export const HatoConfigSchema = Type.Object({
           model: Type.Optional(Type.String({ minLength: 1 })),
         }),
       ),
-      agy: Type.Optional(
+      antigravity_cli: Type.Optional(
         Type.Object({
           enabled: Type.Optional(Type.Boolean()),
           command: Type.Optional(Type.String({ minLength: 1 })),
@@ -248,6 +252,7 @@ export const HatoConfigSchema = Type.Object({
         Type.Object({
           enabled: Type.Optional(Type.Boolean()),
           command: Type.Optional(Type.String({ minLength: 1 })),
+          permission_mode: Type.Optional(Type.String({ minLength: 1 })),
           auto: Type.Optional(Type.Boolean()),
           agent: Type.Optional(Type.String()),
           model: Type.Optional(Type.String({ minLength: 1 })),
@@ -518,6 +523,86 @@ export interface ResolvedWorkerExternalCliConfig {
   hostMcpAllowlist: string[];
   permissionPreset: ExternalCliPermissionPreset;
   timeoutMs: number;
+}
+
+export type WorkerBackendName = HatoConfig["worker"]["default_backend"];
+
+export const EXTERNAL_CLI_BACKENDS = [
+  "codex-cli",
+  "antigravity-cli",
+  "opencode-v2",
+  "external-pi",
+  "claude-code",
+] as const;
+
+/**
+ * Determine whether a worker backend is currently enabled in HatoConfig.
+ */
+export function isWorkerBackendEnabled(
+  config: HatoConfig,
+  backend: WorkerBackendName,
+): boolean {
+  if (backend === "builtin-pi") return true;
+  const ext = config.worker.external_cli;
+  switch (backend) {
+    case "codex-cli":
+      return ext.codex_cli?.enabled ?? true;
+    case "antigravity-cli":
+      return ext.antigravity_cli?.enabled ?? true;
+    case "opencode-v2":
+      return ext.opencode_v2?.enabled ?? true;
+    case "external-pi":
+      return ext.external_pi?.enabled ?? false;
+    case "claude-code":
+      return ext.claude_code?.enabled ?? false;
+  }
+}
+
+/**
+ * List all enabled worker backends, never including disabled external CLIs.
+ */
+export function listEnabledWorkerBackends(config: HatoConfig): WorkerBackendName[] {
+  const enabled: WorkerBackendName[] = EXTERNAL_CLI_BACKENDS.filter((b) =>
+    isWorkerBackendEnabled(config, b),
+  );
+  enabled.push("builtin-pi");
+  if (
+    isWorkerBackendEnabled(config, config.worker.default_backend) &&
+    enabled.includes(config.worker.default_backend)
+  ) {
+    return [
+      config.worker.default_backend,
+      ...enabled.filter((b) => b !== config.worker.default_backend),
+    ];
+  }
+  return enabled;
+}
+
+/**
+ * Resolve the effective default backend; if the configured default backend was disabled,
+ * fall back to the first enabled external CLI or `builtin-pi`.
+ */
+export function resolveEffectiveDefaultBackend(config: HatoConfig): WorkerBackendName {
+  if (isWorkerBackendEnabled(config, config.worker.default_backend)) {
+    return config.worker.default_backend;
+  }
+  const firstExternal = EXTERNAL_CLI_BACKENDS.find((b) => isWorkerBackendEnabled(config, b));
+  return firstExternal ?? "builtin-pi";
+}
+
+/**
+ * Resolve custom environment variables configured for external CLI workers.
+ */
+export function resolveExternalCliCustomEnv(config: HatoConfig): Record<string, string> {
+  const raw = config.worker.external_cli.env;
+  if (!raw || typeof raw !== "object") return {};
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(raw)) {
+    const key = k.trim();
+    if (!key || typeof v !== "string") continue;
+    out[key] = v;
+  }
+  return out;
 }
 
 /**

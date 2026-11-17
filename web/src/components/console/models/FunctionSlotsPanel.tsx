@@ -1,6 +1,7 @@
-import { AlertTriangle, Brain, ChevronDown, Eye, KeyRound } from "lucide-react";
+import { AlertTriangle, Brain, Eye, KeyRound } from "lucide-react";
 import { useMemo } from "react";
 import type { ModelsFileConfig, SecretState } from "@/api";
+import { ConsoleSelect } from "@/components/console/ConsolePrimitives";
 import {
   resolveProviderKeyStatus,
   SLOT_DEFINITIONS,
@@ -90,10 +91,7 @@ export function FunctionSlotsPanel({
 
           return (
             <div key={slot.key} className="flex min-w-0 flex-col gap-1.5">
-              <label
-                htmlFor={`slot-${slot.key}`}
-                className="flex items-center gap-1.5 text-xs whitespace-nowrap"
-              >
+              <div className="flex items-center gap-1.5 text-xs whitespace-nowrap">
                 <span className={`font-mono font-medium ${slot.accentClass}`}>
                   {slot.key}
                 </span>
@@ -103,38 +101,30 @@ export function FunctionSlotsPanel({
                 <span className="truncate text-zinc-600 dark:text-zinc-400">
                   {slot.label}
                 </span>
-              </label>
-
-              <div className="relative">
-                <select
-                  id={`slot-${slot.key}`}
-                  value={currentValue}
-                  onChange={(e) => onChangeSlot(slot.key, e.target.value)}
-                  className={`h-10 w-full appearance-none rounded-lg border bg-zinc-50 pr-8 pl-3 font-mono text-xs text-zinc-900 transition-colors focus:border-emerald-500 focus:outline-none dark:bg-[#0b1014] dark:text-zinc-100 ${
-                    isMissing
-                      ? "border-rose-500/70 dark:border-rose-500/60"
-                      : matched?.keyMissing
-                        ? "border-amber-500/60 dark:border-amber-500/50"
-                        : "border-zinc-200 hover:border-zinc-300 dark:border-zinc-800 dark:hover:border-zinc-700"
-                  }`}
-                >
-                  {isMissing ? (
-                    <option value={currentValue}>
-                      {currentValue}（未找到）
-                    </option>
-                  ) : null}
-                  {options.length === 0 ? (
-                    <option value="">暂无可用模型</option>
-                  ) : (
-                    options.map((opt) => (
-                      <option key={opt.value} value={opt.value}>
-                        {opt.label}
-                      </option>
-                    ))
-                  )}
-                </select>
-                <ChevronDown className="pointer-events-none absolute top-1/2 right-2.5 h-3.5 w-3.5 -translate-y-1/2 text-zinc-400" />
               </div>
+
+              <ConsoleSelect
+                value={currentValue}
+                disabled={options.length === 0 && !isMissing}
+                placeholder="暂无可用模型"
+                onValueChange={(next) => onChangeSlot(slot.key, next)}
+                options={[
+                  ...(isMissing
+                    ? [{ value: currentValue, label: `${currentValue}（未找到）` }]
+                    : []),
+                  ...options.map((opt) => ({
+                    value: opt.value,
+                    label: opt.label,
+                  })),
+                ]}
+                triggerClassName={`h-10 font-mono bg-zinc-50 dark:bg-[#0b1014] ${
+                  isMissing
+                    ? "border-rose-500/70 dark:border-rose-500/60"
+                    : matched?.keyMissing
+                      ? "border-amber-500/60 dark:border-amber-500/50"
+                      : "border-zinc-200 hover:border-zinc-300 dark:border-zinc-800 dark:hover:border-zinc-700"
+                }`}
+              />
 
               {isMissing ? (
                 <p className="flex items-center gap-1 text-[11px] text-rose-600 dark:text-rose-400">

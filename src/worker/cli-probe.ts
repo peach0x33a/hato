@@ -13,8 +13,8 @@ import {
 const execFileAsync = promisify(execFile);
 
 export const EXTERNAL_CLI_BACKENDS = [
-  "codex",
-  "agy",
+  "codex-cli",
+  "antigravity-cli",
   "opencode-v2",
   "external-pi",
   "claude-code",
@@ -31,11 +31,17 @@ export interface CliOptionChoice {
   effectiveHatoValue?: string | boolean;
 }
 
+export interface ExternalCliModelOption {
+  id: string;
+  label?: string;
+}
+
 export interface ExternalCliProbeEntry {
   backend: ExternalCliBackend;
-  tier: 1 | 2 | 3;
   enabled: boolean;
   command: string;
+  commandSource?: "default" | "configured";
+  resolvedPath?: string;
   installed: boolean;
   available: boolean;
   version?: string;
@@ -44,6 +50,7 @@ export interface ExternalCliProbeEntry {
   hostConfigPath?: string;
   hostSummary: Record<string, string | boolean | string[]>;
   options: CliOptionChoice[];
+  models?: ExternalCliModelOption[];
   effectiveArgsPreview: string[];
   probedAtMs: number;
 }
@@ -188,7 +195,7 @@ export function verifyOpenCodeV2(params: {
 }
 
 /**
- * Parse `claude --help` for permission mode options (Tier 3 preview).
+ * Parse `claude --help` for permission mode options.
  */
 export function parseClaudeHelpModes(helpText: string): {
   permissionModes: string[];
@@ -222,7 +229,7 @@ export function readHostCliDefaults(
   backend: ExternalCliBackend,
   homeDir = homedir(),
 ): HostCliDefaultsSnapshot {
-  if (backend === "codex") {
+  if (backend === "codex-cli") {
     const cfgPath = join(homeDir, ".codex", "config.toml");
     if (!existsSync(cfgPath)) {
       return { configPath: cfgPath, summary: {}, defaults: {} };
@@ -254,7 +261,7 @@ export function readHostCliDefaults(
     }
   }
 
-  if (backend === "agy") {
+  if (backend === "antigravity-cli") {
     const cfgPath = join(homeDir, ".gemini", "antigravity-cli", "settings.json");
     if (!existsSync(cfgPath)) {
       return { configPath: cfgPath, summary: {}, defaults: {} };
@@ -305,7 +312,187 @@ export function readHostCliDefaults(
     return { summary: {}, defaults: {} };
   }
 
+  if (backend === "claude-code") {
+    const cfgPath = join(homeDir, ".claude", "settings.json");
+    if (!existsSync(cfgPath)) {
+      return { configPath: cfgPath, summary: {}, defaults: {} };
+    }
+    try {
+      const parsed = JSON.parse(readFileSync(cfgPath, "utf8")) as Record<string, unknown>;
+      const summary: Record<string, string | boolean | string[]> = {};
+      if (typeof parsed.model === "string" && parsed.model.trim()) {
+        summary.model = parsed.model.trim();
+      }
+      return { configPath: cfgPath, summary, defaults: {} };
+    } catch {
+      return { configPath: cfgPath, summary: {}, defaults: {} };
+    }
+  }
+
   return { summary: {}, defaults: {} };
+}
+
+const ANSI_ESCAPE_RE = /\x1B\[[0-?]*[ -/]*[@-~]/g;
+
+function stripAnsi(raw: string): string {
+  return raw.replace(ANSI_ESCAPE_RE, "");
+}
+
+function mergeModelOptions(
+  primary: ExternalCliModelOption[],
+  hostDefaultModel?: unknown,
+): ExternalCliModelOption[] {
+  const seen = new Set<string>();
+  const out: ExternalCliModelOption[] = [];
+  const pushItem = (item: ExternalCliModelOption) => {
+    const id = item.id.trim();
+    if (!id || seen.has(id)) return;
+    seen.add(id);
+    out.push({ id, ...(item.label && item.label.trim() ? { label: item.label.trim() } : {}) });
+  };
+  for (const item of primary) pushItem(item);
+  if (typeof hostDefaultModel === "string" && hostDefaultModel.trim()) {
+    pushItem({ id: hostDefaultModel.trim() });
+  }
+  return out;
+}
+
+/**
+ * Parse `agy models` tab-separated output into selectable model options.
+ */
+export function parseAgyModelsOutput(raw: string): ExternalCliModelOption[] {
+  const out: ExternalCliModelOption[] = [];
+  for (const line of stripAnsi(raw).split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed || /^fetching\b/i.test(trimmed) || /^loading\b/i.test(trimmed)) continue;
+    const tabIdx = trimmed.indexOf("\t");
+    if (tabIdx > 0) {
+      const id = trimmed.slice(0, tabIdx).trim();
+      const label = trimmed.slice(tabIdx + 1).trim();
+      if (id && !/\s/.test(id)) {
+        out.push({ id, label: label || undefined });
+      }
+      continue;
+    }
+    const parts = trimmed.split(/\s{2,}/);
+    const id = parts[0]?.trim() ?? "";
+    if (id && /^[A-Za-z0-9._:/-]+$/.test(id)) {
+      out.push({ id, label: parts[1]?.trim() || undefined });
+    }
+  }
+  return mergeModelOptions(out);
+}
+
+/**
+ * Parse `opencode models` line-based `<provider>/<model>` output.
+ */
+export function parseOpenCodeModelsOutput(raw: string): ExternalCliModelOption[] {
+  const out: ExternalCliModelOption[] = [];
+  for (const line of stripAnsi(raw).split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed || /\s/.test(trimmed) || !trimmed.includes("/")) continue;
+    out.push({ id: trimmed });
+  }
+  return mergeModelOptions(out);
+}
+
+/**
+ * Parse `pi --list-models` output lines into `<provider>/<model>` or model IDs.
+ */
+export function parsePiListModelsOutput(raw: string): ExternalCliModelOption[] {
+  const out: ExternalCliModelOption[] = [];
+  for (const line of stripAnsi(raw).split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed || /^provider\s+/i.test(trimmed) || /^[-=]+$/.test(trimmed)) continue;
+    const cols = trimmed.split(/\s{2,}|\t/).map((c) => c.trim()).filter(Boolean);
+    if (cols.length >= 2 && !/\s/.test(cols[0]!) && !/\s/.test(cols[1]!)) {
+      const id = cols[0]!.includes("/") ? cols[0]! : `${cols[0]}/${cols[1]}`;
+      out.push({ id });
+    } else if (/^[A-Za-z0-9._:/-]+$/.test(trimmed)) {
+      out.push({ id: trimmed });
+    }
+  }
+  return mergeModelOptions(out);
+}
+
+/**
+ * Read Codex's live-refreshed `~/.codex/models_cache.json` catalog.
+ */
+export function readCodexCachedModels(homeDir = homedir()): ExternalCliModelOption[] {
+  const cachePath = join(homeDir, ".codex", "models_cache.json");
+  if (!existsSync(cachePath)) return [];
+  try {
+    const parsed = JSON.parse(readFileSync(cachePath, "utf8")) as {
+      models?: Array<{
+        slug?: unknown;
+        display_name?: unknown;
+        visibility?: unknown;
+        priority?: unknown;
+      }>;
+    };
+    if (!Array.isArray(parsed.models)) return [];
+    const visible = parsed.models
+      .filter((m) => typeof m?.slug === "string" && m.slug.trim() && m.visibility !== "hide")
+      .sort((a, b) => {
+        const pa = typeof a.priority === "number" ? a.priority : 9999;
+        const pb = typeof b.priority === "number" ? b.priority : 9999;
+        return pa - pb;
+      });
+    return mergeModelOptions(
+      visible.map((m) => ({
+        id: String(m.slug).trim(),
+        label: typeof m.display_name === "string" ? m.display_name.trim() : undefined,
+      })),
+    );
+  } catch {
+    return [];
+  }
+}
+
+const MODEL_PROBE_TIMEOUT_MS = 6000;
+
+/**
+ * Live-probe selectable models for a specific external CLI backend.
+ */
+export async function probeExternalCliModels(
+  backend: ExternalCliBackend,
+  config: HatoConfig,
+  options?: { exec?: ExecCommandFn; homeDir?: string },
+): Promise<ExternalCliModelOption[]> {
+  const exec = options?.exec ?? defaultExecCommand;
+  const homeDir = options?.homeDir ?? homedir();
+  const ext = config.worker.external_cli;
+  const hostDefaults = readHostCliDefaults(backend, homeDir);
+
+  if (backend === "codex-cli") {
+    return mergeModelOptions(readCodexCachedModels(homeDir), hostDefaults.summary.model);
+  }
+  if (backend === "antigravity-cli") {
+    const cmd = ext.antigravity_cli?.command?.trim() || "agy";
+    const res = await exec(cmd, ["models"], MODEL_PROBE_TIMEOUT_MS);
+    const parsed = res.ok ? parseAgyModelsOutput(res.stdout || res.stderr) : [];
+    return mergeModelOptions(parsed, hostDefaults.summary.model);
+  }
+  if (backend === "opencode-v2") {
+    const cmd = ext.opencode_v2?.command?.trim() || "opencode";
+    const res = await exec(cmd, ["models"], MODEL_PROBE_TIMEOUT_MS);
+    const parsed = res.ok ? parseOpenCodeModelsOutput(res.stdout || res.stderr) : [];
+    return mergeModelOptions(parsed, hostDefaults.summary.model);
+  }
+  if (backend === "external-pi") {
+    const cmd = ext.external_pi?.command?.trim() || "pi";
+    const res = await exec(cmd, ["--list-models"], MODEL_PROBE_TIMEOUT_MS);
+    const parsed = res.ok ? parsePiListModelsOutput(res.stdout || res.stderr) : [];
+    return mergeModelOptions(parsed, hostDefaults.summary.model);
+  }
+  return mergeModelOptions(
+    [
+      { id: "sonnet", label: "Claude Sonnet (latest)" },
+      { id: "opus", label: "Claude Opus (latest)" },
+      { id: "haiku", label: "Claude Haiku (latest)" },
+    ],
+    hostDefaults.summary.model,
+  );
 }
 
 /**
@@ -323,8 +510,8 @@ export function resolveEffectiveCliModeArgs(
   const ext = config.worker.external_cli;
   const preset = resolveWorkerExternalCliConfig(config).permissionPreset;
 
-  if (backend === "codex") {
-    const c = ext.codex;
+  if (backend === "codex-cli") {
+    const c = ext.codex_cli;
     let sandbox = c?.sandbox;
     let approval = c?.approval;
 
@@ -342,7 +529,7 @@ export function resolveEffectiveCliModeArgs(
     }
 
     const args: string[] = [];
-    if (approval === "bypass") {
+    if (approval === "bypass" || (sandbox === "danger-full-access" && approval !== "host")) {
       args.push("--dangerously-bypass-approvals-and-sandbox");
     } else {
       if (sandbox) args.push("--sandbox", sandbox);
@@ -360,8 +547,8 @@ export function resolveEffectiveCliModeArgs(
     };
   }
 
-  if (backend === "agy") {
-    const a = ext.agy;
+  if (backend === "antigravity-cli") {
+    const a = ext.antigravity_cli;
     let mode = a?.mode;
     let skipPermissions = a?.skip_permissions;
     let sandbox = a?.sandbox;
@@ -401,15 +588,25 @@ export function resolveEffectiveCliModeArgs(
 
   if (backend === "opencode-v2") {
     const o = ext.opencode_v2;
+    let permissionMode = o?.permission_mode;
     let auto = o?.auto;
     const agent = o?.agent;
 
-    if (auto === undefined) {
-      if (preset === "yolo" || preset === "auto_safe") {
+    if (!permissionMode) {
+      if (auto !== undefined) {
+        permissionMode = auto ? "auto" : "ask";
+      } else if (preset === "yolo") {
+        permissionMode = "full_access";
+        auto = true;
+      } else if (preset === "auto_safe") {
+        permissionMode = "auto";
         auto = true;
       } else {
+        permissionMode = "ask";
         auto = false;
       }
+    } else {
+      auto = permissionMode === "auto" || permissionMode === "full_access";
     }
 
     const args = ["--standalone"];
@@ -421,6 +618,7 @@ export function resolveEffectiveCliModeArgs(
       args,
       effectiveOptions: {
         auto,
+        permission_mode: permissionMode,
         ...(agent?.trim() ? { agent: agent.trim() } : {}),
       },
       preset,
@@ -443,6 +641,8 @@ export function resolveEffectiveCliModeArgs(
         permissionMode = "plan";
         skipPermissions = false;
       }
+    } else if (permissionMode === "bypassPermissions" && skipPermissions === undefined) {
+      skipPermissions = true;
     }
 
     const args: string[] = [];
@@ -488,51 +688,82 @@ export async function probeAllExternalClis(
 
   const specs: Array<{
     backend: ExternalCliBackend;
-    tier: 1 | 2 | 3;
     enabled: boolean;
     command: string;
+    commandSource: "default" | "configured";
   }> = [
     {
-      backend: "codex",
-      tier: 1,
-      enabled: ext.codex?.enabled ?? true,
-      command: ext.codex?.command?.trim() || "codex",
+      backend: "codex-cli",
+      enabled: ext.codex_cli?.enabled ?? true,
+      command: ext.codex_cli?.command?.trim() || "codex",
+      commandSource: ext.codex_cli?.command?.trim() ? "configured" : "default",
     },
     {
-      backend: "agy",
-      tier: 1,
-      enabled: ext.agy?.enabled ?? true,
-      command: ext.agy?.command?.trim() || "agy",
+      backend: "antigravity-cli",
+      enabled: ext.antigravity_cli?.enabled ?? true,
+      command: ext.antigravity_cli?.command?.trim() || "agy",
+      commandSource: ext.antigravity_cli?.command?.trim() ? "configured" : "default",
     },
     {
       backend: "opencode-v2",
-      tier: 1,
       enabled: ext.opencode_v2?.enabled ?? true,
       command: ext.opencode_v2?.command?.trim() || "opencode",
+      commandSource: ext.opencode_v2?.command?.trim() ? "configured" : "default",
     },
     {
       backend: "external-pi",
-      tier: 2,
       enabled: ext.external_pi?.enabled ?? false,
       command: ext.external_pi?.command?.trim() || "pi",
+      commandSource: ext.external_pi?.command?.trim() ? "configured" : "default",
     },
     {
       backend: "claude-code",
-      tier: 3,
       enabled: ext.claude_code?.enabled ?? false,
       command: ext.claude_code?.command?.trim() || "claude",
+      commandSource: ext.claude_code?.command?.trim() ? "configured" : "default",
     },
   ];
 
+  const resolveBinaryPath = !deps?.exec;
+
   return Promise.all(
-    specs.map((spec) => probeSingleCli(spec, config, { exec, homeDir, now })),
+    specs.map(async (spec) => {
+      const entry = await probeSingleCli(spec, config, { exec, homeDir, now });
+      const resolvedPath =
+        resolveBinaryPath && entry.installed
+          ? await resolveBinaryLocation(spec.command)
+          : undefined;
+      return {
+        ...entry,
+        commandSource: spec.commandSource,
+        ...(resolvedPath ? { resolvedPath } : {}),
+      };
+    }),
   );
+}
+
+async function resolveBinaryLocation(command: string): Promise<string | undefined> {
+  if (!command.trim()) return undefined;
+  const locator = process.platform === "win32" ? "where" : "which";
+  try {
+    const res = await execFileAsync(locator, [command], {
+      timeout: 1500,
+      maxBuffer: 64 * 1024,
+      env: process.env,
+    });
+    const first = String(res.stdout ?? "")
+      .split(/\r?\n/)
+      .map((l) => l.trim())
+      .find(Boolean);
+    return first || undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 async function probeSingleCli(
   spec: {
     backend: ExternalCliBackend;
-    tier: 1 | 2 | 3;
     enabled: boolean;
     command: string;
   },
@@ -542,7 +773,7 @@ async function probeSingleCli(
   const hostDefaults = readHostCliDefaults(spec.backend, ctx.homeDir);
   const resolvedMode = resolveEffectiveCliModeArgs(spec.backend, config);
 
-  if (spec.backend === "codex") {
+  if (spec.backend === "codex-cli") {
     const [verRes, helpRes] = await Promise.all([
       ctx.exec(spec.command, ["--version"]),
       ctx.exec(spec.command, ["exec", "--help"]),
@@ -550,32 +781,39 @@ async function probeSingleCli(
     const installed = verRes.ok || helpRes.ok;
     const parsed = parseCodexHelpModes(helpRes.stdout || helpRes.stderr);
 
+    const codexModeChoices = [
+      ...parsed.sandboxChoices.filter((c) => c !== "danger-full-access"),
+      ...(parsed.supportsApproveForMe ? ["approve-for-me"] : []),
+      ...(parsed.sandboxChoices.includes("danger-full-access") || parsed.supportsBypass
+        ? ["danger-full-access"]
+        : []),
+      "host",
+    ];
+    const effectiveCodexMode =
+      resolvedMode.effectiveOptions.approval === "bypass" ||
+      resolvedMode.effectiveOptions.sandbox === "danger-full-access"
+        ? "danger-full-access"
+        : resolvedMode.effectiveOptions.approval === "approve-for-me"
+          ? "approve-for-me"
+          : (resolvedMode.effectiveOptions.sandbox ?? resolvedMode.effectiveOptions.approval);
+
     const options: CliOptionChoice[] = [
       {
-        key: "sandbox",
-        label: "沙箱策略 (--sandbox)",
+        key: "codex_mode",
+        label: "执行与权限模式",
         kind: "enum",
-        choices: parsed.sandboxChoices,
+        choices: codexModeChoices,
         hostDefault: hostDefaults.defaults.sandbox,
-        effectiveHatoValue: resolvedMode.effectiveOptions.sandbox,
-      },
-      {
-        key: "approval",
-        label: "审批模式",
-        kind: "enum",
-        choices: [
-          "host",
-          ...(parsed.supportsApproveForMe ? ["approve-for-me"] : []),
-          ...(parsed.supportsBypass ? ["bypass"] : []),
-        ],
-        hostDefault: hostDefaults.defaults.approval ?? "host",
-        effectiveHatoValue: resolvedMode.effectiveOptions.approval ?? "host",
+        effectiveHatoValue: effectiveCodexMode,
       },
     ];
 
+    const models = installed
+      ? mergeModelOptions(readCodexCachedModels(ctx.homeDir), hostDefaults.summary.model)
+      : [];
+
     return {
       backend: spec.backend,
-      tier: spec.tier,
       enabled: spec.enabled,
       command: spec.command,
       installed,
@@ -585,44 +823,50 @@ async function probeSingleCli(
       hostConfigPath: hostDefaults.configPath,
       hostSummary: hostDefaults.summary,
       options,
+      models,
       effectiveArgsPreview: resolvedMode.args,
       probedAtMs: ctx.now,
     };
   }
 
-  if (spec.backend === "agy") {
-    const [verRes, helpRes] = await Promise.all([
+  if (spec.backend === "antigravity-cli") {
+    const [verRes, helpRes, modelsRes] = await Promise.all([
       ctx.exec(spec.command, ["--version"]),
       ctx.exec(spec.command, ["--help"]),
+      ctx.exec(spec.command, ["models"], MODEL_PROBE_TIMEOUT_MS),
     ]);
     const installed = verRes.ok || helpRes.ok;
     const parsed = parseAgyHelpModes(helpRes.stdout || helpRes.stderr);
+    const models = installed
+      ? mergeModelOptions(
+          modelsRes.ok ? parseAgyModelsOutput(modelsRes.stdout || modelsRes.stderr) : [],
+          hostDefaults.summary.model,
+        )
+      : [];
+
+    const agyModeChoices = [
+      ...parsed.modeChoices,
+      ...(parsed.supportsSkipPermissions && !parsed.modeChoices.includes("skip-permissions")
+        ? ["skip-permissions"]
+        : []),
+    ];
 
     const options: CliOptionChoice[] = [
       {
         key: "mode",
-        label: "执行模式 (--mode)",
+        label: "执行模式",
         kind: "enum",
-        choices: parsed.modeChoices,
+        choices: agyModeChoices,
         hostDefault: hostDefaults.defaults.mode,
-        effectiveHatoValue: resolvedMode.effectiveOptions.mode,
+        effectiveHatoValue: resolvedMode.effectiveOptions.skip_permissions
+          ? "skip-permissions"
+          : resolvedMode.effectiveOptions.mode,
       },
-      ...(parsed.supportsSkipPermissions
-        ? [
-            {
-              key: "skip_permissions",
-              label: "跳过权限弹窗 (--dangerously-skip-permissions)",
-              kind: "boolean" as const,
-              hostDefault: false,
-              effectiveHatoValue: Boolean(resolvedMode.effectiveOptions.skip_permissions),
-            },
-          ]
-        : []),
       ...(parsed.supportsSandbox
         ? [
             {
               key: "sandbox",
-              label: "启用终端沙箱 (--sandbox)",
+              label: "终端沙箱",
               kind: "boolean" as const,
               hostDefault: hostDefaults.defaults.sandbox ?? false,
               effectiveHatoValue: Boolean(resolvedMode.effectiveOptions.sandbox),
@@ -633,7 +877,6 @@ async function probeSingleCli(
 
     return {
       backend: spec.backend,
-      tier: spec.tier,
       enabled: spec.enabled,
       command: spec.command,
       installed,
@@ -643,23 +886,24 @@ async function probeSingleCli(
       hostConfigPath: hostDefaults.configPath,
       hostSummary: hostDefaults.summary,
       options,
+      models,
       effectiveArgsPreview: resolvedMode.args,
       probedAtMs: ctx.now,
     };
   }
 
   if (spec.backend === "opencode-v2") {
-    const [verRes, rootHelpRes, runHelpRes] = await Promise.all([
+    const [verRes, rootHelpRes, runHelpRes, modelsRes] = await Promise.all([
       ctx.exec(spec.command, ["--version"]),
       ctx.exec(spec.command, ["--help"]),
       ctx.exec(spec.command, ["run", "--help"]),
+      ctx.exec(spec.command, ["models"], MODEL_PROBE_TIMEOUT_MS),
     ]);
     const installed = verRes.ok || rootHelpRes.ok;
 
     if (!installed) {
       return {
         backend: spec.backend,
-        tier: spec.tier,
         enabled: spec.enabled,
         command: spec.command,
         installed: false,
@@ -670,10 +914,12 @@ async function probeSingleCli(
         hostSummary: hostDefaults.summary,
         options: [
           {
-            key: "auto",
-            label: "自动审批 (--auto)",
-            kind: "boolean",
-            effectiveHatoValue: Boolean(resolvedMode.effectiveOptions.auto),
+            key: "permission_mode",
+            label: "权限模式",
+            kind: "enum",
+            choices: ["ask", "auto", "full_access"],
+            hostDefault: "ask",
+            effectiveHatoValue: resolvedMode.effectiveOptions.permission_mode ?? "ask",
           },
         ],
         effectiveArgsPreview: resolvedMode.args,
@@ -689,17 +935,22 @@ async function probeSingleCli(
 
     const options: CliOptionChoice[] = [
       {
-        key: "auto",
-        label: "自动审批 (--auto)",
-        kind: "boolean",
-        hostDefault: false,
-        effectiveHatoValue: Boolean(resolvedMode.effectiveOptions.auto),
+        key: "permission_mode",
+        label: "权限模式",
+        kind: "enum",
+        choices: v2.supportsAuto ? ["ask", "auto", "full_access"] : ["ask"],
+        hostDefault: "ask",
+        effectiveHatoValue: resolvedMode.effectiveOptions.permission_mode ?? "ask",
       },
     ];
 
+    const models = mergeModelOptions(
+      modelsRes.ok ? parseOpenCodeModelsOutput(modelsRes.stdout || modelsRes.stderr) : [],
+      hostDefaults.summary.model,
+    );
+
     return {
       backend: spec.backend,
-      tier: spec.tier,
       enabled: spec.enabled,
       command: spec.command,
       installed: true,
@@ -710,6 +961,7 @@ async function probeSingleCli(
       hostConfigPath: hostDefaults.configPath,
       hostSummary: hostDefaults.summary,
       options,
+      models,
       effectiveArgsPreview: resolvedMode.args,
       probedAtMs: ctx.now,
     };
@@ -722,10 +974,19 @@ async function probeSingleCli(
     ]);
     const installed = verRes.ok || helpRes.ok;
     const parsed = parseClaudeHelpModes(helpRes.stdout || helpRes.stderr);
+    const models = installed
+      ? mergeModelOptions(
+          [
+            { id: "sonnet", label: "Claude Sonnet (latest)" },
+            { id: "opus", label: "Claude Opus (latest)" },
+            { id: "haiku", label: "Claude Haiku (latest)" },
+          ],
+          hostDefaults.summary.model,
+        )
+      : [];
 
     return {
       backend: spec.backend,
-      tier: spec.tier,
       enabled: spec.enabled,
       command: spec.command,
       installed,
@@ -737,28 +998,33 @@ async function probeSingleCli(
       options: [
         {
           key: "permission_mode",
-          label: "权限模式 (--permission-mode)",
+          label: "权限模式",
           kind: "enum",
           choices: parsed.permissionModes,
-          effectiveHatoValue: resolvedMode.effectiveOptions.permission_mode,
-        },
-        {
-          key: "skip_permissions",
-          label: "跳过权限确认 (--dangerously-skip-permissions)",
-          kind: "boolean",
-          effectiveHatoValue: Boolean(resolvedMode.effectiveOptions.skip_permissions),
+          effectiveHatoValue: resolvedMode.effectiveOptions.skip_permissions
+            ? "bypassPermissions"
+            : resolvedMode.effectiveOptions.permission_mode,
         },
       ],
+      models,
       effectiveArgsPreview: resolvedMode.args,
       probedAtMs: ctx.now,
     };
   }
 
-  const verRes = await ctx.exec(spec.command, ["--version"]);
+  const [verRes, modelsRes] = await Promise.all([
+    ctx.exec(spec.command, ["--version"]),
+    ctx.exec(spec.command, ["--list-models"], MODEL_PROBE_TIMEOUT_MS),
+  ]);
   const installed = verRes.ok;
+  const models = installed
+    ? mergeModelOptions(
+        modelsRes.ok ? parsePiListModelsOutput(modelsRes.stdout || modelsRes.stderr) : [],
+        hostDefaults.summary.model,
+      )
+    : [];
   return {
     backend: spec.backend,
-    tier: spec.tier,
     enabled: spec.enabled,
     command: spec.command,
     installed,
@@ -768,6 +1034,7 @@ async function probeSingleCli(
     hostConfigPath: hostDefaults.configPath,
     hostSummary: hostDefaults.summary,
     options: [],
+    models,
     effectiveArgsPreview: resolvedMode.args,
     probedAtMs: ctx.now,
   };
@@ -778,5 +1045,7 @@ function extractVersionLine(raw: string): string | undefined {
     .split(/\r?\n/)
     .map((l) => l.trim())
     .find(Boolean);
-  return firstLine || undefined;
+  if (!firstLine) return undefined;
+  const semver = /\bv?\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?\b/.exec(firstLine);
+  return semver ? semver[0] : firstLine;
 }

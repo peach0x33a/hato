@@ -231,7 +231,20 @@ export function CollapsibleContent({
   useLayoutEffect(() => {
     const node = innerRef.current;
     if (!node) return;
-    const measure = () => setHeight(node.offsetHeight);
+    const measure = () => {
+      const innerHeight = Math.max(node.offsetHeight, node.scrollHeight);
+      const outer = contentRef.current;
+      let outerInset = 0;
+      if (outer) {
+        const cs = getComputedStyle(outer);
+        outerInset =
+          (Number.parseFloat(cs.paddingTop) || 0) +
+          (Number.parseFloat(cs.paddingBottom) || 0) +
+          (Number.parseFloat(cs.borderTopWidth) || 0) +
+          (Number.parseFloat(cs.borderBottomWidth) || 0);
+      }
+      setHeight(Math.ceil(innerHeight + outerInset));
+    };
     measure();
     const observer = new ResizeObserver(measure);
     observer.observe(node);

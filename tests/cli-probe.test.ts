@@ -6,9 +6,13 @@ import test from "node:test";
 import { createDefaultHatoConfig } from "../src/setup/presets.js";
 import {
   parseAgyHelpModes,
+  parseAgyModelsOutput,
   parseClaudeHelpModes,
   parseCodexHelpModes,
+  parseOpenCodeModelsOutput,
   probeAllExternalClis,
+  probeExternalCliModels,
+  readCodexCachedModels,
   readHostCliDefaults,
   resolveEffectiveCliModeArgs,
   verifyOpenCodeV2,
@@ -101,7 +105,7 @@ args = ["notes.js"]
       "utf8",
     );
 
-    const codexHost = readHostCliDefaults("codex", fakeHome);
+    const codexHost = readHostCliDefaults("codex-cli", fakeHome);
     assert.equal(codexHost.summary.model, "gpt-5.4");
     assert.deepEqual(codexHost.summary.host_mcp_servers, ["personal_notes"]);
     assert.equal(codexHost.defaults.sandbox, "workspace-write");
@@ -109,10 +113,10 @@ args = ["notes.js"]
     const cfg = createDefaultHatoConfig();
     cfg.worker.external_cli.permission_preset = "yolo";
 
-    assert.deepEqual(resolveEffectiveCliModeArgs("codex", cfg).args, [
+    assert.deepEqual(resolveEffectiveCliModeArgs("codex-cli", cfg).args, [
       "--dangerously-bypass-approvals-and-sandbox",
     ]);
-    assert.deepEqual(resolveEffectiveCliModeArgs("agy", cfg).args, [
+    assert.deepEqual(resolveEffectiveCliModeArgs("antigravity-cli", cfg).args, [
       "--mode",
       "auto",
       "--dangerously-skip-permissions",
@@ -123,16 +127,25 @@ args = ["notes.js"]
     ]);
 
     // Per-backend override supersedes preset
-    cfg.worker.external_cli.agy = {
+    cfg.worker.external_cli.antigravity_cli = {
       enabled: true,
       mode: "plan",
       skip_permissions: false,
       sandbox: true,
     };
-    assert.deepEqual(resolveEffectiveCliModeArgs("agy", cfg).args, [
+    assert.deepEqual(resolveEffectiveCliModeArgs("antigravity-cli", cfg).args, [
       "--mode",
       "plan",
       "--sandbox",
+    ]);
+
+    // Codex danger-full-access implies unrestricted execution without conflicting approve-for-me
+    cfg.worker.external_cli.codex_cli = {
+      enabled: true,
+      sandbox: "danger-full-access",
+    };
+    assert.deepEqual(resolveEffectiveCliModeArgs("codex-cli", cfg).args, [
+      "--dangerously-bypass-approvals-and-sandbox",
     ]);
 
     const probes = await probeAllExternalClis(cfg, {
@@ -167,8 +180,8 @@ args = ["notes.js"]
       },
     });
 
-    const codexProbe = probes.find((p) => p.backend === "codex");
-    const agyProbe = probes.find((p) => p.backend === "agy");
+    const codexProbe = probes.find((p) => p.backend === "codex-cli");
+    const agyProbe = probes.find((p) => p.backend === "antigravity-cli");
     const ocProbe = probes.find((p) => p.backend === "opencode-v2");
     const piProbe = probes.find((p) => p.backend === "external-pi");
 
@@ -183,6 +196,67 @@ args = ["notes.js"]
     assert.equal(ocProbe?.available, false);
     assert.match(ocProbe?.reason ?? "", /OpenCode V2/);
     assert.equal(piProbe?.installed, false);
+  } finally {
+    rmSync(fakeHome, { recursive: true, force: true });
+  }
+});
+
+test("CLI model catalog parsers and probeExternalCliModels extract live models cleanly", async () => {
+  const agyModels = parseAgyModelsOutput(`
+Fetching available models...
+gemini-4-hydrogen-medium\tGemini 4 Hydrogen (Medium)
+claude-opus-5-5-high\tClaude Opus 5.5 (High)
+`);
+  assert.deepEqual(agyModels, [
+    { id: "gemini-4-hydrogen-medium", label: "Gemini 4 Hydrogen (Medium)" },
+    { id: "claude-opus-5-5-high", label: "Claude Opus 5.5 (High)" },
+  ]);
+
+  const ocModels = parseOpenCodeModelsOutput(`
+opencode/beam-free
+opencode/deepseek-v4.1-flash-free
+opencode/beam-free
+`);
+  assert.deepEqual(ocModels, [
+    { id: "opencode/beam-free" },
+    { id: "opencode/deepseek-v4.1-flash-free" },
+  ]);
+
+  const fakeHome = mkdtempSync(join(tmpdir(), "hato-codex-models-"));
+  try {
+    mkdirSync(join(fakeHome, ".codex"), { recursive: true });
+    writeFileSync(
+      join(fakeHome, ".codex", "models_cache.json"),
+      JSON.stringify({
+        models: [
+          { slug: "gpt-hidden", display_name: "Hidden", visibility: "hide", priority: 1 },
+          { slug: "gpt-6.1-sol", display_name: "GPT-6.1-Sol", visibility: "list", priority: 2 },
+          { slug: "gpt-6-astra", display_name: "GPT-6-Astra", visibility: "list", priority: 1 },
+        ],
+      }),
+      "utf8",
+    );
+    const codexModels = readCodexCachedModels(fakeHome);
+    assert.deepEqual(codexModels, [
+      { id: "gpt-6-astra", label: "GPT-6-Astra" },
+      { id: "gpt-6.1-sol", label: "GPT-6.1-Sol" },
+    ]);
+
+    const cfg = createDefaultHatoConfig();
+    const probedAgy = await probeExternalCliModels("antigravity-cli", cfg, {
+      homeDir: fakeHome,
+      exec: async (_cmd, args) => {
+        if (args[0] === "models") {
+          return {
+            ok: true,
+            stdout: "gemini-4-hydrogen-medium\tGemini 4 Hydrogen (Medium)\n",
+            stderr: "",
+          };
+        }
+        return { ok: false, stdout: "", stderr: "" };
+      },
+    });
+    assert.equal(probedAgy[0]?.id, "gemini-4-hydrogen-medium");
   } finally {
     rmSync(fakeHome, { recursive: true, force: true });
   }

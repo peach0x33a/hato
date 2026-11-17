@@ -1,7 +1,10 @@
 import { existsSync } from "node:fs";
 import { resolve } from "node:path";
 import {
+  isWorkerBackendEnabled,
+  listEnabledWorkerBackends,
   loadHatoConfig,
+  resolveEffectiveDefaultBackend,
   resolveMemoryCuratorConfig,
   resolveMemoryEchoConfig,
   resolveMemoryProvider,
@@ -135,6 +138,39 @@ export async function runSelfConfigAction(
     );
     const snapshot = {
       tunable_hato_config: buildSanitizedTunableSnapshot(cfg),
+      worker_runtime: {
+        default_backend: cfg.worker.default_backend,
+        effective_default_backend: resolveEffectiveDefaultBackend(cfg),
+        routing_mode: cfg.worker.routing_mode ?? "smart",
+        enabled_backends: listEnabledWorkerBackends(cfg),
+        external_cli: {
+          "codex-cli": {
+            enabled: isWorkerBackendEnabled(cfg, "codex-cli"),
+            command: cfg.worker.external_cli.codex_cli?.command ?? "codex",
+            model: cfg.worker.external_cli.codex_cli?.model ?? null,
+          },
+          "antigravity-cli": {
+            enabled: isWorkerBackendEnabled(cfg, "antigravity-cli"),
+            command: cfg.worker.external_cli.antigravity_cli?.command ?? "agy",
+            model: cfg.worker.external_cli.antigravity_cli?.model ?? null,
+          },
+          "opencode-v2": {
+            enabled: isWorkerBackendEnabled(cfg, "opencode-v2"),
+            command: cfg.worker.external_cli.opencode_v2?.command ?? "opencode",
+            model: cfg.worker.external_cli.opencode_v2?.model ?? null,
+          },
+          "external-pi": {
+            enabled: isWorkerBackendEnabled(cfg, "external-pi"),
+            command: cfg.worker.external_cli.external_pi?.command ?? "pi",
+            model: cfg.worker.external_cli.external_pi?.model ?? null,
+          },
+          "claude-code": {
+            enabled: isWorkerBackendEnabled(cfg, "claude-code"),
+            command: cfg.worker.external_cli.claude_code?.command ?? "claude",
+            model: cfg.worker.external_cli.claude_code?.model ?? null,
+          },
+        },
+      },
       editable_config_paths: [...ALLOWED_SELF_CONFIG_PATHS].sort(),
       model_slots: registry.listSlots().map((s) => ({
         slot: s.slot,

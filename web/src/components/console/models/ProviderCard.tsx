@@ -216,11 +216,12 @@ export function ProviderCard({
       <AnimatePresence initial={false}>
         {!isCollapsed ? (
           <motion.div
-            initial={prefersReducedMotion ? false : { opacity: 0, height: 0 }}
-            animate={{ opacity: 1, height: "auto" }}
-            exit={prefersReducedMotion ? undefined : { opacity: 0, height: 0 }}
+            initial={prefersReducedMotion ? false : { opacity: 0, height: 0, overflow: "hidden" }}
+            animate={{ opacity: 1, height: "auto", transitionEnd: { overflow: "visible" } }}
+            exit={prefersReducedMotion ? undefined : { opacity: 0, height: 0, overflow: "hidden" }}
             transition={{ duration: 0.18, ease: [0.16, 1, 0.3, 1] }}
-            className="overflow-hidden border-t border-zinc-200/80 dark:border-zinc-800/80"
+            style={prefersReducedMotion ? undefined : { overflow: "hidden" }}
+            className="border-t border-zinc-200/80 dark:border-zinc-800/80"
           >
             <div className="px-5 py-3">
               {visibleModels.length === 0 ? (

@@ -98,7 +98,15 @@ export class PersonaRuntime {
         originChannel: InboundBatch["originChannel"];
         hint: string;
         urgency?: "normal" | "high";
+        deliverFiles?: boolean;
       }) => { ticketId: string; status: string })
+    | null = null;
+  private sendFileHandler:
+    | ((input: {
+        channel: InboundBatch["originChannel"];
+        path: string;
+        caption?: string;
+      }) => Promise<{ ok: boolean; message: string }>)
     | null = null;
   private activeTurnOriginChannel: InboundBatch["originChannel"] = "tg";
 
@@ -198,6 +206,7 @@ export class PersonaRuntime {
           originChannel: InboundBatch["originChannel"];
           hint: string;
           urgency?: "normal" | "high";
+          deliverFiles?: boolean;
         }) => { ticketId: string; status: string })
       | null,
   ): void {
@@ -205,6 +214,21 @@ export class PersonaRuntime {
     if (!this.activeTurn) {
       this.syncTools();
       this.refreshTranscriptFromDb();
+    }
+  }
+
+  setSendFileHandler(
+    handler:
+      | ((input: {
+          channel: InboundBatch["originChannel"];
+          path: string;
+          caption?: string;
+        }) => Promise<{ ok: boolean; message: string }>)
+      | null,
+  ): void {
+    this.sendFileHandler = handler;
+    if (!this.activeTurn) {
+      this.syncTools();
     }
   }
 
@@ -268,12 +292,23 @@ export class PersonaRuntime {
       extraTools: this.mcpPool?.getToolsForZone("personal") ?? [],
       ...(this.delegateHandler
         ? {
-            onDelegate: (input: { hint: string; urgency?: "normal" | "high" }) =>
+            onDelegate: (input: { hint: string; urgency?: "normal" | "high"; deliverFiles?: boolean }) =>
               this.delegateHandler!({
                 canonicalUserId,
                 originChannel: this.activeTurnOriginChannel,
                 hint: input.hint,
                 urgency: input.urgency,
+                deliverFiles: input.deliverFiles,
+              }),
+          }
+        : {}),
+      ...(this.sendFileHandler
+        ? {
+            onSendFile: (input: { path: string; caption?: string }) =>
+              this.sendFileHandler!({
+                channel: this.activeTurnOriginChannel,
+                path: input.path,
+                caption: input.caption,
               }),
           }
         : {}),
@@ -782,6 +817,7 @@ export class PersonaRuntime {
     );
 
     const startIndex = this.agent.state.messages.length;
+    const startPerf = performance.now();
     try {
       await this.agent.prompt(params.promptInstruction);
     } catch {
@@ -789,8 +825,9 @@ export class PersonaRuntime {
       return [params.eventSummary];
     }
 
+    const latencyMs = Math.max(1, Math.round(performance.now() - startPerf));
     const newMessages = this.agent.state.messages.slice(startIndex);
-    const { finalText } = extractTurnMetrics(newMessages);
+    const { finalText, totalUsage, toolCalls } = extractTurnMetrics(newMessages);
     const reply = finalText.trim() || params.eventSummary;
     const bubbles = splitIntoBubbles(reply, {
       enabled: this.hatoConfig.gateway.bubbles.enabled,
@@ -808,6 +845,37 @@ export class PersonaRuntime {
         createdAt: Date.now(),
       });
     }
+
+    const metrics = computeTurnMetrics({
+      inputTokens: totalUsage.input,
+      outputTokens: totalUsage.output,
+      cacheReadTokens: totalUsage.cacheRead,
+      cacheWriteTokens: totalUsage.cacheWrite,
+      latencyMs,
+      ttftMs: latencyMs,
+      decodeMs: latencyMs,
+    });
+    this.repo.insertTurnTrace({
+      canonicalUserId: params.canonicalUserId,
+      slot: "persona",
+      provider: resolved.providerSlug,
+      modelId: resolved.model.id,
+      api: String(resolved.model.api),
+      inputTokens: totalUsage.input,
+      outputTokens: totalUsage.output,
+      cacheReadTokens: totalUsage.cacheRead,
+      cacheWriteTokens: totalUsage.cacheWrite,
+      cacheHitRate: metrics.cacheHitRate,
+      ttftMs: null,
+      tps: null,
+      userPreview: params.eventSummary.replace(/\s+/g, " ").trim().slice(0, 100),
+      recalledIds: [],
+      timeCardText: params.promptInstruction,
+      toolCalls,
+      steps: extractTraceSteps(newMessages),
+      latencyMs,
+    });
+
     this.refreshTranscriptFromDb();
     return bubbles.length > 0 ? bubbles : [reply];
   }

@@ -2,14 +2,19 @@ import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import type { AssistantMessage, Message, TextContent } from "@earendil-works/pi-ai";
 import { Value } from "@sinclair/typebox/value";
-import { resolveSkillsDir, type HatoConfig } from "../config/app.js";
+import {
+  listEnabledWorkerBackends,
+  resolveEffectiveDefaultBackend,
+  resolveSkillsDir,
+  type HatoConfig,
+} from "../config/app.js";
 import { resolveMcpServerEntries, type McpConfig } from "../config/mcp.js";
 import { supportsCustomFetchOption, type ModelRegistry } from "../config/models.js";
 import type { ScopedProxyRouter } from "../config/proxy.js";
 import type { HatoRepository, RawMessageRecord } from "../db/repo.js";
 import type { MemoryStore } from "../memory/store.js";
 import { loadZoneSkills } from "../skills/loader.js";
-import { computeTurnMetrics, formatLlmTelemetryLog } from "../stats/metrics.js";
+import { computeTurnMetrics, extractTraceSteps, formatLlmTelemetryLog } from "../stats/metrics.js";
 import { formatLocalDateTime } from "../time/clock.js";
 import { logWarn, summarizeError } from "../utils/logger.js";
 import {
@@ -21,7 +26,12 @@ import {
   type WorkerBackend,
 } from "./schema.js";
 
-const DEFAULT_ROUTER_PROMPT = `You are Hato's Neutral Router. Select either "schedule_op", "ticket", or "needs_input" and output strict JSON only. Never rewrite technical requirements; select the contiguous { from_msg_id, to_msg_id } interval and authorize only necessary worker skills/MCP servers.`;
+const DEFAULT_ROUTER_PROMPT = `You are Hato's Neutral Router. Choose one strict JSON object using top-level key "decision" ("ticket" | "schedule_op" | "needs_input").
+For "ticket": {"decision":"ticket","backend":"<from enabled_backends>","brief_title":"<=30 chars","context_range":{"from_msg_id":"msg_...","to_msg_id":"msg_..."},"workspace_mode":"isolated","skills":[],"allowed_mcp_servers":[]}
+Backend selection: when routing_mode is "smart", pick "builtin-pi" for lightweight isolated single-file scripts/quick commands, and pick default_backend for host_repo, multi-file, or complex build/debug tasks; when "always_default", pick default_backend.
+For "schedule_op": {"decision":"schedule_op","action":"reschedule|pause|resume|delete","target_type":"script|open_loop","target_id":"id","summary":"..."}
+For "needs_input": {"decision":"needs_input","brief_title":"...","question":"..."}
+Output JSON only.`;
 
 const DEFAULT_INPUT_CLASSIFIER_PROMPT = `You are Hato's neutral input classifier. When active tickets are in "needs_input" state, decide whether the latest user message answers one of those tickets ("reply_ticket" with ticket_id and objective_reply) or is unrelated conversation / a new request for Persona ("persona_chat"). Output JSON only.`;
 
@@ -43,10 +53,14 @@ export class NeutralRouter {
 
   private loadRouterSystemPrompt(): string {
     const cfg = this.deps.getHatoConfig();
-    const candidate = resolve(cfg.paths.prompts_dir, "router.md");
-    if (existsSync(candidate)) {
-      const text = readFileSync(candidate, "utf8").trim();
-      if (text) return text;
+    for (const candidate of [
+      resolve(cfg.paths.prompts_dir, "router.md"),
+      resolve("prompts/router.md"),
+    ]) {
+      if (existsSync(candidate)) {
+        const text = readFileSync(candidate, "utf8").trim();
+        if (text) return text;
+      }
     }
     return DEFAULT_ROUTER_PROMPT;
   }
@@ -85,11 +99,14 @@ export class NeutralRouter {
       }
     }
 
-    const enabledBackends = getEnabledBackends(cfg);
+    const enabledBackends = listEnabledWorkerBackends(cfg);
+    const effectiveDefaultBackend = resolveEffectiveDefaultBackend(cfg);
+    const routingMode = cfg.worker.routing_mode ?? "smart";
     const formattedMsgs = formatNumberedMessages(recentMsgs, cfg.owner.timezone);
     const userPayload = [
       `[delegate hint (urgency=${params.urgency ?? "normal"})]: ${params.hint}`,
-      `[default_backend]: ${cfg.worker.default_backend}`,
+      `[routing_mode]: ${routingMode}`,
+      `[default_backend]: ${effectiveDefaultBackend}`,
       `[enabled_backends]: ${enabledBackends.join(", ")}`,
       `[allowed_repos]: ${cfg.worker.external_cli.allowed_repos.length > 0 ? cfg.worker.external_cli.allowed_repos.join(", ") : "(none)"}`,
       `[worker_skills]: ${workerSkills.length > 0 ? workerSkills.map((s) => `${s.name} (${s.description})`).join("; ") : "(none)"}`,
@@ -117,9 +134,12 @@ export class NeutralRouter {
             ? parsed.context_range.to_msg_id
             : (lastUserMsg?.id ?? recentMsgs[recentMsgs.length - 1]?.id ?? validFrom);
 
-          const backend = enabledBackends.includes(parsed.backend)
-            ? parsed.backend
-            : cfg.worker.default_backend;
+          const backend =
+            routingMode === "always_default"
+              ? effectiveDefaultBackend
+              : enabledBackends.includes(parsed.backend)
+                ? parsed.backend
+                : effectiveDefaultBackend;
 
           const validSkillSet = new Set(workerSkills.map((s) => s.name));
           const validMcpSet = new Set(workerMcpServers.map((m) => m.name));
@@ -281,6 +301,7 @@ export class NeutralRouter {
       decodeMs,
     });
 
+    const firstLine = userPrompt.split("\n")[0]?.trim() || userPrompt.trim();
     this.deps.repo.insertTurnTrace({
       canonicalUserId,
       slot: "router",
@@ -294,10 +315,18 @@ export class NeutralRouter {
       cacheHitRate: metrics.cacheHitRate,
       ttftMs,
       tps: metrics.decodeTps,
-      userPreview: `[${label}] ${userPrompt.slice(0, 48)}`,
+      userPreview: `[${label}] ${firstLine.slice(0, 140)}`,
       recalledIds: [],
-      timeCardText: "",
+      timeCardText: [
+        `router_task: ${label}`,
+        `--- System Prompt ---`,
+        systemPrompt,
+        "",
+        `--- Router Input Context ---`,
+        userPrompt,
+      ].join("\n"),
       toolCalls: [],
+      steps: extractTraceSteps([result]),
       latencyMs,
     });
 
@@ -306,21 +335,6 @@ export class NeutralRouter {
       .map((b) => b.text)
       .join("\n");
   }
-}
-
-function getEnabledBackends(config: HatoConfig): WorkerBackend[] {
-  const ext = config.worker.external_cli;
-  const enabled: WorkerBackend[] = [];
-  if (ext.codex?.enabled ?? true) enabled.push("codex");
-  if (ext.agy?.enabled ?? true) enabled.push("agy");
-  if (ext.opencode_v2?.enabled ?? true) enabled.push("opencode-v2");
-  if (ext.external_pi?.enabled ?? false) enabled.push("external-pi");
-  if (ext.claude_code?.enabled ?? false) enabled.push("claude-code");
-  enabled.push("builtin-pi");
-  if (!enabled.includes(config.worker.default_backend)) {
-    enabled.unshift(config.worker.default_backend);
-  }
-  return enabled.filter((b) => WORKER_BACKENDS.includes(b));
 }
 
 function buildFallbackTicketDecision(
@@ -332,7 +346,7 @@ function buildFallbackTicketDecision(
   const lastId = recentMsgs[recentMsgs.length - 1]?.id ?? firstId;
   return {
     decision: "ticket",
-    backend: config.worker.default_backend,
+    backend: resolveEffectiveDefaultBackend(config),
     brief_title: hint.trim().slice(0, 32) || "后台任务",
     context_range: {
       from_msg_id: firstId,

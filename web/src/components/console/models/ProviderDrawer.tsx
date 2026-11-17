@@ -16,6 +16,7 @@ import {
   X,
 } from "lucide-react";
 import type { SecretState } from "@/api";
+import { ConsoleSelect } from "@/components/console/ConsolePrimitives";
 import {
   API_OPTIONS,
   deriveEnvName,
@@ -461,32 +462,23 @@ export function ProviderDrawer({
                 </div>
 
                 <div className="flex flex-col gap-1.5">
-                  <label
-                    htmlFor="drawer-provider-protocol"
-                    className="text-xs font-medium text-zinc-600 dark:text-zinc-400"
-                  >
+                  <span className="text-xs font-medium text-zinc-600 dark:text-zinc-400">
                     接口协议
-                  </label>
-                  <div className="relative">
-                    <select
-                      id="drawer-provider-protocol"
-                      value={form.protocol}
-                      onChange={(e) =>
-                        setForm((prev) => ({
-                          ...prev,
-                          protocol: e.target.value,
-                        }))
-                      }
-                      className="h-9 w-full appearance-none rounded-lg border border-zinc-200 bg-zinc-50 pr-8 pl-3 text-xs text-zinc-900 focus:border-emerald-500 focus:outline-none dark:border-zinc-800 dark:bg-[#090d10] dark:text-zinc-100"
-                    >
-                      {API_OPTIONS.map((opt) => (
-                        <option key={opt.value} value={opt.value}>
-                          {opt.label}
-                        </option>
-                      ))}
-                    </select>
-                    <ChevronDown className="pointer-events-none absolute top-1/2 right-2.5 h-3.5 w-3.5 -translate-y-1/2 text-zinc-400" />
-                  </div>
+                  </span>
+                  <ConsoleSelect
+                    value={form.protocol}
+                    onValueChange={(next) =>
+                      setForm((prev) => ({
+                        ...prev,
+                        protocol: next,
+                      }))
+                    }
+                    options={API_OPTIONS.map((opt) => ({
+                      value: opt.value,
+                      label: opt.label,
+                    }))}
+                    triggerClassName="bg-zinc-50 border-zinc-200 dark:border-zinc-800 dark:bg-[#090d10]"
+                  />
                 </div>
 
                 <div className="flex flex-col gap-1.5">

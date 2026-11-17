@@ -21,10 +21,21 @@ export interface StoredMessageRecord {
   id: string;
   canonicalUserId: string;
   channel: string;
-  role: "user" | "assistant" | "system";
+  role: "user" | "assistant" | "system" | "executed_event";
   content: string;
   bubbles?: string[];
   createdAt: number;
+}
+
+export interface TicketSummary {
+  id: string;
+  status: string;
+  backend: string;
+  briefTitle: string;
+  originChannel: string;
+  progressNote: string | null;
+  createdAt: number;
+  updatedAt: number;
 }
 
 export interface ChatSessionRecord {
@@ -227,11 +238,12 @@ export interface HatoConfig {
   worker: {
     default_backend:
       | "builtin-pi"
-      | "codex"
-      | "agy"
+      | "codex-cli"
+      | "antigravity-cli"
       | "opencode-v2"
       | "external-pi"
       | "claude-code";
+    routing_mode?: "smart" | "always_default";
     workspace_ttl_days: number;
     sandbox: {
       image: string;
@@ -246,14 +258,15 @@ export interface HatoConfig {
       host_mcp_allowlist?: string[];
       permission_preset?: ExternalCliPermissionPreset;
       timeout_ms?: number;
-      codex?: {
+      env?: Record<string, string>;
+      codex_cli?: {
         enabled?: boolean;
         command?: string;
         sandbox?: string;
         approval?: string;
         model?: string;
       };
-      agy?: {
+      antigravity_cli?: {
         enabled?: boolean;
         command?: string;
         mode?: string;
@@ -264,6 +277,7 @@ export interface HatoConfig {
       opencode_v2?: {
         enabled?: boolean;
         command?: string;
+        permission_mode?: string;
         auto?: boolean;
         agent?: string;
         model?: string;
@@ -293,11 +307,17 @@ export interface CliOptionChoice {
   effectiveHatoValue?: string | boolean;
 }
 
+export interface ExternalCliModelOption {
+  id: string;
+  label?: string;
+}
+
 export interface ExternalCliProbeEntry {
-  backend: "codex" | "agy" | "opencode-v2" | "external-pi" | "claude-code";
-  tier: 1 | 2 | 3;
+  backend: "codex-cli" | "antigravity-cli" | "opencode-v2" | "external-pi" | "claude-code";
   enabled: boolean;
   command: string;
+  commandSource?: "default" | "configured";
+  resolvedPath?: string;
   installed: boolean;
   available: boolean;
   version?: string;
@@ -306,6 +326,7 @@ export interface ExternalCliProbeEntry {
   hostConfigPath?: string;
   hostSummary: Record<string, string | boolean | string[]>;
   options: CliOptionChoice[];
+  models?: ExternalCliModelOption[];
   effectiveArgsPreview: string[];
   probedAtMs: number;
 }
@@ -383,6 +404,17 @@ export interface PromptLayersSnapshot {
   soulPath: string;
   soulText: string;
   combinedText: string;
+}
+
+export interface TelegramUserProfile {
+  id: string;
+  ok: boolean;
+  firstName?: string;
+  lastName?: string;
+  username?: string;
+  displayName?: string;
+  avatarDataUrl?: string;
+  error?: string;
 }
 
 export interface ConfigSnapshotResponse {
@@ -659,6 +691,18 @@ export const api = {
     if (params.sessionId) q.set("sessionId", params.sessionId);
     return requestJson<StaticsResponse>(`/api/statics?${q.toString()}`);
   },
+  fetchTelegramUsers: (userIds: Array<string | number>, refresh = false) =>
+    requestJson<{ ok: boolean; profiles: TelegramUserProfile[] }>("/api/gateway/telegram/users", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ userIds, refresh }),
+    }),
+  getWorkerCliModels: (
+    backend: "codex-cli" | "antigravity-cli" | "opencode-v2" | "external-pi" | "claude-code",
+  ) =>
+    requestJson<{ ok: boolean; backend: string; models: ExternalCliModelOption[] }>(
+      `/api/worker/cli-models?backend=${encodeURIComponent(backend)}`,
+    ),
   getBrowserStatus: () => requestJson<{ ok: boolean; status: BrowserStatus }>("/api/browser/status"),
   browserAction: (payload: {
     action:
@@ -707,6 +751,14 @@ export const api = {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
+    }),
+  getTickets: () =>
+    requestJson<{ ok: boolean; tickets: TicketSummary[] }>("/api/tickets"),
+  confirmTicket: (ticketId: string, approved: boolean) =>
+    requestJson<{ ok: boolean; message: string }>("/api/tickets/confirm", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ticketId, approved }),
     }),
   async sendChatStream(
     payload: { text: string; images?: Array<{ data: string; mimeType: string }> },

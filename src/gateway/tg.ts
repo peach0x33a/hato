@@ -16,6 +16,7 @@ import {
   selectTelegramStickerDownloadCandidates,
 } from "./media.js";
 import { formatGatewayMessageLog } from "./msg-log.js";
+import { markdownToTelegramHtml } from "./tg-markdown.js";
 import type {
   ChannelAdapter,
   ChannelCapabilities,
@@ -213,12 +214,38 @@ export class TelegramAdapter implements ChannelAdapter {
     const chunks = splitTelegramText(text, TG_MAX_MESSAGE_LENGTH);
     let lastMsgId: string | undefined;
     for (let i = 0; i < chunks.length; i++) {
-      const sent = await this.runWithTelegramRetry(() =>
-        this.bot.api.sendMessage(Number(platformUserId), chunks[i]!, {
-          reply_parameters:
-            i === 0 && replyToPlatformMsgId ? { message_id: Number(replyToPlatformMsgId) } : undefined,
-        }),
-      );
+      const chunk = chunks[i]!;
+      const replyParameters =
+        i === 0 && replyToPlatformMsgId ? { message_id: Number(replyToPlatformMsgId) } : undefined;
+      const htmlChunk = markdownToTelegramHtml(chunk);
+      let sent;
+      if (htmlChunk.length <= TG_MAX_MESSAGE_LENGTH) {
+        try {
+          sent = await this.runWithTelegramRetry(() =>
+            this.bot.api.sendMessage(Number(platformUserId), htmlChunk, {
+              parse_mode: "HTML",
+              reply_parameters: replyParameters,
+            }),
+          );
+        } catch (err) {
+          if (err instanceof GrammyError && err.error_code === 400) {
+            logWarn("TG", `HTML parse fallback to plain text: ${err.description}`);
+            sent = await this.runWithTelegramRetry(() =>
+              this.bot.api.sendMessage(Number(platformUserId), chunk, {
+                reply_parameters: replyParameters,
+              }),
+            );
+          } else {
+            throw err;
+          }
+        }
+      } else {
+        sent = await this.runWithTelegramRetry(() =>
+          this.bot.api.sendMessage(Number(platformUserId), chunk, {
+            reply_parameters: replyParameters,
+          }),
+        );
+      }
       lastMsgId = String(sent.message_id);
     }
     console.log(

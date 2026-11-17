@@ -1,3 +1,5 @@
+import { existsSync, statSync } from "node:fs";
+import { resolve } from "node:path";
 import type { AgentTool } from "@earendil-works/pi-agent-core";
 import { arr, bool, num, obj, oneOf, opt, str } from "@earendil-works/pi-schema";
 import type { BrowserRuntime } from "../browser/runtime.js";
@@ -45,6 +47,12 @@ const DateMathParams = obj({
 
 const InspectTicketsParams = obj({
   ticket_id: opt(str({ description: "Optional specific ticket ID like t_0042" })),
+  include_details: opt(
+    bool({
+      description:
+        "Set true when the user explicitly asks to see detailed execution logs, output report, or generated file paths",
+    }),
+  ),
 });
 
 const ListSchedulesParams = obj({});
@@ -122,6 +130,17 @@ const ReadSkillParams = obj({
 const DelegateParams = obj({
   hint: str({ description: "Brief anchor phrase describing what background engineering/script task is requested" }),
   urgency: opt(oneOf(["normal", "high"])),
+  deliver_files: opt(
+    bool({
+      description:
+        "Set true when the user wants generated files sent back to chat automatically upon completion; otherwise leave false.",
+    }),
+  ),
+});
+
+const SendFileParams = obj({
+  path: str({ description: "Local file path to send to the user" }),
+  caption: opt(str({ description: "Optional short caption for the file" })),
 });
 
 /**
@@ -138,10 +157,14 @@ export function createPersonaReadOnlyTools(params: {
   selfConfigDeps?: SelfConfigDeps;
   enableReadSkillTool?: boolean;
   extraTools?: readonly AgentTool<any>[];
-  onDelegate?: (input: { hint: string; urgency?: "normal" | "high" }) => {
+  onDelegate?: (input: { hint: string; urgency?: "normal" | "high"; deliverFiles?: boolean }) => {
     ticketId: string;
     status: string;
   };
+  onSendFile?: (input: { path: string; caption?: string }) => Promise<{
+    ok: boolean;
+    message: string;
+  }>;
   onMemoryRecalled?: (ids: string[]) => void;
   onBeforeToolExecute?: (toolName: string, input: unknown) => Promise<void>;
 }): AgentTool<any>[] {
@@ -175,12 +198,17 @@ export function createPersonaReadOnlyTools(params: {
 
   const inspectTicketsTool: AgentTool<typeof InspectTicketsParams> = {
     name: "inspect_tickets",
-    label: "查看工单状态",
+    label: "查看后台任务详情",
     description:
-      "只读查询当前或历史后台工单详情。仅在用户主动问及工单/任务进展时调用；日常闲聊不要主动提及或推荐此工具。",
+      "只读查询后台任务状态与执行输出详情。仅在用户主动询问任务进展、要求查看“执行输出详情”/详细报告/生成产物时调用（设置 include_details: true）；日常闲聊不要主动提及。",
     parameters: InspectTicketsParams,
     async execute(_toolCallId, input) {
-      const text = runInspectTickets(params.repo, params.canonicalUserId, input.ticket_id);
+      const text = runInspectTickets(
+        params.repo,
+        params.canonicalUserId,
+        input.ticket_id,
+        Boolean(input.include_details),
+      );
       return {
         content: [{ type: "text", text }],
         details: { text },
@@ -469,7 +497,7 @@ export function createPersonaReadOnlyTools(params: {
       name: "self_config",
       label: "自我配置管理",
       description:
-        "安全查看或修改 Hato 自身的运行配置（hato.toml 白名单项、prompts.order 提示词顺序、模型槽位、人设 soul.md、自定义提示词块 blocks/*.md 与固定关系约定）。仅在用户明确要求调整配置或你的设定时调用。",
+        "安全查看或修改 Hato 自身的运行配置（hato.toml 白名单项、只读 worker 后端与外部 CLI 委派状态、prompts.order 提示词顺序、模型槽位、人设 soul.md、自定义提示词块 blocks/*.md 与固定关系约定）。当用户询问当前配置、模型、worker 后端或要求调整设定时调用；不要凭猜测回答配置细节。",
       parameters: SelfConfigParams,
       async execute(_toolCallId, input) {
         let parsedPatch: Record<string, unknown> | undefined;
@@ -588,18 +616,19 @@ export function createPersonaReadOnlyTools(params: {
       name: "delegate",
       label: "派发后台任务",
       description:
-        "快速将写代码、改仓库、跑脚本、修改定时任务或需要使用 Worker 工具的请求异步入队给后台路由器与 Worker，立即返回工单号，绝不阻塞当前对话。",
+        "仅用于写代码、写/改/跑脚本（如 Python、Shell 等）、编辑本地文件或仓库、执行命令行操作或修改定时任务。普通的算数请用 calc，查天气/查资讯请直接用 web_search/web_fetch，绝不要误派发到这里。",
       parameters: DelegateParams,
       async execute(_toolCallId, input) {
         const accepted = delegateFn({
           hint: input.hint,
           urgency: input.urgency,
+          deliverFiles: input.deliver_files,
         });
         return {
           content: [
             {
               type: "text",
-              text: `已异步入队后台工单 ${accepted.ticketId} (status=${accepted.status})，可自然告知用户正在处理。`,
+              text: `已转交后台处理 (internal_id=${accepted.ticketId}, status=${accepted.status})。请用自然日常口吻简短回应“这就去弄，好了告诉你”，除非用户主动问，否则不要报出工单号或说“派出工单”。`,
             },
           ],
           details: accepted,
@@ -607,6 +636,50 @@ export function createPersonaReadOnlyTools(params: {
       },
     };
     tools.push(delegateTool);
+  }
+
+  if (params.onSendFile) {
+    const sendFileFn = params.onSendFile;
+    const sendFileTool: AgentTool<typeof SendFileParams> = {
+      name: "send_file",
+      label: "发送文件",
+      description:
+        "将本地文件发送到当前聊天窗口。仅在用户明确索取文件、或你判断需要把生成的文件发给用户时调用。",
+      parameters: SendFileParams,
+      async execute(_toolCallId, input) {
+        const resolved = resolve(input.path.trim());
+        if (!existsSync(resolved)) {
+          return {
+            content: [{ type: "text", text: `文件不存在: ${resolved}` }],
+            details: { ok: false, path: resolved },
+          };
+        }
+        try {
+          if (!statSync(resolved).isFile()) {
+            return {
+              content: [{ type: "text", text: `目标路径不是常规文件: ${resolved}` }],
+              details: { ok: false, path: resolved },
+            };
+          }
+          const res = await sendFileFn({ path: resolved, caption: input.caption });
+          return {
+            content: [{ type: "text", text: res.message }],
+            details: { ok: res.ok, path: resolved },
+          };
+        } catch (err) {
+          return {
+            content: [
+              {
+                type: "text",
+                text: `发送文件失败: ${err instanceof Error ? err.message : String(err)}`,
+              },
+            ],
+            details: { ok: false, path: resolved },
+          };
+        }
+      },
+    };
+    tools.push(sendFileTool);
   }
 
   if (params.extraTools && params.extraTools.length > 0) {
