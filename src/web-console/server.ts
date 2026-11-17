@@ -12,6 +12,7 @@ import {
   resolvePromptOrder,
   resolveTavilySearchConfig,
   resolveWebConsoleConfig,
+  resolveWorkerExternalCliConfig,
   validateHatoConfigObject,
   type HatoConfig,
 } from "../config/app.js";
@@ -39,6 +40,10 @@ import {
 } from "../setup/probe.js";
 import { parseSinceSpec, summarizeTurnTraces } from "../stats/metrics.js";
 import { logInfo, summarizeError } from "../utils/logger.js";
+import {
+  probeAllExternalClis,
+  type ExternalCliProbeEntry,
+} from "../worker/cli-probe.js";
 
 export interface WebConsoleReloadResult {
   slots: Array<{ slot: string; target: string; api: string; baseUrl: string }>;
@@ -62,6 +67,7 @@ export interface WebConsoleServerDeps {
   getActorLock: () => ActorLock;
   getSlashDeps: (canonicalUserId: string) => SlashCommandDeps;
   reloadAll: () => Promise<WebConsoleReloadResult>;
+  probeExternalClis?: (config: HatoConfig) => Promise<ExternalCliProbeEntry[]>;
 }
 
 const MIME_TYPES: Record<string, string> = {
@@ -220,6 +226,10 @@ export class WebConsoleServer {
         }
         if (pathname === "/api/config/probe" && method === "POST") {
           await this.handleProbe(req, res);
+          return;
+        }
+        if (pathname === "/api/worker/cli-probe" && (method === "GET" || method === "POST")) {
+          await this.handleWorkerCliProbe(res);
           return;
         }
         if (pathname === "/api/statics" && method === "GET") {
@@ -964,6 +974,19 @@ export class WebConsoleServer {
     });
 
     sendJson(res, 200, { ok: true, result });
+  }
+
+  private async handleWorkerCliProbe(res: ServerResponse): Promise<void> {
+    const config = this.deps.getConfig();
+    const probeFn = this.deps.probeExternalClis ?? probeAllExternalClis;
+    const probes = await probeFn(config);
+    const resolved = resolveWorkerExternalCliConfig(config);
+    sendJson(res, 200, {
+      ok: true,
+      hatoOnlyScope: true,
+      permissionPreset: resolved.permissionPreset,
+      probes,
+    });
   }
 
   private handleStatics(url: URL, res: ServerResponse): void {

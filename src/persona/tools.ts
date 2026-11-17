@@ -119,8 +119,13 @@ const ReadSkillParams = obj({
   ),
 });
 
+const DelegateParams = obj({
+  hint: str({ description: "Brief anchor phrase describing what background engineering/script task is requested" }),
+  urgency: opt(oneOf(["normal", "high"])),
+});
+
 /**
- * Zero-side-effect, read-only micro-tools + isolated web/browser + personal skills/MCP + guarded self-config capabilities exposed to Persona.
+ * Zero-side-effect, read-only micro-tools + isolated web/browser + personal skills/MCP + guarded self-config + fast delegate() exposed to Persona.
  */
 export function createPersonaReadOnlyTools(params: {
   repo: HatoRepository;
@@ -133,6 +138,10 @@ export function createPersonaReadOnlyTools(params: {
   selfConfigDeps?: SelfConfigDeps;
   enableReadSkillTool?: boolean;
   extraTools?: readonly AgentTool<any>[];
+  onDelegate?: (input: { hint: string; urgency?: "normal" | "high" }) => {
+    ticketId: string;
+    status: string;
+  };
   onMemoryRecalled?: (ids: string[]) => void;
   onBeforeToolExecute?: (toolName: string, input: unknown) => Promise<void>;
 }): AgentTool<any>[] {
@@ -571,6 +580,33 @@ export function createPersonaReadOnlyTools(params: {
       },
     };
     tools.push(readSkillTool);
+  }
+
+  if (params.onDelegate) {
+    const delegateFn = params.onDelegate;
+    const delegateTool: AgentTool<typeof DelegateParams> = {
+      name: "delegate",
+      label: "派发后台任务",
+      description:
+        "快速将写代码、改仓库、跑脚本、修改定时任务或需要使用 Worker 工具的请求异步入队给后台路由器与 Worker，立即返回工单号，绝不阻塞当前对话。",
+      parameters: DelegateParams,
+      async execute(_toolCallId, input) {
+        const accepted = delegateFn({
+          hint: input.hint,
+          urgency: input.urgency,
+        });
+        return {
+          content: [
+            {
+              type: "text",
+              text: `已异步入队后台工单 ${accepted.ticketId} (status=${accepted.status})，可自然告知用户正在处理。`,
+            },
+          ],
+          details: accepted,
+        };
+      },
+    };
+    tools.push(delegateTool);
   }
 
   if (params.extraTools && params.extraTools.length > 0) {

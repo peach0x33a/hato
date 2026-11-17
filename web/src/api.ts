@@ -107,11 +107,19 @@ export interface RetryPolicyTomlConfig {
   jitter: boolean;
 }
 
+export type ExternalCliPermissionPreset =
+  | "follow_host"
+  | "auto_safe"
+  | "yolo"
+  | "read_only"
+  | "custom";
+
 export interface HatoConfig {
   paths: {
     sqlite: string;
     workspaces_dir: string;
     prompts_dir: string;
+    skills_dir?: string;
   };
   prompts?: {
     order?: string[];
@@ -217,7 +225,13 @@ export interface HatoConfig {
     };
   };
   worker: {
-    default_backend: "builtin-pi" | "codex" | "claude-code";
+    default_backend:
+      | "builtin-pi"
+      | "codex"
+      | "agy"
+      | "opencode-v2"
+      | "external-pi"
+      | "claude-code";
     workspace_ttl_days: number;
     sandbox: {
       image: string;
@@ -227,8 +241,80 @@ export interface HatoConfig {
     };
     external_cli: {
       allowed_repos: string[];
+      reuse_host_auth_and_provider?: boolean;
+      inherit_host_mcp?: boolean;
+      host_mcp_allowlist?: string[];
+      permission_preset?: ExternalCliPermissionPreset;
+      timeout_ms?: number;
+      codex?: {
+        enabled?: boolean;
+        command?: string;
+        sandbox?: string;
+        approval?: string;
+        model?: string;
+      };
+      agy?: {
+        enabled?: boolean;
+        command?: string;
+        mode?: string;
+        skip_permissions?: boolean;
+        sandbox?: boolean;
+        model?: string;
+      };
+      opencode_v2?: {
+        enabled?: boolean;
+        command?: string;
+        auto?: boolean;
+        agent?: string;
+        model?: string;
+      };
+      external_pi?: {
+        enabled?: boolean;
+        command?: string;
+        model?: string;
+      };
+      claude_code?: {
+        enabled?: boolean;
+        command?: string;
+        permission_mode?: string;
+        skip_permissions?: boolean;
+        model?: string;
+      };
     };
   };
+}
+
+export interface CliOptionChoice {
+  key: string;
+  label: string;
+  kind: "enum" | "boolean";
+  choices?: string[];
+  hostDefault?: string | boolean;
+  effectiveHatoValue?: string | boolean;
+}
+
+export interface ExternalCliProbeEntry {
+  backend: "codex" | "agy" | "opencode-v2" | "external-pi" | "claude-code";
+  tier: 1 | 2 | 3;
+  enabled: boolean;
+  command: string;
+  installed: boolean;
+  available: boolean;
+  version?: string;
+  v2Verified?: boolean;
+  reason?: string;
+  hostConfigPath?: string;
+  hostSummary: Record<string, string | boolean | string[]>;
+  options: CliOptionChoice[];
+  effectiveArgsPreview: string[];
+  probedAtMs: number;
+}
+
+export interface WorkerCliProbeResponse {
+  ok: boolean;
+  hatoOnlyScope: boolean;
+  permissionPreset: ExternalCliPermissionPreset;
+  probes: ExternalCliProbeEntry[];
 }
 
 export interface ModelDefinitionConfig {
@@ -531,6 +617,10 @@ export const api = {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ target }),
+    }),
+  probeWorkerClis: (refresh = false) =>
+    requestJson<WorkerCliProbeResponse>("/api/worker/cli-probe", {
+      method: refresh ? "POST" : "GET",
     }),
   testModel: (input: {
     providerSlug: string;

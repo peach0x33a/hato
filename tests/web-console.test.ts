@@ -535,6 +535,22 @@ hindsight_llm = "faux-provider/faux-persona-1"
     });
     const resumeJson = (await resumeRes.json()) as { ok: boolean; status: BrowserStatus };
     assert.equal(resumeJson.status.pendingTakeover, false);
+
+    const cliProbeRes = await fetch(`${baseUrl}/api/worker/cli-probe`, {
+      headers: authHeaders,
+    });
+    assert.equal(cliProbeRes.status, 200);
+    const cliProbeJson = (await cliProbeRes.json()) as {
+      ok: boolean;
+      hatoOnlyScope: boolean;
+      probes: Array<{ backend: string }>;
+    };
+    assert.equal(cliProbeJson.ok, true);
+    assert.equal(cliProbeJson.hatoOnlyScope, true);
+    assert.deepEqual(
+      cliProbeJson.probes.map((p) => p.backend),
+      ["codex", "agy", "opencode-v2", "external-pi", "claude-code"],
+    );
   } finally {
     delete process.env[tokenEnvName];
     delete process.env[tgTokenEnv];

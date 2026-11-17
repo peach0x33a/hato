@@ -92,6 +92,15 @@ export class PersonaRuntime {
   private activeTurn: ActivePersonaTurnState | null = null;
   private readonly pendingSupersededImages = new Map<string, ImageContent[]>();
   private reloadHandler: (() => Promise<void>) | null = null;
+  private delegateHandler:
+    | ((input: {
+        canonicalUserId: string;
+        originChannel: InboundBatch["originChannel"];
+        hint: string;
+        urgency?: "normal" | "high";
+      }) => { ticketId: string; status: string })
+    | null = null;
+  private activeTurnOriginChannel: InboundBatch["originChannel"] = "tg";
 
   constructor(
     private hatoConfig: HatoConfig,
@@ -182,6 +191,23 @@ export class PersonaRuntime {
     this.reloadHandler = handler;
   }
 
+  setDelegateHandler(
+    handler:
+      | ((input: {
+          canonicalUserId: string;
+          originChannel: InboundBatch["originChannel"];
+          hint: string;
+          urgency?: "normal" | "high";
+        }) => { ticketId: string; status: string })
+      | null,
+  ): void {
+    this.delegateHandler = handler;
+    if (!this.activeTurn) {
+      this.syncTools();
+      this.refreshTranscriptFromDb();
+    }
+  }
+
   setMemoryStore(nextMemoryStore: MemoryStore | null): void {
     this.memoryStore = nextMemoryStore;
   }
@@ -240,6 +266,17 @@ export class PersonaRuntime {
       getMemoryStore: () => this.memoryStore,
       enableReadSkillTool: this.personalSkills.length > 0,
       extraTools: this.mcpPool?.getToolsForZone("personal") ?? [],
+      ...(this.delegateHandler
+        ? {
+            onDelegate: (input: { hint: string; urgency?: "normal" | "high" }) =>
+              this.delegateHandler!({
+                canonicalUserId,
+                originChannel: this.activeTurnOriginChannel,
+                hint: input.hint,
+                urgency: input.urgency,
+              }),
+          }
+        : {}),
       selfConfigDeps: {
         hatoConfigPath: this.hatoConfigPath,
         getHatoConfig: () => this.hatoConfig,
@@ -353,6 +390,7 @@ export class PersonaRuntime {
     },
   ): Promise<PersonaTurnOutput> {
     const canonicalUserId = batch.canonicalUserId;
+    this.activeTurnOriginChannel = batch.originChannel;
     const resolved = this.modelRegistry.resolveSlot("persona");
     this.agent.state.model = resolved.model;
     this.agent.state.thinkingLevel = clampThinkingLevel(
@@ -715,6 +753,63 @@ export class PersonaRuntime {
       cacheHitRate: turnMetrics.cacheHitRate,
       tps: turnMetrics.decodeTps,
     };
+  }
+
+  /**
+   * Narrate a background ticket result, question, or schedule event in Persona's voice
+   * without touching verbatim blocks or artifacts.
+   */
+  async narrateBackgroundEvent(params: {
+    canonicalUserId: string;
+    channel: InboundBatch["originChannel"];
+    eventSummary: string;
+    promptInstruction: string;
+  }): Promise<string[]> {
+    this.repo.appendRawMessage({
+      canonicalUserId: params.canonicalUserId,
+      channel: params.channel,
+      role: "executed_event",
+      content: params.eventSummary,
+      createdAt: Date.now(),
+    });
+    this.refreshTranscriptFromDb();
+
+    const resolved = this.modelRegistry.resolveSlot("persona");
+    this.agent.state.model = resolved.model;
+    this.agent.state.thinkingLevel = clampThinkingLevel(
+      resolved.model,
+      resolved.model.reasoning ? "low" : "off",
+    );
+
+    const startIndex = this.agent.state.messages.length;
+    try {
+      await this.agent.prompt(params.promptInstruction);
+    } catch {
+      this.refreshTranscriptFromDb();
+      return [params.eventSummary];
+    }
+
+    const newMessages = this.agent.state.messages.slice(startIndex);
+    const { finalText } = extractTurnMetrics(newMessages);
+    const reply = finalText.trim() || params.eventSummary;
+    const bubbles = splitIntoBubbles(reply, {
+      enabled: this.hatoConfig.gateway.bubbles.enabled,
+      maxPerTurn: this.hatoConfig.gateway.bubbles.max_per_turn,
+      delimiter: this.hatoConfig.gateway.bubbles.delimiter,
+    });
+
+    const persisted = bubbles.join("\n\n");
+    if (persisted) {
+      this.repo.appendRawMessage({
+        canonicalUserId: params.canonicalUserId,
+        channel: params.channel,
+        role: "assistant",
+        content: persisted,
+        createdAt: Date.now(),
+      });
+    }
+    this.refreshTranscriptFromDb();
+    return bubbles.length > 0 ? bubbles : [reply];
   }
 
   /**

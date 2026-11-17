@@ -11,13 +11,15 @@ import {
   type HatoConfig,
 } from "./config/app.js";
 import { collectReloadDiff, fingerprintSecret, type ReloadSnapshot } from "./config/diff.js";
-import { loadMcpConfig } from "./config/mcp.js";
+import { loadMcpConfig, type McpConfig } from "./config/mcp.js";
 import { ModelRegistry } from "./config/models.js";
 import { ScopedProxyRouter } from "./config/proxy.js";
 import { loadSecretEnv, reloadSecretEnv, requireSecret } from "./config/secrets.js";
 import { bindTelegramHomeChannel } from "./config/store.js";
 import { openDatabase } from "./db/client.js";
 import { HatoRepository } from "./db/repo.js";
+import { TicketCoordinator } from "./dispatch/coordinator.js";
+import { NeutralRouter } from "./dispatch/router.js";
 import { MessageDebouncer, mergeInboundBatches } from "./gateway/debouncer.js";
 import { TelegramAdapter } from "./gateway/tg.js";
 import type { InboundBatch } from "./gateway/types.js";
@@ -29,6 +31,9 @@ import type { MemoryStore } from "./memory/store.js";
 import { PersonaRuntime } from "./persona/agent.js";
 import { logError, logInfo, logWarn, setLogTimezone, summarizeError } from "./utils/logger.js";
 import { WebConsoleServer } from "./web-console/server.js";
+import { WorkerDispatcher } from "./worker/backend.js";
+import { BuiltinPiRunner } from "./worker/builtin-pi.js";
+import { ExternalCliRunner } from "./worker/external-cli.js";
 
 const HATO_CONFIG_PATH = "config/hato.toml";
 const MODELS_CONFIG_PATH = "config/models.toml";
@@ -56,8 +61,9 @@ async function main(): Promise<void> {
   });
 
   const modelRegistry = new ModelRegistry(MODELS_CONFIG_PATH, repo);
+  let mcpConfig: McpConfig = loadMcpConfig(MCP_CONFIG_PATH);
   const mcpPool = new McpClientPool(proxyRouter);
-  await mcpPool.syncConfig(loadMcpConfig(MCP_CONFIG_PATH), { eagerZones: ["personal"] });
+  await mcpPool.syncConfig(mcpConfig, { eagerZones: ["personal"] });
   const browserRuntime = new BrowserRuntime(hatoConfig, modelRegistry, proxyRouter, undefined, repo);
   let memoryStore = buildMemoryStore(hatoConfig, proxyRouter, repo);
   const personaRuntime = new PersonaRuntime(
@@ -79,6 +85,36 @@ async function main(): Promise<void> {
   );
   const actorLock = new ActorLock();
   const bus = new EventBus();
+
+  const neutralRouter = new NeutralRouter({
+    getHatoConfig: () => hatoConfig,
+    getMcpConfig: () => mcpConfig,
+    modelRegistry,
+    proxyRouter,
+    repo,
+    getMemoryStore: () => memoryStore,
+  });
+  const builtinRunner = new BuiltinPiRunner({
+    getHatoConfig: () => hatoConfig,
+    modelRegistry,
+    proxyRouter,
+    repo,
+    mcpPool,
+  });
+  const externalRunner = new ExternalCliRunner({
+    getHatoConfig: () => hatoConfig,
+    getMcpConfig: () => mcpConfig,
+    proxyRouter,
+  });
+  const workerDispatcher = new WorkerDispatcher(builtinRunner, externalRunner);
+  const ticketCoordinator = new TicketCoordinator({
+    getHatoConfig: () => hatoConfig,
+    repo,
+    router: neutralRouter,
+    dispatcher: workerDispatcher,
+    bus,
+  });
+  personaRuntime.setDelegateHandler((input) => ticketCoordinator.enqueueDelegation(input));
 
   const compactionManager = new CompactionManager(
     {
@@ -123,7 +159,8 @@ async function main(): Promise<void> {
       idleCommitAfterMinutes: nextConfig.context.idle_commit_after_minutes,
     });
     memoryStore = buildMemoryStore(nextConfig, proxyRouter, repo, memoryStore);
-    await mcpPool.syncConfig(loadMcpConfig(MCP_CONFIG_PATH), { eagerZones: ["personal"] });
+    mcpConfig = loadMcpConfig(MCP_CONFIG_PATH);
+    await mcpPool.syncConfig(mcpConfig, { eagerZones: ["personal"] });
     personaRuntime.updateConfig(nextConfig, memoryStore);
     memoryCurator.updateConfig(nextConfig, memoryStore);
     tgAdapter?.updateConfig(nextConfig);
@@ -250,6 +287,14 @@ async function main(): Promise<void> {
 
       const mergedBatch = mergeInboundBatches(drained);
       const tgTargetId = mergedBatch.originPlatformUserId;
+
+      const routedToTicket = await ticketCoordinator
+        .tryRouteInboundToTicket(mergedBatch)
+        .catch(() => ({ handledByTicket: false as const }));
+      if (routedToTicket.handledByTicket) {
+        return;
+      }
+
       await tgAdapter.sendTyping(tgTargetId).catch(() => undefined);
 
       const hasNewerQueuedInput = () =>
@@ -306,6 +351,85 @@ async function main(): Promise<void> {
     });
   });
 
+  const resolveTgTarget = (): string | null => {
+    const first = hatoConfig.owner.channels.tg.user_ids[0];
+    return first !== undefined ? String(first) : null;
+  };
+
+  bus.on("ticket_result", async ({ canonicalUserId, briefTitle, result }) => {
+    const tgTargetId = resolveTgTarget();
+    if (!tgAdapter || !tgTargetId) return;
+
+    await actorLock.run(canonicalUserId, async () => {
+      const caveatText =
+        result.caveats.length > 0 ? `\n需要注意：${result.caveats.join("；")}` : "";
+      const secretsNote =
+        result.required_secrets.length > 0
+          ? `\n所需环境变量密钥（勿发聊天窗口，请在 .env 配置）：${result.required_secrets.join(", ")}`
+          : "";
+      const summary = `[工单 ${result.ticket_id} · ${briefTitle}] (${result.status}): ${result.narration_hint}${caveatText}${secretsNote}`;
+
+      const bubbles = await personaRuntime.narrateBackgroundEvent({
+        canonicalUserId,
+        channel: "tg",
+        eventSummary: summary,
+        promptInstruction: `[系统事件：后台工单 "${briefTitle}" (${result.ticket_id}) 已结束，状态=${result.status}。请用自然口吻转述结果要点：${result.narration_hint}${caveatText}${secretsNote}]`,
+      });
+      await tgAdapter!.sendBubbles(tgTargetId, bubbles, hatoConfig.gateway.bubbles.delay_ms_range);
+
+      // Wall 3: send verbatim blocks and artifacts directly bypassing Persona so technical details stay intact.
+      for (const block of result.verbatim_blocks) {
+        const text =
+          block.format === "code"
+            ? `**${block.title}**\n\`\`\`\n${block.content}\n\`\`\``
+            : `**${block.title}**\n${block.content}`;
+        await tgAdapter!.sendText(tgTargetId, text);
+      }
+      for (const artifact of result.artifacts) {
+        await tgAdapter!.sendFile(tgTargetId, artifact.path, artifact.filename).catch((err) => {
+          logWarn("TG", `failed to send artifact ${artifact.filename}: ${summarizeError(err)}`);
+        });
+      }
+    });
+  });
+
+  bus.on("ticket_needs_input", async ({ canonicalUserId, ticketId, briefTitle, question }) => {
+    const tgTargetId = resolveTgTarget();
+    if (!tgAdapter || !tgTargetId) return;
+    await actorLock.run(canonicalUserId, async () => {
+      const bubbles = await personaRuntime.narrateBackgroundEvent({
+        canonicalUserId,
+        channel: "tg",
+        eventSummary: `工单 ${ticketId} (${briefTitle}) 需要补充信息: ${question}`,
+        promptInstruction: `[系统事件：后台工单 "${briefTitle}" (${ticketId}) 需要用户补充以下信息后继续：${question}。请自然转达给用户。]`,
+      });
+      await tgAdapter!.sendBubbles(tgTargetId, bubbles, hatoConfig.gateway.bubbles.delay_ms_range);
+    });
+  });
+
+  bus.on("ticket_confirm_required", async ({ ticketId, briefTitle, promptText }) => {
+    const tgTargetId = resolveTgTarget();
+    if (!tgAdapter || !tgTargetId) return;
+    await tgAdapter.sendConfirm(tgTargetId, {
+      ticketId,
+      promptText: `工单 ${ticketId} (${briefTitle}) 请求确认高危操作：\n${promptText}`,
+    });
+  });
+
+  bus.on("executed_event", async ({ canonicalUserId, channel, summary, occurredAtMs, silent }) => {
+    repo.appendRawMessage({
+      canonicalUserId,
+      channel,
+      role: "executed_event",
+      content: summary,
+      createdAt: occurredAtMs,
+    });
+    const tgTargetId = resolveTgTarget();
+    if (!silent && tgAdapter && tgTargetId) {
+      await tgAdapter.sendText(tgTargetId, summary).catch(() => undefined);
+    }
+  });
+
   if (hatoConfig.gateway.telegram.enabled) {
     if (hatoConfig.owner.channels.tg.user_ids.length === 0) {
       const pairingCode = repo.getOrCreateHomePairingCode();
@@ -322,6 +446,8 @@ async function main(): Promise<void> {
       config: hatoConfig,
       botToken,
       proxyRouter,
+      onConfirmAction: (ticketId, approved) =>
+        ticketCoordinator.handleConfirmAction(ticketId, approved),
       onClaimHome: async ({ platformUserId, code, username }) => {
         if (!repo.verifyAndConsumeHomePairingCode(code)) {
           return {

@@ -1,6 +1,12 @@
-import { Plus, RotateCcw, Save, Trash2 } from "lucide-react";
+import { Plus, RefreshCw, RotateCcw, Save, ShieldAlert, Trash2 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { api, type HatoConfig, type ProxyRuleConfig } from "@/api";
+import {
+  api,
+  type ExternalCliPermissionPreset,
+  type ExternalCliProbeEntry,
+  type HatoConfig,
+  type ProxyRuleConfig,
+} from "@/api";
 import {
   ConsoleInput,
   ConsoleMultiSelect,
@@ -24,8 +30,39 @@ const SCOPE_OPTIONS = [
   { value: "web_access", label: "web_access（搜索与抓取）" },
   { value: "browser", label: "browser（浏览器访问）" },
   { value: "memory", label: "memory（长期记忆）" },
+  { value: "mcp", label: "mcp（远程 MCP 服务）" },
   { value: "worker", label: "worker（后台任务）" },
 ];
+
+const WORKER_BACKEND_OPTIONS = [
+  { value: "codex", label: "codex（Tier 1 · Codex CLI）" },
+  { value: "agy", label: "agy（Tier 1 · Antigravity CLI）" },
+  { value: "opencode-v2", label: "opencode-v2（Tier 1 · OpenCode V2）" },
+  { value: "external-pi", label: "external-pi（Tier 2 · 独立 Pi CLI）" },
+  { value: "claude-code", label: "claude-code（Tier 3 · Claude Code）" },
+  { value: "builtin-pi", label: "builtin-pi（内置沙箱 Worker）" },
+];
+
+const PERMISSION_PRESET_OPTIONS = [
+  { value: "auto_safe", label: "auto_safe（沙箱内自动放行，推荐）" },
+  { value: "yolo", label: "yolo（全部无需审批，完全放开）" },
+  { value: "follow_host", label: "follow_host（沿用各工具本机配置）" },
+  { value: "read_only", label: "read_only（只读分析 / 规划模式）" },
+  { value: "custom", label: "custom（按各工具单独设置）" },
+];
+
+const FOLLOW_PRESET_VALUE = "__follow_preset__";
+
+const BACKEND_CONFIG_KEYS: Record<
+  ExternalCliProbeEntry["backend"],
+  "codex" | "agy" | "opencode_v2" | "external_pi" | "claude_code"
+> = {
+  codex: "codex",
+  agy: "agy",
+  "opencode-v2": "opencode_v2",
+  "external-pi": "external_pi",
+  "claude-code": "claude_code",
+};
 
 const MODE_OPTIONS = [
   { value: "proxy", label: "走代理" },
@@ -57,10 +94,37 @@ export function RuntimeConfigPanel({
   const [draft, setDraft] = useState<HatoConfig>(() => structuredClone(initialConfig));
   const [saveState, setSaveState] = useState<ButtonState>("idle");
   const [lastProxyUrls, setLastProxyUrls] = useState<Record<number, string>>({});
+  const [cliProbes, setCliProbes] = useState<ExternalCliProbeEntry[]>([]);
+  const [probingClis, setProbingClis] = useState(false);
+
+  const loadCliProbes = useCallback(
+    async (refresh = false) => {
+      setProbingClis(true);
+      try {
+        const res = await api.probeWorkerClis(refresh);
+        setCliProbes(res.probes);
+      } catch (err) {
+        if (refresh) {
+          onToast({
+            title: "探测外部 CLI 模式失败",
+            description: err instanceof Error ? err.message : String(err),
+            status: "error",
+          });
+        }
+      } finally {
+        setProbingClis(false);
+      }
+    },
+    [onToast],
+  );
 
   useEffect(() => {
     setDraft(structuredClone(initialConfig));
   }, [initialConfig]);
+
+  useEffect(() => {
+    void loadCliProbes(false);
+  }, [loadCliProbes]);
 
   const isDirty = useMemo(
     () => JSON.stringify(draft) !== JSON.stringify(initialConfig),
@@ -167,6 +231,7 @@ export function RuntimeConfigPanel({
       const res = await api.saveHatoConfig(draft);
       setSaveState("success");
       onSaved(draft, res.changes);
+      void loadCliProbes(true);
       onToast({
         title: "运行配置已保存",
         description: res.changes?.length ? res.changes.join("；") : "配置已生效",
@@ -182,7 +247,82 @@ export function RuntimeConfigPanel({
       });
       setTimeout(() => setSaveState("idle"), 2000);
     }
-  }, [draft, onSaved, onToast, saveState]);
+  }, [draft, loadCliProbes, onSaved, onToast, saveState]);
+
+  const extCliCfg = draft.worker.external_cli;
+  const setExtCliCfg = (patch: Partial<HatoConfig["worker"]["external_cli"]>) => {
+    setDraft((prev) => ({
+      ...prev,
+      worker: {
+        ...prev.worker,
+        external_cli: {
+          ...prev.worker.external_cli,
+          ...patch,
+        },
+      },
+    }));
+  };
+
+  const applyAllNoApprovalPreset = () => {
+    setDraft((prev) => {
+      const ext = prev.worker.external_cli;
+      const stripOverrides = <T extends Record<string, unknown> | undefined>(
+        obj: T,
+        keys: string[],
+      ): T => {
+        if (!obj) return obj;
+        const copy: Record<string, unknown> = { ...obj };
+        for (const k of keys) delete copy[k];
+        return copy as T;
+      };
+      return {
+        ...prev,
+        worker: {
+          ...prev.worker,
+          external_cli: {
+            ...ext,
+            permission_preset: "yolo",
+            codex: stripOverrides(ext.codex, ["sandbox", "approval"]),
+            agy: stripOverrides(ext.agy, ["mode", "skip_permissions", "sandbox"]),
+            opencode_v2: stripOverrides(ext.opencode_v2, ["auto"]),
+            claude_code: stripOverrides(ext.claude_code, ["permission_mode", "skip_permissions"]),
+          },
+        },
+      };
+    });
+    onToast({
+      title: "已切换为全部无需审批 (YOLO)",
+      description: "已清除各后端单独立覆写，点击「保存运行配置」后仅对 Hato Worker 生效。",
+      status: "info",
+    });
+  };
+
+  const setBackendOptionOverride = (
+    backend: ExternalCliProbeEntry["backend"],
+    optionKey: string,
+    nextVal: string | boolean | undefined,
+  ) => {
+    const cfgKey = BACKEND_CONFIG_KEYS[backend];
+    setDraft((prev) => {
+      const ext = prev.worker.external_cli;
+      const curSection = { ...((ext[cfgKey] as Record<string, unknown> | undefined) ?? {}) };
+      if (nextVal === undefined) {
+        delete curSection[optionKey];
+      } else {
+        curSection[optionKey] = nextVal;
+      }
+      return {
+        ...prev,
+        worker: {
+          ...prev.worker,
+          external_cli: {
+            ...ext,
+            [cfgKey]: curSection,
+          },
+        },
+      };
+    });
+  };
 
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
@@ -665,6 +805,234 @@ export function RuntimeConfigPanel({
                 </div>
               </CollapsibleContent>
             </Collapsible>
+          </div>
+        </section>
+
+        {/* Section 6: Worker & External CLI Modes (Hato-Only) */}
+        <section className="grid gap-6 py-6 md:grid-cols-12">
+          <div className="md:col-span-4">
+            <h3 className="text-sm font-semibold text-foreground">Worker 与 External CLI 模式</h3>
+            <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
+              动态读取本机 CLI 支持的权限模式与默认配置。所有模式覆写仅在 Hato 拉起 Worker 子进程时生效，绝不修改本机全局 CLI 配置。
+            </p>
+          </div>
+
+          <div className="flex flex-col gap-5 md:col-span-8">
+            <div className="grid gap-4 sm:grid-cols-2">
+              <ConsoleSelect
+                label="默认 Worker 后端"
+                value={draft.worker.default_backend}
+                options={WORKER_BACKEND_OPTIONS}
+                onValueChange={(val) =>
+                  setDraft((prev) => ({
+                    ...prev,
+                    worker: {
+                      ...prev.worker,
+                      default_backend: val as HatoConfig["worker"]["default_backend"],
+                    },
+                  }))
+                }
+              />
+              <ConsoleSelect
+                label="全局权限预设（仅 Hato 生效）"
+                value={extCliCfg.permission_preset ?? "auto_safe"}
+                options={PERMISSION_PRESET_OPTIONS}
+                onValueChange={(val) =>
+                  setExtCliCfg({ permission_preset: val as ExternalCliPermissionPreset })
+                }
+              />
+            </div>
+
+            <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-border/80 bg-muted/20 px-4 py-3">
+              <div className="text-xs text-muted-foreground">
+                一键将所有已启用的外部 CLI（Codex / agy / OpenCode V2 等）统一切换为无需审批：
+              </div>
+              <div className="flex items-center gap-2">
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  disabled={probingClis}
+                  onClick={() => void loadCliProbes(true)}
+                >
+                  <RefreshCw className={`size-3.5 ${probingClis ? "animate-spin" : ""}`} />
+                  刷新探测
+                </Button>
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  onClick={applyAllNoApprovalPreset}
+                >
+                  <ShieldAlert className="size-3.5 text-amber-500" />
+                  全部设为无需审批
+                </Button>
+              </div>
+            </div>
+
+            <div className="grid gap-4 sm:grid-cols-2">
+              <div className="flex items-center justify-between gap-3 rounded-lg border border-border/70 px-3.5 py-3">
+                <div>
+                  <div className="text-xs font-medium text-foreground">复用本机登录与中转站</div>
+                  <p className="mt-0.5 text-[11px] text-muted-foreground">
+                    继承 ~/.codex/config.toml 等本机配置
+                  </p>
+                </div>
+                <Switch
+                  ariaLabel="复用本机登录与中转站"
+                  checked={extCliCfg.reuse_host_auth_and_provider ?? true}
+                  onCheckedChange={(on) => setExtCliCfg({ reuse_host_auth_and_provider: on })}
+                />
+              </div>
+
+              <div className="flex items-center justify-between gap-3 rounded-lg border border-border/70 px-3.5 py-3">
+                <div>
+                  <div className="text-xs font-medium text-foreground">继承本机个人 MCP</div>
+                  <p className="mt-0.5 text-[11px] text-muted-foreground">
+                    默认关闭防污染；仅加载 Worker MCP
+                  </p>
+                </div>
+                <Switch
+                  ariaLabel="继承本机个人 MCP"
+                  checked={extCliCfg.inherit_host_mcp ?? false}
+                  onCheckedChange={(on) => setExtCliCfg({ inherit_host_mcp: on })}
+                />
+              </div>
+            </div>
+
+            <div className="flex flex-col gap-3">
+              {cliProbes.map((probe) => {
+                const cfgKey = BACKEND_CONFIG_KEYS[probe.backend];
+                const backendCfg = (extCliCfg[cfgKey] as Record<string, unknown> | undefined) ?? {};
+                const hostSummaryEntries = Object.entries(probe.hostSummary);
+
+                return (
+                  <div
+                    key={probe.backend}
+                    className="flex flex-col gap-3 rounded-xl border border-border bg-card/50 p-4"
+                  >
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className="font-mono text-xs font-semibold text-foreground">
+                          {probe.backend}
+                        </span>
+                        <AnimatedBadge status="neutral" size="sm">
+                          Tier {probe.tier}
+                        </AnimatedBadge>
+                        {probe.available ? (
+                          <AnimatedBadge status="success" size="sm">
+                            {probe.version ? `已就绪 ${probe.version}` : "已就绪"}
+                          </AnimatedBadge>
+                        ) : (
+                          <AnimatedBadge
+                            status={probe.installed ? "danger" : "warning"}
+                            size="sm"
+                          >
+                            {probe.installed ? "版本不兼容" : "未安装"}
+                          </AnimatedBadge>
+                        )}
+                        {probe.backend === "opencode-v2" && probe.v2Verified && (
+                          <AnimatedBadge status="success" size="sm">
+                            V2 已校验
+                          </AnimatedBadge>
+                        )}
+                      </div>
+
+                      <Switch
+                        ariaLabel={`启用 ${probe.backend}`}
+                        checked={typeof backendCfg.enabled === "boolean" ? backendCfg.enabled : probe.enabled}
+                        onCheckedChange={(on) => setBackendOptionOverride(probe.backend, "enabled", on)}
+                      />
+                    </div>
+
+                    {probe.reason && (
+                      <div className="rounded-md bg-destructive/10 px-2.5 py-1.5 text-[11px] text-destructive">
+                        {probe.reason}
+                      </div>
+                    )}
+
+                    {hostSummaryEntries.length > 0 && (
+                      <div className="text-[11px] text-muted-foreground">
+                        本机配置（只读参考）：
+                        {hostSummaryEntries
+                          .map(([k, v]) => `${k}=${Array.isArray(v) ? v.join(",") : String(v)}`)
+                          .join(" · ")}
+                      </div>
+                    )}
+
+                    {probe.options.length > 0 && (
+                      <div className="grid gap-3 sm:grid-cols-2">
+                        {probe.options.map((opt) => {
+                          const rawOverride = backendCfg[opt.key];
+                          if (opt.kind === "enum") {
+                            const currentStr =
+                              typeof rawOverride === "string" ? rawOverride : FOLLOW_PRESET_VALUE;
+                            const selectOptions = [
+                              {
+                                value: FOLLOW_PRESET_VALUE,
+                                label: `跟随全局预设 (${String(opt.effectiveHatoValue ?? "默认")})`,
+                              },
+                              ...(opt.choices ?? []).map((c) => ({
+                                value: c,
+                                label:
+                                  opt.hostDefault === c ? `${c}（本机当前）` : c,
+                              })),
+                            ];
+                            return (
+                              <ConsoleSelect
+                                key={opt.key}
+                                label={opt.label}
+                                value={currentStr}
+                                options={selectOptions}
+                                onValueChange={(next) =>
+                                  setBackendOptionOverride(
+                                    probe.backend,
+                                    opt.key,
+                                    next === FOLLOW_PRESET_VALUE ? undefined : next,
+                                  )
+                                }
+                              />
+                            );
+                          }
+
+                          const boolValue =
+                            typeof rawOverride === "boolean"
+                              ? rawOverride
+                              : Boolean(opt.effectiveHatoValue);
+                          return (
+                            <div
+                              key={opt.key}
+                              className="flex items-center justify-between gap-2 rounded-lg border border-border/60 px-3 py-2"
+                            >
+                              <div className="text-[11px] font-medium text-foreground">
+                                {opt.label}
+                                {rawOverride === undefined && (
+                                  <span className="ml-1 text-muted-foreground">(随预设)</span>
+                                )}
+                              </div>
+                              <Switch
+                                ariaLabel={`${probe.backend} ${opt.label}`}
+                                checked={boolValue}
+                                onCheckedChange={(on) =>
+                                  setBackendOptionOverride(probe.backend, opt.key, on)
+                                }
+                              />
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
+
+                    <div className="rounded-md bg-muted/40 px-2.5 py-1.5 font-mono text-[11px] text-muted-foreground">
+                      Hato 启动参数预览: {probe.command}{" "}
+                      {probe.effectiveArgsPreview.length > 0
+                        ? probe.effectiveArgsPreview.join(" ")
+                        : "(沿用本机默认模式)"}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
           </div>
         </section>
       </div>

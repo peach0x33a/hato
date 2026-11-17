@@ -1,5 +1,5 @@
 import { randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
-import { and, asc, desc, eq, gt, gte, inArray, lte, ne, or, type SQL } from "drizzle-orm";
+import { and, asc, desc, eq, gt, gte, inArray, lt, lte, ne, or, type SQL } from "drizzle-orm";
 import type { HatoDb } from "./client.js";
 import { computeTurnMetrics, type TraceStepRecord } from "../stats/metrics.js";
 import {
@@ -268,6 +268,76 @@ export class HatoRepository {
       .limit(1)
       .get();
     return row ? toRawMessageRecord(row) : null;
+  }
+
+  getMessageById(id: string): RawMessageRecord | null {
+    const row = this.db.select().from(rawMessages).where(eq(rawMessages.id, id)).get();
+    return row ? toRawMessageRecord(row) : null;
+  }
+
+  listRecentMessages(canonicalUserId: string, limit = 15): RawMessageRecord[] {
+    const rows = this.db
+      .select()
+      .from(rawMessages)
+      .where(eq(rawMessages.canonicalUserId, canonicalUserId))
+      .orderBy(desc(rawMessages.createdAt), desc(rawMessages.id))
+      .limit(limit)
+      .all();
+    return rows.reverse().map(toRawMessageRecord);
+  }
+
+  getMessagesInIdRange(
+    canonicalUserId: string,
+    fromMsgId: string,
+    toMsgId: string,
+    maxCount = 80,
+  ): RawMessageRecord[] {
+    const fromMsg = this.getMessageById(fromMsgId);
+    const toMsg = this.getMessageById(toMsgId);
+    if (!fromMsg || !toMsg) {
+      return [];
+    }
+    const startTs = Math.min(fromMsg.createdAt, toMsg.createdAt);
+    const endTs = Math.max(fromMsg.createdAt, toMsg.createdAt);
+    const rows = this.db
+      .select()
+      .from(rawMessages)
+      .where(
+        and(
+          eq(rawMessages.canonicalUserId, canonicalUserId),
+          gte(rawMessages.createdAt, startTs),
+          lte(rawMessages.createdAt, endTs),
+        ),
+      )
+      .orderBy(asc(rawMessages.createdAt), asc(rawMessages.id))
+      .limit(maxCount)
+      .all();
+    return rows.map(toRawMessageRecord);
+  }
+
+  getMessagesBeforeId(
+    canonicalUserId: string,
+    beforeMsgId: string,
+    limit: number,
+    minCreatedAt?: number,
+  ): RawMessageRecord[] {
+    const anchor = this.getMessageById(beforeMsgId);
+    if (!anchor) return [];
+    const conditions: SQL[] = [
+      eq(rawMessages.canonicalUserId, canonicalUserId),
+      lt(rawMessages.createdAt, anchor.createdAt),
+    ];
+    if (minCreatedAt !== undefined) {
+      conditions.push(gte(rawMessages.createdAt, minCreatedAt));
+    }
+    const rows = this.db
+      .select()
+      .from(rawMessages)
+      .where(and(...conditions))
+      .orderBy(desc(rawMessages.createdAt), desc(rawMessages.id))
+      .limit(limit)
+      .all();
+    return rows.reverse().map(toRawMessageRecord);
   }
 
   saveDraftCompaction(params: {
@@ -654,6 +724,132 @@ export class HatoRepository {
       .orderBy(desc(tickets.updatedAt))
       .limit(limit)
       .all();
+  }
+
+  listActiveTickets(canonicalUserId: string, limit = 15) {
+    return this.db
+      .select()
+      .from(tickets)
+      .where(
+        and(
+          eq(tickets.canonicalUserId, canonicalUserId),
+          inArray(tickets.status, ["routing", "pending", "running", "needs_input", "awaiting_confirm"]),
+        ),
+      )
+      .orderBy(desc(tickets.updatedAt))
+      .limit(limit)
+      .all();
+  }
+
+  createTicket(params: {
+    id?: string;
+    canonicalUserId: string;
+    status: string;
+    backend: string;
+    briefTitle: string;
+    originChannel: ChannelName;
+    contextId?: string | null;
+    contextFromMsgId?: string | null;
+    contextToMsgId?: string | null;
+    maxLookbackMsgId?: string | null;
+    progressNote?: string | null;
+    mandateJson?: string | null;
+  }) {
+    const now = Date.now();
+    const id = params.id ?? `t_${randomBytes(4).toString("hex")}`;
+    this.db
+      .insert(tickets)
+      .values({
+        id,
+        canonicalUserId: params.canonicalUserId,
+        status: params.status,
+        backend: params.backend,
+        briefTitle: params.briefTitle,
+        contextId: params.contextId ?? null,
+        contextFromMsgId: params.contextFromMsgId ?? null,
+        contextToMsgId: params.contextToMsgId ?? null,
+        maxLookbackMsgId: params.maxLookbackMsgId ?? null,
+        externalSessionId: null,
+        progressNote: params.progressNote ?? null,
+        originChannel: params.originChannel,
+        mandateJson: params.mandateJson ?? null,
+        modelSnapshotJson: null,
+        resultJson: null,
+        workspaceExpiresAt: null,
+        createdAt: now,
+        updatedAt: now,
+      })
+      .run();
+    return this.getTicket(id)!;
+  }
+
+  getTicket(ticketId: string) {
+    return this.db.select().from(tickets).where(eq(tickets.id, ticketId)).get() ?? null;
+  }
+
+  getTicketByContextId(contextId: string) {
+    return (
+      this.db.select().from(tickets).where(eq(tickets.contextId, contextId)).get() ?? null
+    );
+  }
+
+  updateTicket(
+    ticketId: string,
+    patch: Partial<{
+      status: string;
+      backend: string;
+      briefTitle: string;
+      contextId: string | null;
+      contextFromMsgId: string | null;
+      contextToMsgId: string | null;
+      maxLookbackMsgId: string | null;
+      externalSessionId: string | null;
+      progressNote: string | null;
+      mandateJson: string | null;
+      modelSnapshotJson: string | null;
+      resultJson: string | null;
+      workspaceExpiresAt: number | null;
+    }>,
+  ) {
+    this.db
+      .update(tickets)
+      .set({
+        ...patch,
+        updatedAt: Date.now(),
+      })
+      .where(eq(tickets.id, ticketId))
+      .run();
+    return this.getTicket(ticketId);
+  }
+
+  updateScriptSchedule(
+    scriptId: string,
+    patch: Partial<{ cronExpr: string; enabled: boolean }>,
+  ): boolean {
+    const res = this.db
+      .update(scriptRegistry)
+      .set({
+        ...(patch.cronExpr !== undefined ? { cronExpr: patch.cronExpr } : {}),
+        ...(patch.enabled !== undefined ? { enabled: patch.enabled } : {}),
+        updatedAt: Date.now(),
+      })
+      .where(eq(scriptRegistry.id, scriptId))
+      .run();
+    return res.changes > 0;
+  }
+
+  deleteScript(scriptId: string): boolean {
+    const res = this.db.delete(scriptRegistry).where(eq(scriptRegistry.id, scriptId)).run();
+    return res.changes > 0;
+  }
+
+  updateOpenLoopStatus(loopId: string, status: string): boolean {
+    const res = this.db
+      .update(openLoops)
+      .set({ status })
+      .where(eq(openLoops.id, loopId))
+      .run();
+    return res.changes > 0;
   }
 
   listScripts(limit = 20) {

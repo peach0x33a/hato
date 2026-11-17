@@ -1,3 +1,4 @@
+import type { WorkerResult } from "../dispatch/schema.js";
 import type { ChannelName, InboundBatch } from "../gateway/types.js";
 
 export type BusEvent =
@@ -24,6 +25,29 @@ export type BusEvent =
       scriptName: string;
       errorSummary: string;
       notifyChannel: ChannelName;
+    }
+  | {
+      type: "ticket_result";
+      canonicalUserId: string;
+      originChannel: ChannelName;
+      briefTitle: string;
+      result: WorkerResult;
+    }
+  | {
+      type: "ticket_needs_input";
+      canonicalUserId: string;
+      originChannel: ChannelName;
+      ticketId: string;
+      briefTitle: string;
+      question: string;
+    }
+  | {
+      type: "ticket_confirm_required";
+      canonicalUserId: string;
+      originChannel: ChannelName;
+      ticketId: string;
+      briefTitle: string;
+      promptText: string;
     };
 
 export type BusListener<K extends BusEvent["type"] = BusEvent["type"]> = (
