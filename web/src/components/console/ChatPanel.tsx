@@ -414,8 +414,8 @@ export function ChatPanel({
       onValueChange={(v) => setSubTab(v as "chat" | "trajectory" | "stats")}
       className="flex h-full min-h-0 flex-col gap-0"
     >
-      {/* DSH-style Top Header: 对话 | 轨迹 | 统计 + Model & Quick Actions on one compact line */}
-      <div className="flex h-10 shrink-0 items-center justify-between gap-2 border-b border-border bg-card/30 px-3">
+      {/* Flat Top Header: 对话 | 轨迹 | 统计 + Model & Quick Actions */}
+      <div className="flex min-h-11 shrink-0 flex-wrap items-center justify-between gap-2 border-b border-border bg-background px-3 py-1 sm:px-4">
         <div className="flex min-w-0 flex-1 items-center gap-3">
           <TabsList wrapperClassName="w-auto shrink-0" className="shrink-0 border-b-0">
             <TabsTrigger value="chat" className="py-2 text-xs">对话</TabsTrigger>
@@ -443,13 +443,13 @@ export function ChatPanel({
         </div>
 
         {subTab === "chat" && (
-          <div className="flex flex-wrap items-center gap-1.5">
+          <div className="flex flex-wrap items-center gap-1">
             {readonlySession ? (
               <Button
                 type="button"
                 variant="secondary"
                 size="sm"
-                className="h-7 px-2 text-xs"
+                className="h-7 px-2.5 text-xs"
                 onClick={() => onSelectSession?.(null)}
               >
                 回到当前会话
@@ -467,7 +467,7 @@ export function ChatPanel({
                 >
                   <Button
                     type="button"
-                    variant="outline"
+                    variant="ghost"
                     size="sm"
                     className="h-7 px-2 text-xs"
                     onClick={() => {
@@ -475,12 +475,12 @@ export function ChatPanel({
                       setSubTab("trajectory");
                     }}
                   >
-                    <Activity className="size-3" />
+                    <Activity className="size-3.5" />
                     查看 Trace
                   </Button>
 
                   {hoverTraceOpen && (
-                    <div className="absolute top-full right-0 z-50 mt-1 w-80 rounded-xl border border-border bg-popover p-3 text-xs shadow-xl sm:w-96">
+                    <div className="absolute top-full right-0 z-50 mt-1 w-[min(22rem,calc(100vw-2rem))] rounded-lg border border-border bg-popover p-3 text-xs shadow-md">
                       <div className="mb-2 flex items-center justify-between border-b border-border/70 pb-1.5">
                         <span className="font-medium text-foreground">最近一次调用 Trace</span>
                         <button
@@ -526,7 +526,7 @@ export function ChatPanel({
                             </span>
                           </div>
                           {latestTrace.timeCardText && (
-                            <pre className="max-h-28 overflow-auto whitespace-pre-wrap break-words rounded border border-border/70 bg-background/80 p-1.5 font-mono text-[10px] leading-relaxed text-muted-foreground">
+                            <pre className="max-h-28 overflow-auto whitespace-pre-wrap break-words border-t border-border/60 pt-2 font-mono text-[10px] leading-relaxed text-muted-foreground">
                               {latestTrace.timeCardText}
                             </pre>
                           )}
@@ -544,18 +544,18 @@ export function ChatPanel({
                 >
                   <Button
                     type="button"
-                    variant="outline"
+                    variant="ghost"
                     size="sm"
                     className="h-7 px-2 text-xs"
                     disabled={streaming || slashBusy}
                     onClick={() => void runSlashCommand("/compact")}
                   >
-                    <Database className="size-3" />
+                    <Database className="size-3.5" />
                     压缩记忆
                   </Button>
 
                   {hoverMemoryOpen && (
-                    <div className="absolute top-full right-0 z-50 mt-1 w-80 rounded-xl border border-border bg-popover p-3 text-xs shadow-xl">
+                    <div className="absolute top-full right-0 z-50 mt-1 w-[min(20rem,calc(100vw-2rem))] rounded-lg border border-border bg-popover p-3 text-xs shadow-md">
                       <div className="mb-1.5 flex items-center justify-between border-b border-border/70 pb-1.5">
                         <span className="font-medium text-foreground">工作记忆摘要预览</span>
                         <span className="text-[10px] text-muted-foreground">点击按钮触发压缩</span>
@@ -575,27 +575,27 @@ export function ChatPanel({
 
                 <Button
                   type="button"
-                  variant="outline"
+                  variant="ghost"
                   size="sm"
                   className="h-7 px-2 text-xs"
                   disabled={streaming || slashBusy}
                   onClick={() => void runSlashCommand("/new")}
                 >
-                  <Terminal className="size-3" />
+                  <Terminal className="size-3.5" />
                   清空上下文
                 </Button>
               </>
             )}
             <Button
               type="button"
-              variant="outline"
+              variant="ghost"
               size="sm"
               className="h-7 px-2 text-xs"
               disabled={historyState === "loading" || streaming}
               onClick={() => void loadHistory(selectedSessionId)}
             >
               <RefreshCw
-                className={`size-3 ${historyState === "loading" ? "animate-spin" : ""}`}
+                className={`size-3.5 ${historyState === "loading" ? "animate-spin" : ""}`}
               />
               刷新记录
             </Button>
@@ -604,11 +604,12 @@ export function ChatPanel({
       </div>
 
       {readonlySession && (
-        <div className="flex h-8 shrink-0 items-center justify-between gap-2 border-b border-border bg-muted/35 px-3 text-xs">
+        <div className="flex min-h-8 shrink-0 items-center justify-between gap-2 border-b border-border bg-muted/25 px-3 py-1 text-xs sm:px-4">
           <div className="flex min-w-0 items-center gap-2">
-            <span className="shrink-0 rounded border border-border bg-background px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground">
+            <span className="shrink-0 font-medium text-primary">
               只读历史会话
             </span>
+            <span className="text-border">·</span>
             <span className="truncate font-medium text-foreground">{readonlySession.title}</span>
             <span className="hidden font-mono text-[11px] text-muted-foreground sm:inline">
               · {readonlySession.messageCount} 条消息 · {readonlySession.traceCount} 次调用
@@ -620,231 +621,250 @@ export function ChatPanel({
 
       <TabsContent value="chat" className="mt-0 flex min-h-0 flex-1 flex-col gap-0">
         {pendingTakeover && (
-          <div className="shrink-0 border-b border-amber-500/30 bg-amber-500/5 px-3 py-2">
-            <Alert variant="warning" open className="border-0 bg-transparent p-0">
-              <AlertIcon />
-              <AlertContent>
-                <AlertTitle>浏览器等待手动操作</AlertTitle>
-                <AlertDescription>
-                  请在远程浏览器中点击「接管操作」完成登录、验证码或确认，完成后即可继续任务。
-                </AlertDescription>
-                <AlertAction>
-                  <Button type="button" size="sm" onClick={onOpenBrowserPanel}>
-                    <Compass className="size-3.5" />
-                    前往浏览器
-                  </Button>
-                  <Button
-                    type="button"
-                    variant="secondary"
-                    size="sm"
-                    disabled={streaming}
-                    onClick={() => void sendMessage("我已操作完成，继续")}
-                  >
-                    继续任务
-                  </Button>
-                </AlertAction>
-              </AlertContent>
-            </Alert>
-          </div>
-        )}
-
-        <MessageScroller className="min-h-0 flex-1 overflow-hidden bg-background/60 px-3 py-2.5">
-          <div className="flex flex-col gap-4 pb-2">
-            {historyState === "error" && (
-              <Alert variant="destructive" open>
+          <div className="shrink-0 border-b border-amber-500/25 bg-amber-500/5 px-3 py-2 sm:px-6">
+            <div className="mx-auto max-w-3xl">
+              <Alert variant="warning" open className="border-0 bg-transparent p-0">
                 <AlertIcon />
                 <AlertContent>
-                  <AlertTitle>历史记录加载失败</AlertTitle>
-                  <AlertDescription>{historyError}</AlertDescription>
+                  <AlertTitle>浏览器等待手动操作</AlertTitle>
+                  <AlertDescription>
+                    请在远程浏览器中点击「接管操作」完成登录、验证码或确认，完成后即可继续任务。
+                  </AlertDescription>
                   <AlertAction>
-                    <Button type="button" size="sm" variant="outline" onClick={() => void loadHistory()}>
-                      重试加载
+                    <Button type="button" size="sm" onClick={onOpenBrowserPanel}>
+                      <Compass className="size-3.5" />
+                      前往浏览器
+                    </Button>
+                    <Button
+                      type="button"
+                      variant="secondary"
+                      size="sm"
+                      disabled={streaming}
+                      onClick={() => void sendMessage("我已操作完成，继续")}
+                    >
+                      继续任务
                     </Button>
                   </AlertAction>
                 </AlertContent>
               </Alert>
-            )}
-
-            {summaryText && (
-              <MessageMarker>
-                早期对话摘要：{summaryText.slice(0, 72)}
-                {summaryText.length > 72 ? "…" : ""}
-              </MessageMarker>
-            )}
-
-            {items.length === 0 && historyState === "ready" && (
-              <div className="mx-auto my-12 max-w-md text-center text-sm text-muted-foreground">
-                暂无对话消息，在下方输入内容或发送指令即可开始。
-              </div>
-            )}
-
-            {items.map((item, idx) => {
-              const isLastStreaming =
-                streaming && idx === items.length - 1 && item.role === "assistant";
-
-              if (item.role === "system") {
-                return (
-                  <MessageMarker key={item.id}>
-                    {item.bubbles.join(" · ")}
-                  </MessageMarker>
-                );
-              }
-
-              const lightboxImages: LightboxImage[] = (item.images ?? []).map((src, i) => ({
-                id: `${item.id}-img-${i}`,
-                src,
-                alt: `消息图片 ${i + 1}`,
-                width: 1280,
-                height: 800,
-              }));
-
-              return (
-                <Message key={item.id} from={item.role} animateIn>
-                  <MessageAvatar>
-                    {item.role === "user" ? (
-                      <User className="size-3.5" />
-                    ) : (
-                      <Bot className="size-3.5" />
-                    )}
-                  </MessageAvatar>
-
-                  <MessageContent>
-                    <MessageHeader>
-                      <span>{item.role === "user" ? "你" : "Hato"}</span>
-                      {formatClock(item.createdAt) && (
-                        <span>{formatClock(item.createdAt)}</span>
-                      )}
-                    </MessageHeader>
-
-                    {item.bubbles.length > 0 && (
-                      <MessageBubbleGroup>
-                        {item.bubbles.map((text, bIdx) => (
-                          <MessageBubble
-                            key={`${item.id}-b-${bIdx}`}
-                            variant={item.role === "user" ? "solid" : "soft"}
-                          >
-                            <MessageBubbleContent className="whitespace-pre-wrap break-words text-sm leading-relaxed">
-                              {text}
-                            </MessageBubbleContent>
-                          </MessageBubble>
-                        ))}
-                      </MessageBubbleGroup>
-                    )}
-
-                    {lightboxImages.length > 0 && (
-                      <MorphingLightbox
-                        images={lightboxImages}
-                        className="mt-1 max-w-md"
-                        thumbnailClassName="max-h-56 rounded-lg border border-border object-contain"
-                      />
-                    )}
-
-                    {isLastStreaming && (
-                      <div className="px-1 py-1 text-xs">
-                        <ThinkingShimmer>{earlyStatus}</ThinkingShimmer>
-                      </div>
-                    )}
-
-                    {item.telemetry && (
-                      <MessageFooter className="tabular-nums">
-                        <span>{item.telemetry.latencyMs}ms</span>
-                        {typeof item.telemetry.ttftMs === "number" && (
-                          <span>· TTFT {item.telemetry.ttftMs}ms</span>
-                        )}
-                        {typeof item.telemetry.cacheHitRate === "number" && (
-                          <span>
-                            · 命中 {(item.telemetry.cacheHitRate * 100).toFixed(1)}%
-                          </span>
-                        )}
-                        {item.telemetry.toolCalls.length > 0 && (
-                          <span>· 工具：{item.telemetry.toolCalls.join(", ")}</span>
-                        )}
-                      </MessageFooter>
-                    )}
-                  </MessageContent>
-                </Message>
-              );
-            })}
+            </div>
           </div>
+        )}
+
+        <MessageScroller
+          className="min-h-0 flex-1 overflow-hidden bg-background"
+          contentClassName="mx-auto flex w-full max-w-3xl flex-col gap-5 px-3 py-4 sm:px-6"
+        >
+          {historyState === "error" && (
+            <Alert variant="destructive" open>
+              <AlertIcon />
+              <AlertContent>
+                <AlertTitle>历史记录加载失败</AlertTitle>
+                <AlertDescription>{historyError}</AlertDescription>
+                <AlertAction>
+                  <Button type="button" size="sm" variant="outline" onClick={() => void loadHistory()}>
+                    重试加载
+                  </Button>
+                </AlertAction>
+              </AlertContent>
+            </Alert>
+          )}
+
+          {summaryText && (
+            <MessageMarker>
+              早期对话摘要：{summaryText.slice(0, 72)}
+              {summaryText.length > 72 ? "…" : ""}
+            </MessageMarker>
+          )}
+
+          {items.length === 0 && historyState === "ready" && (
+            <div className="mx-auto my-16 flex max-w-md flex-col items-center gap-2 text-center">
+              <div className="grid size-10 place-items-center rounded-full bg-muted/60 text-muted-foreground">
+                <Bot className="size-5" />
+              </div>
+              <p className="text-sm font-medium text-foreground">开始新的对话</p>
+              <p className="text-xs leading-relaxed text-muted-foreground">
+                在下方输入消息、粘贴图片，或输入 <code className="rounded bg-muted px-1 py-0.5 font-mono text-[11px]">/help</code> 查看系统指令。
+              </p>
+            </div>
+          )}
+
+          {items.map((item, idx) => {
+            const isLastStreaming =
+              streaming && idx === items.length - 1 && item.role === "assistant";
+
+            if (item.role === "system") {
+              return (
+                <MessageMarker key={item.id}>
+                  {item.bubbles.join(" · ")}
+                </MessageMarker>
+              );
+            }
+
+            const lightboxImages: LightboxImage[] = (item.images ?? []).map((src, i) => ({
+              id: `${item.id}-img-${i}`,
+              src,
+              alt: `消息图片 ${i + 1}`,
+              width: 1280,
+              height: 800,
+            }));
+
+            return (
+              <Message key={item.id} from={item.role} animateIn>
+                <MessageAvatar
+                  className={
+                    item.role === "assistant"
+                      ? "bg-primary/12 text-primary"
+                      : "bg-muted/80 text-muted-foreground"
+                  }
+                >
+                  {item.role === "user" ? (
+                    <User className="size-3.5" />
+                  ) : (
+                    <Bot className="size-3.5" />
+                  )}
+                </MessageAvatar>
+
+                <MessageContent>
+                  <MessageHeader>
+                    <span className="font-medium text-foreground/80">
+                      {item.role === "user" ? "你" : "Hato"}
+                    </span>
+                    {formatClock(item.createdAt) && (
+                      <span>{formatClock(item.createdAt)}</span>
+                    )}
+                  </MessageHeader>
+
+                  {item.bubbles.length > 0 && (
+                    <MessageBubbleGroup spacing={item.role === "assistant" ? "default" : "compact"}>
+                      {item.bubbles.map((text, bIdx) => (
+                        <MessageBubble
+                          key={`${item.id}-b-${bIdx}`}
+                          variant={item.role === "user" ? "soft" : "ghost"}
+                        >
+                          <MessageBubbleContent className="whitespace-pre-wrap break-words text-sm leading-relaxed">
+                            {text}
+                          </MessageBubbleContent>
+                        </MessageBubble>
+                      ))}
+                    </MessageBubbleGroup>
+                  )}
+
+                  {lightboxImages.length > 0 && (
+                    <MorphingLightbox
+                      images={lightboxImages}
+                      className="mt-1 max-w-md"
+                      thumbnailClassName="max-h-56 rounded-lg object-contain ring-1 ring-border/50"
+                    />
+                  )}
+
+                  {isLastStreaming && (
+                    <div className="py-1 text-xs">
+                      <ThinkingShimmer>{earlyStatus}</ThinkingShimmer>
+                    </div>
+                  )}
+
+                  {item.telemetry && (
+                    <MessageFooter className="tabular-nums">
+                      <span>{item.telemetry.latencyMs}ms</span>
+                      {typeof item.telemetry.ttftMs === "number" && (
+                        <span>· TTFT {item.telemetry.ttftMs}ms</span>
+                      )}
+                      {typeof item.telemetry.cacheHitRate === "number" && (
+                        <span>
+                          · 命中 {(item.telemetry.cacheHitRate * 100).toFixed(1)}%
+                        </span>
+                      )}
+                      {item.telemetry.toolCalls.length > 0 && (
+                        <span>· 工具：{item.telemetry.toolCalls.join(", ")}</span>
+                      )}
+                    </MessageFooter>
+                  )}
+                </MessageContent>
+              </Message>
+            );
+          })}
         </MessageScroller>
 
         {readonlySession ? (
-          <div className="flex shrink-0 items-center justify-between gap-2 border-t border-border bg-card/40 px-3 py-2 text-xs text-muted-foreground">
-            <span>历史会话仅支持只读浏览（主对话中也可让 Hato 自动检索往期记录）。</span>
+          <div className="shrink-0 border-t border-border/70 bg-background px-3 py-2.5 text-center text-xs text-muted-foreground sm:px-6">
+            历史会话仅支持只读浏览（主对话中也可让 Hato 自动检索往期记录）。
           </div>
         ) : (
-          <div className="shrink-0 border-t border-border bg-card/40 px-3 py-2">
-            {pendingImages.length > 0 && (
-              <div className="mb-2 flex flex-wrap items-center gap-2 rounded-lg border border-border bg-card px-2.5 py-1.5">
-                {pendingImages.map((img) => (
-                  <div key={img.id} className="group relative overflow-hidden rounded-lg border border-border">
-                    <img
-                      src={img.previewUrl}
-                      alt={img.name}
-                      className="h-12 w-12 object-cover"
-                    />
-                    <button
-                      type="button"
-                      aria-label="移除图片"
-                      onClick={() =>
-                        setPendingImages((prev) => prev.filter((p) => p.id !== img.id))
-                      }
-                      className="absolute top-0.5 right-0.5 grid size-4 place-items-center rounded-full bg-black/70 text-white"
-                    >
-                      <X className="size-2.5" />
-                    </button>
-                  </div>
-                ))}
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="sm"
-                  onClick={() => setPendingImages([])}
-                  className="ml-auto"
-                >
-                  <Trash2 className="size-3.5" />
-                  清空图片
-                </Button>
-              </div>
-            )}
+          <div className="shrink-0 border-t border-border/60 bg-background px-3 py-2.5 sm:px-6">
+            <div className="mx-auto w-full max-w-3xl">
+              {pendingImages.length > 0 && (
+                <div className="mb-2 flex flex-wrap items-center gap-2 pb-1">
+                  {pendingImages.map((img) => (
+                    <div key={img.id} className="group relative overflow-hidden rounded-md ring-1 ring-border/70">
+                      <img
+                        src={img.previewUrl}
+                        alt={img.name}
+                        className="h-12 w-12 object-cover"
+                      />
+                      <button
+                        type="button"
+                        aria-label="移除图片"
+                        onClick={() =>
+                          setPendingImages((prev) => prev.filter((p) => p.id !== img.id))
+                        }
+                        className="absolute top-0.5 right-0.5 grid size-4 place-items-center rounded-full bg-black/70 text-white"
+                      >
+                        <X className="size-2.5" />
+                      </button>
+                    </div>
+                  ))}
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => setPendingImages([])}
+                    className="ml-auto h-7 px-2 text-xs"
+                  >
+                    <Trash2 className="size-3.5" />
+                    清空图片
+                  </Button>
+                </div>
+              )}
 
-            <input
-              ref={fileInputRef}
-              type="file"
-              accept="image/*"
-              multiple
-              onChange={handleFileChange}
-              className="hidden"
-            />
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept="image/*"
+                multiple
+                onChange={handleFileChange}
+                className="hidden"
+              />
 
-            <PromptInput
-              value={draft}
-              onValueChange={setDraft}
-              onPaste={handlePaste}
-              loading={streaming}
-              onStop={() => abortRef.current?.abort()}
-              onSubmit={(val) => void sendMessage(val)}
-              placeholder="输入消息，粘贴图片，或输入 /help 查看系统指令"
-              labels={{
-                placeholder: "输入消息，粘贴图片，或输入 /help 查看系统指令",
-                send: "发送消息",
-                stop: "停止生成",
-              }}
-              leadingAction={
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="icon"
-                  title="上传图片"
-                  aria-label="上传图片"
-                  disabled={streaming || pendingImages.length >= 4}
-                  onClick={() => fileInputRef.current?.click()}
-                  className="rounded-full"
-                >
-                  <ImagePlus className="size-4" />
-                </Button>
-              }
-            />
+              <PromptInput
+                value={draft}
+                onValueChange={setDraft}
+                onPaste={handlePaste}
+                loading={streaming}
+                onStop={() => abortRef.current?.abort()}
+                onSubmit={(val) => void sendMessage(val)}
+                placeholder="输入消息，粘贴图片，或输入 /help 查看系统指令"
+                labels={{
+                  placeholder: "输入消息，粘贴图片，或输入 /help 查看系统指令",
+                  send: "发送消息",
+                  stop: "停止生成",
+                }}
+                leadingAction={
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon"
+                    title="上传图片"
+                    aria-label="上传图片"
+                    disabled={streaming || pendingImages.length >= 4}
+                    onClick={() => fileInputRef.current?.click()}
+                    className="rounded-full"
+                  >
+                    <ImagePlus className="size-4" />
+                  </Button>
+                }
+              />
+            </div>
           </div>
         )}
       </TabsContent>

@@ -15,18 +15,124 @@ import { cn } from "@/lib/utils";
 
 export interface ConsolePageHeaderProps {
   title: string;
+  description?: ReactNode;
   badges?: ReactNode;
   actions?: ReactNode;
+  className?: string;
 }
 
-export function ConsolePageHeader({ title, badges, actions }: ConsolePageHeaderProps) {
+export function ConsolePageHeader({
+  title,
+  description,
+  badges,
+  actions,
+  className,
+}: ConsolePageHeaderProps) {
   return (
-    <div className="flex min-h-11 shrink-0 flex-wrap items-center justify-between gap-2 border-b border-border pb-3">
-      <div className="flex flex-wrap items-center gap-2">
-        <h2 className="text-base font-semibold tracking-tight text-foreground">{title}</h2>
-        {badges}
+    <div
+      className={cn(
+        "flex min-h-11 shrink-0 flex-wrap items-center justify-between gap-3 border-b border-border/80 pb-3.5",
+        className,
+      )}
+    >
+      <div className="flex min-w-0 flex-col gap-0.5">
+        <div className="flex flex-wrap items-center gap-2">
+          <h2 className="text-[15px] font-semibold tracking-[-0.015em] text-foreground">
+            {title}
+          </h2>
+          {badges}
+        </div>
+        {description ? (
+          <p className="text-xs leading-relaxed text-muted-foreground">{description}</p>
+        ) : null}
       </div>
       {actions ? <div className="flex flex-wrap items-center gap-2">{actions}</div> : null}
+    </div>
+  );
+}
+
+export interface ConsoleSectionProps {
+  title: string;
+  description?: ReactNode;
+  actions?: ReactNode;
+  children: ReactNode;
+  bordered?: boolean;
+  className?: string;
+  contentClassName?: string;
+}
+
+/**
+ * Flat content section separated by hairline dividers and whitespace instead of boxed cards.
+ */
+export function ConsoleSection({
+  title,
+  description,
+  actions,
+  children,
+  bordered = true,
+  className,
+  contentClassName,
+}: ConsoleSectionProps) {
+  return (
+    <section
+      className={cn(
+        "flex flex-col gap-3",
+        bordered && "border-b border-border/75 pb-6 last:border-b-0 last:pb-0",
+        className,
+      )}
+    >
+      <div className="flex flex-wrap items-start justify-between gap-2">
+        <div className="flex min-w-0 flex-col gap-0.5">
+          <h3 className="text-xs font-semibold tracking-wide text-foreground">{title}</h3>
+          {description ? (
+            <p className="text-[11px] leading-relaxed text-muted-foreground">{description}</p>
+          ) : null}
+        </div>
+        {actions ? <div className="flex shrink-0 items-center gap-2">{actions}</div> : null}
+      </div>
+      <div className={cn("min-w-0", contentClassName)}>{children}</div>
+    </section>
+  );
+}
+
+export interface ConsoleFormRowProps {
+  label: ReactNode;
+  description?: ReactNode;
+  htmlFor?: string;
+  children: ReactNode;
+  className?: string;
+}
+
+/**
+ * Responsive two-column setting row for flat configuration panels.
+ */
+export function ConsoleFormRow({
+  label,
+  description,
+  htmlFor,
+  children,
+  className,
+}: ConsoleFormRowProps) {
+  return (
+    <div
+      className={cn(
+        "grid grid-cols-1 gap-2 py-3 md:grid-cols-[minmax(0,240px)_minmax(0,1fr)] md:items-start md:gap-6",
+        className,
+      )}
+    >
+      <div className="flex min-w-0 flex-col gap-0.5 md:pt-1.5">
+        {htmlFor ? (
+          <label htmlFor={htmlFor} className="text-xs font-medium text-foreground">
+            {label}
+          </label>
+        ) : (
+          <span className="text-xs font-medium text-foreground">{label}</span>
+        )}
+        {description ? (
+          <p className="text-[11px] leading-relaxed text-muted-foreground">{description}</p>
+        ) : null}
+      </div>
+      <div className="min-w-0">{children}</div>
     </div>
   );
 }
@@ -73,13 +179,13 @@ export function ConsoleSelect({
       >
         <SelectTrigger
           className={cn(
-            "rounded-xl px-3 py-0 text-xs",
+            "rounded-lg border-input bg-transparent px-2.5 py-0 text-xs transition-colors hover:bg-muted/35",
             size === "sm" ? "h-8" : "h-9",
           )}
         >
           <SelectValue placeholder={placeholder} className="text-xs" />
         </SelectTrigger>
-        <SelectContent className="z-50 max-h-60 overflow-y-auto">
+        <SelectContent className="z-50 max-h-60 overflow-y-auto rounded-lg shadow-sm">
           {options.map((opt) => (
             <SelectItem key={opt.value} value={opt.value} className="text-xs">
               {opt.label}
@@ -171,8 +277,8 @@ export function ConsoleMultiSelect({
         aria-expanded={open}
         onClick={() => !disabled && setOpen((v) => !v)}
         className={cn(
-          "flex w-full items-center justify-between gap-2 rounded-xl border border-border bg-background px-3 text-left text-xs text-foreground outline-none transition-colors",
-          "hover:border-foreground/30 focus-visible:ring-2 focus-visible:ring-ring/40",
+          "flex w-full items-center justify-between gap-2 rounded-lg border border-input bg-transparent px-2.5 text-left text-xs text-foreground outline-none transition-colors",
+          "hover:border-border-strong hover:bg-muted/35 focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/25",
           "disabled:pointer-events-none disabled:opacity-50",
           size === "sm" ? "h-8" : "h-9",
         )}
@@ -187,7 +293,7 @@ export function ConsoleMultiSelect({
           {summaryText}
         </span>
         {values.length > 0 && (
-          <span className="shrink-0 rounded-md bg-muted px-1.5 py-0.5 text-[10px] font-medium tabular-nums text-muted-foreground">
+          <span className="shrink-0 rounded bg-muted px-1.5 py-0.5 text-[10px] font-medium tabular-nums text-muted-foreground">
             {values.length}
           </span>
         )}
@@ -208,7 +314,7 @@ export function ConsoleMultiSelect({
             animate={{ opacity: 1, y: 0 }}
             exit={reduce ? { opacity: 0 } : { opacity: 0, y: -4 }}
             transition={{ duration: 0.16, ease: EASE_OUT }}
-            className="absolute top-full left-0 z-50 mt-1.5 w-full min-w-[260px] overflow-hidden rounded-xl border border-border bg-popover p-1.5 shadow-lg"
+            className="absolute top-full left-0 z-50 mt-1.5 w-full min-w-[260px] overflow-hidden rounded-lg border border-border bg-popover p-1 shadow-sm"
           >
             <div className="max-h-60 space-y-0.5 overflow-y-auto">
               {mergedOptions.map((opt) => {
@@ -223,10 +329,10 @@ export function ConsoleMultiSelect({
                     disabled={locked}
                     onClick={() => toggleValue(opt.value)}
                     className={cn(
-                      "flex w-full items-center justify-between gap-2 rounded-lg px-2.5 py-1.5 text-left text-xs transition-colors outline-none",
+                      "flex w-full items-center justify-between gap-2 rounded-md px-2.5 py-1.5 text-left text-xs transition-colors outline-none",
                       checked
-                        ? "bg-muted text-foreground font-medium"
-                        : "text-muted-foreground hover:bg-muted/70 hover:text-foreground",
+                        ? "bg-muted font-medium text-foreground"
+                        : "text-muted-foreground hover:bg-muted/60 hover:text-foreground",
                       locked && "cursor-not-allowed opacity-75",
                     )}
                   >
@@ -247,7 +353,7 @@ export function ConsoleMultiSelect({
             </div>
 
             {allowCustom && (
-              <div className="mt-1.5 flex items-center gap-1.5 border-t border-border pt-1.5">
+              <div className="mt-1.5 flex items-center gap-1.5 border-t border-border/80 pt-1.5">
                 <input
                   type="text"
                   value={customDraft}
@@ -259,14 +365,14 @@ export function ConsoleMultiSelect({
                     }
                   }}
                   placeholder={customPlaceholder}
-                  className="h-7 min-w-0 flex-1 rounded-lg border border-border bg-background px-2 font-mono text-[11px] text-foreground outline-none focus:border-ring"
+                  className="h-7 min-w-0 flex-1 rounded-md border border-input bg-background px-2 font-mono text-[11px] text-foreground outline-none focus:border-ring"
                 />
                 <button
                   type="button"
                   onClick={addCustomValue}
                   disabled={!customDraft.trim()}
                   aria-label="添加自定义范围"
-                  className="inline-flex h-7 items-center gap-1 rounded-lg bg-primary px-2 text-[11px] font-medium text-primary-foreground disabled:opacity-40"
+                  className="inline-flex h-7 items-center gap-1 rounded-md bg-primary px-2 text-[11px] font-medium text-primary-foreground disabled:opacity-40"
                 >
                   <Plus className="size-3" />
                   添加
@@ -290,9 +396,9 @@ export function ConsoleInput({ size = "md", className, ...props }: ConsoleInputP
       {...props}
       className={className}
       classNames={{
-        label: "text-xs font-medium text-muted-foreground mb-1.5",
+        label: "px-0 text-xs font-medium text-muted-foreground mb-1",
         field: cn(
-          "rounded-xl bg-background",
+          "rounded-lg border-input bg-transparent transition-colors hover:border-border-strong focus-within:bg-background",
           size === "sm" ? "h-8" : "h-9",
         ),
         input: "text-xs leading-normal",
@@ -302,16 +408,16 @@ export function ConsoleInput({ size = "md", className, ...props }: ConsoleInputP
 }
 
 const SLOT_BADGE_STYLE: Record<string, string> = {
-  persona: "border-primary/35 bg-primary/12 text-primary",
-  worker: "border-amber-500/35 bg-amber-500/12 text-amber-700 dark:text-amber-300",
-  curator: "border-emerald-500/35 bg-emerald-500/12 text-emerald-700 dark:text-emerald-300",
-  router: "border-sky-500/35 bg-sky-500/12 text-sky-700 dark:text-sky-300",
-  hindsight_llm: "border-violet-500/35 bg-violet-500/12 text-violet-700 dark:text-violet-300",
+  persona: "border-primary/25 bg-primary/10 text-primary",
+  worker: "border-amber-500/25 bg-amber-500/10 text-amber-700 dark:text-amber-300",
+  curator: "border-emerald-500/25 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300",
+  router: "border-sky-500/25 bg-sky-500/10 text-sky-700 dark:text-sky-300",
+  hindsight_llm: "border-violet-500/25 bg-violet-500/10 text-violet-700 dark:text-violet-300",
 };
 
 export function SlotBadge({ slot, className }: { slot: string; className?: string }) {
   const tone =
-    SLOT_BADGE_STYLE[slot] ?? "border-border bg-muted/70 text-foreground";
+    SLOT_BADGE_STYLE[slot] ?? "border-border/80 bg-muted/60 text-foreground";
   return (
     <span
       className={cn(
@@ -326,15 +432,15 @@ export function SlotBadge({ slot, className }: { slot: string; className?: strin
 }
 
 const API_BADGE_STYLE: Record<string, string> = {
-  "anthropic-messages": "border-orange-500/30 bg-orange-500/10 text-orange-700 dark:text-orange-300",
-  "google-generative-ai": "border-blue-500/30 bg-blue-500/10 text-blue-700 dark:text-blue-300",
-  "openai-responses": "border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300",
-  "openai-completions": "border-teal-500/30 bg-teal-500/10 text-teal-700 dark:text-teal-300",
+  "anthropic-messages": "border-orange-500/25 bg-orange-500/8 text-orange-700 dark:text-orange-300",
+  "google-generative-ai": "border-blue-500/25 bg-blue-500/8 text-blue-700 dark:text-blue-300",
+  "openai-responses": "border-emerald-500/25 bg-emerald-500/8 text-emerald-700 dark:text-emerald-300",
+  "openai-completions": "border-teal-500/25 bg-teal-500/8 text-teal-700 dark:text-teal-300",
 };
 
 export function ApiBadge({ api, className }: { api: string; className?: string }) {
   const tone =
-    API_BADGE_STYLE[api] ?? "border-border bg-muted/60 text-muted-foreground";
+    API_BADGE_STYLE[api] ?? "border-border/80 bg-muted/50 text-muted-foreground";
   return (
     <span
       className={cn(

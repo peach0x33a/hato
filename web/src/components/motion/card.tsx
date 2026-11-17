@@ -10,21 +10,28 @@ export type CardVariant = "outlined" | "muted";
 export type CardSize = "default" | "compact";
 
 const CardSizeContext = createContext<CardSize>("default");
+const CardVariantContext = createContext<CardVariant>("outlined");
 
 const VARIANT_CLASS: Record<CardVariant, string> = {
-  outlined: "border-border bg-background",
-  muted: "border-transparent bg-muted",
+  outlined: "border-b border-border/75 bg-transparent",
+  muted: "rounded-lg bg-muted/45",
 };
 
 // Each part pads itself on the inline axis, so a part can be left out without
 // the others losing their edges. The root owns the block padding and the gap.
 const ROOT_SIZE_CLASS: Record<CardSize, string> = {
-  default: "gap-6 py-6",
-  compact: "gap-4 py-4",
+  default: "gap-4 py-5",
+  compact: "gap-3 py-3.5",
 };
-const INSET_CLASS: Record<CardSize, string> = {
-  default: "px-6",
-  compact: "px-4",
+const INSET_CLASS: Record<CardVariant, Record<CardSize, string>> = {
+  outlined: {
+    default: "px-0",
+    compact: "px-0",
+  },
+  muted: {
+    default: "px-4",
+    compact: "px-3",
+  },
 };
 
 /**
@@ -35,7 +42,7 @@ const INSET_CLASS: Record<CardSize, string> = {
 export const CARD_TARGET_CLASS = "after:absolute after:inset-0";
 
 export interface CardProps extends ComponentPropsWithRef<"div"> {
-  /** Default "outlined". */
+  /** Default "outlined" (flat divider-separated section). */
   variant?: CardVariant;
   /** Spacing for every part. Default "default". */
   size?: CardSize;
@@ -102,28 +109,31 @@ export function Card({
   };
 
   return (
-    <CardSizeContext.Provider value={size}>
-      <motion.div
-        {...(props as React.ComponentProps<typeof motion.div>)}
-        onPointerDown={press}
-        // Only an interactive card carries the scale, so a plain one keeps
-        // any transform the caller gives it.
-        style={interactive ? { ...style, scale } : style}
-        data-slot="card"
-        data-selected={selected || undefined}
-        className={cn(
-          "relative flex flex-col rounded-2xl border text-card-foreground",
-          "transition-[border-color,box-shadow,background-color] duration-200",
-          VARIANT_CLASS[variant],
-          ROOT_SIZE_CLASS[size],
-          interactive && "cursor-pointer hover:border-border-strong has-focus-visible:outline-2 has-focus-visible:outline-offset-2 has-focus-visible:outline-foreground",
-          selected && "border-primary shadow-[0_0_0_1px_var(--primary)] hover:border-primary",
-          className,
-        )}
-      >
-        {children}
-      </motion.div>
-    </CardSizeContext.Provider>
+    <CardVariantContext.Provider value={variant}>
+      <CardSizeContext.Provider value={size}>
+        <motion.div
+          {...(props as React.ComponentProps<typeof motion.div>)}
+          onPointerDown={press}
+          // Only an interactive card carries the scale, so a plain one keeps
+          // any transform the caller gives it.
+          style={interactive ? { ...style, scale } : style}
+          data-slot="card"
+          data-selected={selected || undefined}
+          className={cn(
+            "relative flex flex-col text-card-foreground",
+            "transition-[border-color,background-color] duration-200",
+            VARIANT_CLASS[variant],
+            ROOT_SIZE_CLASS[size],
+            interactive &&
+              "cursor-pointer rounded-lg hover:bg-muted/50 has-focus-visible:outline-2 has-focus-visible:outline-offset-2 has-focus-visible:outline-foreground",
+            selected && "rounded-lg bg-primary/8",
+            className,
+          )}
+        >
+          {children}
+        </motion.div>
+      </CardSizeContext.Provider>
+    </CardVariantContext.Provider>
   );
 }
 
@@ -132,14 +142,15 @@ export type CardHeaderProps = ComponentPropsWithRef<"div">;
 /** Title and description, with an optional CardAction pinned to the top right. */
 export function CardHeader({ className, ...props }: CardHeaderProps) {
   const size = useContext(CardSizeContext);
+  const variant = useContext(CardVariantContext);
   return (
     <div
       {...props}
       data-slot="card-header"
       className={cn(
-        "grid auto-rows-min grid-rows-[auto_auto] items-start gap-1.5",
+        "grid auto-rows-min grid-rows-[auto_auto] items-start gap-1",
         "has-data-[slot=card-action]:grid-cols-[1fr_auto]",
-        INSET_CLASS[size],
+        INSET_CLASS[variant][size],
         className,
       )}
     />
@@ -168,7 +179,7 @@ export function CardDescription({ className, ...props }: CardDescriptionProps) {
     <p
       {...props}
       data-slot="card-description"
-      className={cn("text-sm leading-relaxed text-muted-foreground", className)}
+      className={cn("text-xs leading-relaxed text-muted-foreground", className)}
     />
   );
 }
@@ -195,18 +206,26 @@ export type CardContentProps = ComponentPropsWithRef<"div">;
 
 export function CardContent({ className, ...props }: CardContentProps) {
   const size = useContext(CardSizeContext);
-  return <div {...props} data-slot="card-content" className={cn("text-sm", INSET_CLASS[size], className)} />;
+  const variant = useContext(CardVariantContext);
+  return (
+    <div
+      {...props}
+      data-slot="card-content"
+      className={cn("text-sm", INSET_CLASS[variant][size], className)}
+    />
+  );
 }
 
 export type CardFooterProps = ComponentPropsWithRef<"div">;
 
 export function CardFooter({ className, ...props }: CardFooterProps) {
   const size = useContext(CardSizeContext);
+  const variant = useContext(CardVariantContext);
   return (
     <div
       {...props}
       data-slot="card-footer"
-      className={cn("flex items-center gap-2", INSET_CLASS[size], className)}
+      className={cn("flex items-center gap-2", INSET_CLASS[variant][size], className)}
     />
   );
 }

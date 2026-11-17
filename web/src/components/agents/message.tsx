@@ -135,7 +135,7 @@ export function Message({
             ...style,
           }}
           className={cn(
-            "group/message flex w-full items-start gap-2",
+            "group/message flex w-full items-start gap-2.5",
             from === "user" ? "flex-row-reverse" : "flex-row",
             className,
           )}
@@ -177,7 +177,7 @@ export function MessageAvatar({
       data-slot="message-avatar"
       aria-hidden={placeholder || undefined}
       className={cn(
-        "grid size-7 shrink-0 place-items-center overflow-hidden rounded-full bg-muted text-xs font-medium text-muted-foreground [&_img]:size-full [&_img]:object-cover [&_svg]:size-3.5",
+        "grid size-7 shrink-0 place-items-center overflow-hidden rounded-full bg-muted/70 text-xs font-medium text-muted-foreground [&_img]:size-full [&_img]:object-cover [&_svg]:size-3.5",
         placeholder && "invisible",
         className,
       )}
@@ -236,16 +236,20 @@ export function MessageFooter({ className, ...props }: MessageFooterProps) {
   );
 }
 
-export function MessageMarker({ className, ...props }: MessageMarkerProps) {
+export function MessageMarker({ className, children, ...props }: MessageMarkerProps) {
   return (
     <div
       data-slot="message-marker"
       className={cn(
-        "mx-auto flex w-fit max-w-[88%] items-center gap-1.5 rounded-full bg-muted/70 px-2.5 py-1 text-center text-xs text-muted-foreground",
+        "mx-auto flex w-full max-w-2xl items-center gap-3 py-1 text-center text-[11px] text-muted-foreground",
         className,
       )}
       {...props}
-    />
+    >
+      <span aria-hidden="true" className="h-px flex-1 bg-border/60" />
+      <span className="max-w-[82%] text-balance">{children}</span>
+      <span aria-hidden="true" className="h-px flex-1 bg-border/60" />
+    </div>
   );
 }
 

@@ -113,6 +113,10 @@ export interface HatoConfig {
     workspaces_dir: string;
     prompts_dir: string;
   };
+  prompts?: {
+    order?: string[];
+    disabled?: string[];
+  };
   owner: {
     canonical_user_id: string;
     timezone: string;
@@ -232,17 +236,30 @@ export interface ModelDefinitionConfig {
   name?: string;
   api?: string;
   base_url?: string;
+  headers?: Record<string, string>;
+  cache_ttl_minutes?: number;
   reasoning?: boolean;
   input?: Array<"text" | "image">;
   context_window?: number;
   max_tokens?: number;
+  cost?: {
+    input?: number;
+    output?: number;
+    cache_read?: number;
+    cache_write?: number;
+  };
+  thinking_level_map?: Record<string, string | null>;
   compat?: Record<string, unknown>;
 }
 
 export interface ProviderConfig {
+  name?: string;
+  slug?: string;
   api: string;
   base_url: string;
-  api_key_env: string;
+  api_key_env?: string;
+  cache_ttl_minutes?: number;
+  headers?: Record<string, string>;
   compat?: Record<string, unknown>;
   models: ModelDefinitionConfig[];
 }
@@ -264,12 +281,31 @@ export interface SecretState {
   masked: string;
 }
 
+export interface PromptBlockRecord {
+  name: string;
+  path: string;
+  content: string;
+}
+
+export interface PromptLayersSnapshot {
+  mode: "layered" | "legacy";
+  order: string[];
+  disabled: string[];
+  blocks: PromptBlockRecord[];
+  systemPath: string;
+  systemText: string;
+  soulPath: string;
+  soulText: string;
+  combinedText: string;
+}
+
 export interface ConfigSnapshotResponse {
   ok: boolean;
   hatoConfig: HatoConfig;
   modelsConfig: ModelsFileConfig;
   promptPath: string;
   promptText: string;
+  promptLayers: PromptLayersSnapshot;
   secretStates: SecretState[];
 }
 
@@ -280,6 +316,10 @@ export interface SaveConfigResponse {
   slots: SlotView[];
   proxyCount: number;
   changes?: string[];
+  hatoConfig?: HatoConfig;
+  promptPath?: string;
+  promptText?: string;
+  promptLayers?: PromptLayersSnapshot;
   error?: string;
 }
 
@@ -451,6 +491,28 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ promptText }),
     }),
+  savePromptOrder: (order: string[], disabled: string[]) =>
+    requestJson<SaveConfigResponse>("/api/config/prompts/order", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ order, disabled }),
+    }),
+  upsertPromptBlock: (name: string, content: string, enabled?: boolean) =>
+    requestJson<SaveConfigResponse & { block?: { name: string; path: string } }>(
+      "/api/config/prompts/block",
+      {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name, content, enabled }),
+      },
+    ),
+  deletePromptBlock: (name: string) =>
+    requestJson<SaveConfigResponse>(
+      `/api/config/prompts/block?name=${encodeURIComponent(name)}`,
+      {
+        method: "DELETE",
+      },
+    ),
   saveSecrets: (updates: Record<string, string>) =>
     requestJson<{ ok: boolean; writtenKeys: string[]; secretStates: SecretState[]; changes?: string[] }>(
       "/api/config/secrets",
@@ -469,6 +531,35 @@ export const api = {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ target }),
+    }),
+  testModel: (input: {
+    providerSlug: string;
+    api: string;
+    baseUrl: string;
+    apiKeyEnv?: string;
+    apiKeyOverride?: string;
+    providerHeaders?: Record<string, string>;
+    model: ModelDefinitionConfig;
+  }) =>
+    requestJson<{
+      ok: boolean;
+      result: {
+        ok: boolean;
+        target: string;
+        providerSlug: string;
+        api: string;
+        baseUrl: string;
+        apiKeyEnv: string;
+        latencyMs: number;
+        replyPreview?: string;
+        inputTokens?: number;
+        outputTokens?: number;
+        error?: string;
+      };
+    }>("/api/config/models/test", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(input),
     }),
   getStatics: (params: { limit?: number; slot?: string; since?: string; sessionId?: string | null }) => {
     const q = new URLSearchParams();

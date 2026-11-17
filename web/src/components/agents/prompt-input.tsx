@@ -185,7 +185,7 @@ export function PromptInput({
     <form
       onSubmit={submit}
       className={cn(
-        "relative w-full rounded-2xl border border-border/80 bg-background p-2 transition-colors focus-within:border-foreground/25",
+        "relative w-full rounded-xl border border-border/70 bg-muted/25 px-2.5 py-2 transition-colors focus-within:border-ring/60 focus-within:bg-background",
         disabled && "opacity-60",
         className,
       )}

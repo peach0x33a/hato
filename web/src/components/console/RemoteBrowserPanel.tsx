@@ -167,11 +167,11 @@ export function RemoteBrowserPanel({
 
     const recalc = () => {
       const rect = container.getBoundingClientRect();
-      const availW = Math.max(420, Math.floor(rect.width));
+      const availW = Math.max(280, Math.floor(rect.width));
       const chromeHeight = showImeBar ? 136 : 88;
-      const availContentH = Math.max(240, Math.floor(rect.height) - chromeHeight);
+      const availContentH = Math.max(220, Math.floor(rect.height) - chromeHeight);
       const maxWidthByHeight = Math.floor(availContentH * ratio);
-      setWindowWidth(Math.max(420, Math.min(availW, maxWidthByHeight)));
+      setWindowWidth(Math.min(availW, Math.max(280, maxWidthByHeight)));
     };
 
     recalc();
@@ -424,17 +424,19 @@ export function RemoteBrowserPanel({
       )}
 
       {!status.open ? (
-        <div className="flex flex-1 items-center justify-center rounded-xl border border-border bg-card/40 p-6">
-          <div className="flex w-full max-w-lg flex-col items-center gap-4 text-center">
-            <MousePointerClick className="size-9 text-muted-foreground" />
-            <div className="space-y-1">
-              <h3 className="text-sm font-medium text-foreground">浏览器尚未启动</h3>
+        <div className="flex flex-1 items-center justify-center p-6">
+          <div className="flex w-full max-w-lg flex-col items-center gap-5 text-center">
+            <div className="grid size-12 place-items-center rounded-full bg-muted/60 text-muted-foreground">
+              <MousePointerClick className="size-6" />
+            </div>
+            <div className="space-y-1.5">
+              <h3 className="text-base font-semibold tracking-tight text-foreground">浏览器尚未启动</h3>
               <p className="text-xs leading-relaxed text-muted-foreground">
                 输入初始网址后启动浏览器，可预先登录站点保留会话，或在执行任务时实时查看与接管画面。
               </p>
             </div>
             <form
-              className="flex w-full items-center gap-2"
+              className="flex w-full flex-col items-stretch gap-2 sm:flex-row sm:items-center"
               onSubmit={(e) => {
                 e.preventDefault();
                 if (!urlBar.trim()) return;
@@ -468,12 +470,12 @@ export function RemoteBrowserPanel({
         >
           <div
             style={windowWidth ? { width: `${windowWidth}px` } : undefined}
-            className={`flex max-w-full flex-col overflow-hidden rounded-xl border bg-card shadow-lg transition-colors ${
-              controlling && stageFocused ? "border-ring ring-2 ring-ring/40" : "border-border"
+            className={`flex max-w-full flex-col overflow-hidden rounded-lg border bg-background transition-colors ${
+              controlling && stageFocused ? "border-primary ring-1 ring-primary/35" : "border-border"
             }`}
           >
-            {/* Unified Titlebar: macOS Traffic Lights + Tabs + Status + Takeover Controls */}
-            <div className="flex h-10 shrink-0 items-center gap-2 border-b border-border/70 bg-muted/60 px-3 select-none">
+            {/* Unified Titlebar: Traffic Lights + Tabs + Status + Takeover Controls */}
+            <div className="flex min-h-10 shrink-0 flex-wrap items-center gap-2 border-b border-border bg-muted/30 px-2.5 py-1 select-none">
               <div className="group flex shrink-0 items-center gap-2 pr-1">
                 <button
                   type="button"
@@ -510,10 +512,10 @@ export function RemoteBrowserPanel({
                 {status.tabs.map((tab) => (
                   <div
                     key={tab.index}
-                    className={`group/tab inline-flex h-7 max-w-[180px] shrink-0 items-center gap-1.5 rounded-lg px-2.5 text-xs transition-colors ${
+                    className={`group/tab inline-flex h-7 max-w-[180px] shrink-0 items-center gap-1.5 rounded-md px-2.5 text-xs transition-colors ${
                       tab.active
-                        ? "bg-card text-foreground shadow-xs"
-                        : "text-muted-foreground hover:bg-card/60 hover:text-foreground"
+                        ? "bg-background font-medium text-foreground ring-1 ring-border/70"
+                        : "text-muted-foreground hover:bg-muted/60 hover:text-foreground"
                     }`}
                   >
                     <button
@@ -540,14 +542,14 @@ export function RemoteBrowserPanel({
                   title="新建标签页"
                   disabled={working}
                   onClick={() => void runAction({ action: "new_tab" })}
-                  className="grid size-6.5 shrink-0 place-items-center rounded-lg text-muted-foreground transition-colors hover:bg-card/70 hover:text-foreground"
+                  className="grid size-6.5 shrink-0 place-items-center rounded-md text-muted-foreground transition-colors hover:bg-muted/60 hover:text-foreground"
                 >
                   <Plus className="size-3.5" />
                 </button>
               </div>
 
               {/* Shared Status Badges + Takeover Controls */}
-              <div className="flex shrink-0 items-center gap-2">
+              <div className="flex shrink-0 flex-wrap items-center gap-1.5">
                 <AnimatedBadge status="success" size="sm" pulse>
                   {displayLabel}
                 </AnimatedBadge>
@@ -574,10 +576,10 @@ export function RemoteBrowserPanel({
                 {takeoverControls}
                 <Button
                   type="button"
-                  variant={showImeBar ? "secondary" : "outline"}
+                  variant={showImeBar ? "secondary" : "ghost"}
                   size="sm"
                   onClick={() => setShowImeBar((v) => !v)}
-                  className="h-7 px-2.5 text-xs"
+                  className="h-7 px-2 text-xs"
                 >
                   <Keyboard className="size-3.5" />
                   文本输入
@@ -586,7 +588,7 @@ export function RemoteBrowserPanel({
             </div>
 
             {/* Row 2: Simplified Navigation Bar */}
-            <div className="flex h-11 shrink-0 items-center gap-1.5 border-b border-border bg-card px-2.5">
+            <div className="flex min-h-10 shrink-0 items-center gap-1.5 border-b border-border bg-background px-2.5 py-1">
               <button
                 type="button"
                 disabled={working}
@@ -626,7 +628,7 @@ export function RemoteBrowserPanel({
                   void runAction({ action: "navigate", url: urlBar.trim() });
                 }}
               >
-                <div className="flex h-7.5 min-w-0 flex-1 items-center gap-2 rounded-full border border-border/80 bg-muted/50 px-3 focus-within:border-ring focus-within:bg-background">
+                <div className="flex h-7.5 min-w-0 flex-1 items-center gap-2 rounded-lg border border-transparent bg-muted/40 px-2.5 transition-colors focus-within:border-border focus-within:bg-background">
                   {isHttps ? (
                     <Lock className="size-3 shrink-0 text-muted-foreground" />
                   ) : (
@@ -693,10 +695,10 @@ export function RemoteBrowserPanel({
               )}
             </div>
 
-            {/* Optional Compact IME Bar flushed inside the bottom of the macOS window */}
+            {/* Optional Compact IME Bar flushed inside the bottom of the browser viewport */}
             {showImeBar && (
-              <div className="flex h-12 shrink-0 items-center gap-2 border-t border-border bg-card px-3">
-                <div className="min-w-0 flex-1">
+              <div className="flex min-h-12 shrink-0 flex-wrap items-center gap-2 border-t border-border bg-background px-3 py-1.5">
+                <div className="min-w-[180px] flex-1">
                   <ConsoleInput
                     size="sm"
                     disabled={!controlling}
@@ -715,25 +717,27 @@ export function RemoteBrowserPanel({
                     }}
                   />
                 </div>
-                <Button
-                  type="button"
-                  size="sm"
-                  variant="outline"
-                  disabled={!controlling || !imeText}
-                  onClick={() => void sendImeText(false)}
-                >
-                  <Send className="size-3.5" />
-                  发送文本
-                </Button>
-                <Button
-                  type="button"
-                  size="sm"
-                  disabled={!controlling || !imeText}
-                  onClick={() => void sendImeText(true)}
-                >
-                  <CornerDownLeft className="size-3.5" />
-                  发送并回车
-                </Button>
+                <div className="flex items-center gap-1.5">
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="outline"
+                    disabled={!controlling || !imeText}
+                    onClick={() => void sendImeText(false)}
+                  >
+                    <Send className="size-3.5" />
+                    发送文本
+                  </Button>
+                  <Button
+                    type="button"
+                    size="sm"
+                    disabled={!controlling || !imeText}
+                    onClick={() => void sendImeText(true)}
+                  >
+                    <CornerDownLeft className="size-3.5" />
+                    发送并回车
+                  </Button>
+                </div>
               </div>
             )}
           </div>

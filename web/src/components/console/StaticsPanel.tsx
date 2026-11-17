@@ -173,9 +173,9 @@ export function StaticsPanel({ onToast, sessionEpoch = 0, sessionId = null }: St
 
   return (
     <div className="flex min-h-0 flex-1 flex-col overflow-hidden bg-background">
-      {/* Dense DSH Filter Strip */}
-      <div className="flex shrink-0 flex-wrap items-center justify-between gap-2 border-b border-border bg-card/30 px-2.5 py-1">
-        <div className="flex flex-wrap items-center gap-1.5">
+      {/* Flat Filter Strip */}
+      <div className="flex shrink-0 flex-wrap items-center justify-between gap-2 border-b border-border bg-background px-3 py-1.5">
+        <div className="flex flex-wrap items-center gap-2">
           <ConsoleSelect
             size="sm"
             className="w-40"
@@ -200,20 +200,20 @@ export function StaticsPanel({ onToast, sessionEpoch = 0, sessionId = null }: St
         </div>
         <Button
           type="button"
-          variant="outline"
+          variant="ghost"
           size="sm"
-          className="h-7 px-2 text-[11px]"
+          className="h-7 px-2 text-xs"
           disabled={viewState === "loading"}
           onClick={() => void loadStatics()}
         >
-          <RefreshCw className={`size-3 ${viewState === "loading" ? "animate-spin" : ""}`} />
+          <RefreshCw className={`size-3.5 ${viewState === "loading" ? "animate-spin" : ""}`} />
           刷新统计
         </Button>
       </div>
 
       <div className="min-h-0 flex-1 overflow-y-auto divide-y divide-border">
         {viewState === "error" && (
-          <div className="p-3">
+          <div className="p-3 sm:p-4">
             <Alert variant="destructive" open>
               <AlertIcon />
               <AlertContent>
@@ -229,7 +229,7 @@ export function StaticsPanel({ onToast, sessionEpoch = 0, sessionId = null }: St
           </div>
         )}
 
-        {/* Row 1: Compact 6-Cell KPI Strip */}
+        {/* Row 1: Flat 6-Cell KPI Strip */}
         <div className="grid grid-cols-2 divide-x divide-y divide-border sm:grid-cols-3 lg:grid-cols-6 lg:divide-y-0">
           {(
             [
@@ -265,41 +265,41 @@ export function StaticsPanel({ onToast, sessionEpoch = 0, sessionId = null }: St
               ],
             ] as const
           ).map(([label, val, sub]) => (
-            <div key={label} className="px-3 py-2">
-              <div className="text-[11px] text-muted-foreground">{label}</div>
-              <div className="mt-0.5 text-lg font-semibold leading-tight tabular-nums text-foreground">
+            <div key={label} className="px-3.5 py-2.5">
+              <div className="text-[11px] font-medium text-muted-foreground">{label}</div>
+              <div className="mt-1 text-xl font-semibold leading-tight tracking-tight tabular-nums text-foreground">
                 {val}
               </div>
-              {sub && <div className="mt-0.5 text-[10px] tabular-nums text-muted-foreground">{sub}</div>}
+              {sub && <div className="mt-0.5 text-[11px] tabular-nums text-muted-foreground/80">{sub}</div>}
             </div>
           ))}
         </div>
 
         {/* Row 2: Token Composition Bar */}
         {tokenBreakdown && summary && (
-          <div className="flex flex-col gap-1.5 px-3 py-2">
+          <div className="flex flex-col gap-2 px-3.5 py-2.5">
             <div className="flex flex-wrap items-center justify-between gap-2 text-[11px]">
               <span className="font-medium text-foreground">Token 构成分布</span>
               <div className="flex flex-wrap items-center gap-3 text-muted-foreground tabular-nums">
-                <span className="flex items-center gap-1">
-                  <span className="size-2 rounded-sm bg-emerald-500" />
+                <span className="flex items-center gap-1.5">
+                  <span className="size-2 rounded-full bg-emerald-500" />
                   缓存读 {summary.totalCacheReadTokens.toLocaleString()}
                 </span>
-                <span className="flex items-center gap-1">
-                  <span className="size-2 rounded-sm bg-amber-500" />
+                <span className="flex items-center gap-1.5">
+                  <span className="size-2 rounded-full bg-amber-500" />
                   缓存写 {summary.totalCacheWriteTokens.toLocaleString()}
                 </span>
-                <span className="flex items-center gap-1">
-                  <span className="size-2 rounded-sm bg-sky-500" />
+                <span className="flex items-center gap-1.5">
+                  <span className="size-2 rounded-full bg-sky-500" />
                   未命中 {summary.totalInputTokens.toLocaleString()}
                 </span>
-                <span className="flex items-center gap-1">
-                  <span className="size-2 rounded-sm bg-violet-500" />
+                <span className="flex items-center gap-1.5">
+                  <span className="size-2 rounded-full bg-violet-500" />
                   生成 {summary.totalOutputTokens.toLocaleString()}
                 </span>
               </div>
             </div>
-            <div className="flex h-2 w-full overflow-hidden rounded bg-muted">
+            <div className="flex h-1.5 w-full overflow-hidden rounded-full bg-muted">
               <div className="bg-emerald-500" style={{ width: `${tokenBreakdown.cacheReadPct}%` }} />
               <div className="bg-amber-500" style={{ width: `${tokenBreakdown.cacheWritePct}%` }} />
               <div className="bg-sky-500" style={{ width: `${tokenBreakdown.uncachedPct}%` }} />
@@ -311,8 +311,8 @@ export function StaticsPanel({ onToast, sessionEpoch = 0, sessionId = null }: St
         {/* Row 3: Two-Column Slot/Model & Tool Breakdown */}
         {(modelBreakdown.length > 0 || toolBreakdown.length > 0) && (
           <div className="grid grid-cols-1 divide-y divide-border lg:grid-cols-2 lg:divide-x lg:divide-y-0">
-            <div className="px-3 py-2">
-              <div className="mb-1.5 text-[11px] font-medium text-muted-foreground">
+            <div className="px-3.5 py-2.5">
+              <div className="mb-2 text-[11px] font-medium text-muted-foreground">
                 槽位与模型分布
               </div>
               <div className="divide-y divide-border/50">
@@ -322,7 +322,7 @@ export function StaticsPanel({ onToast, sessionEpoch = 0, sessionId = null }: St
                   return (
                     <div
                       key={item.key}
-                      className="flex flex-wrap items-center justify-between gap-2 py-1 text-xs"
+                      className="flex flex-wrap items-center justify-between gap-2 py-1.5 text-xs"
                     >
                       <div className="flex min-w-0 items-center gap-1.5">
                         <SlotBadge slot={item.slot} className="h-4 px-1 text-[10px]" />
@@ -331,7 +331,7 @@ export function StaticsPanel({ onToast, sessionEpoch = 0, sessionId = null }: St
                         </span>
                         <ApiBadge api={item.api} className="h-4 px-1 text-[10px]" />
                       </div>
-                      <div className="flex items-center gap-2 font-mono text-[10px] tabular-nums text-muted-foreground">
+                      <div className="flex items-center gap-2.5 font-mono text-[11px] tabular-nums text-muted-foreground">
                         <span>{item.count} 次</span>
                         <span>命中 {hit.toFixed(1)}%</span>
                         <span>出 {item.outputTokens.toLocaleString()}</span>
@@ -343,18 +343,18 @@ export function StaticsPanel({ onToast, sessionEpoch = 0, sessionId = null }: St
               </div>
             </div>
 
-            <div className="px-3 py-2">
-              <div className="mb-1.5 text-[11px] font-medium text-muted-foreground">
+            <div className="px-3.5 py-2.5">
+              <div className="mb-2 text-[11px] font-medium text-muted-foreground">
                 工具调用频次
               </div>
               {toolBreakdown.length === 0 ? (
-                <div className="py-1 text-xs text-muted-foreground">筛选范围内无工具调用记录</div>
+                <div className="py-1.5 text-xs text-muted-foreground">筛选范围内无工具调用记录</div>
               ) : (
                 <div className="divide-y divide-border/50">
                   {toolBreakdown.map(([toolName, count]) => {
                     const max = toolBreakdown[0]?.[1] || 1;
                     return (
-                      <div key={toolName} className="flex items-center justify-between gap-2 py-1 text-xs">
+                      <div key={toolName} className="flex items-center justify-between gap-2 py-1.5 text-xs">
                         <span className="truncate font-mono text-[11px] text-foreground">{toolName}</span>
                         <div className="flex items-center gap-2">
                           <div className="h-1.5 w-24 overflow-hidden rounded-full bg-muted">
@@ -363,7 +363,7 @@ export function StaticsPanel({ onToast, sessionEpoch = 0, sessionId = null }: St
                               style={{ width: `${(count / max) * 100}%` }}
                             />
                           </div>
-                          <span className="w-9 text-right font-mono text-[10px] tabular-nums text-muted-foreground">
+                          <span className="w-10 text-right font-mono text-[11px] tabular-nums text-muted-foreground">
                             {count} 次
                           </span>
                         </div>
@@ -376,36 +376,36 @@ export function StaticsPanel({ onToast, sessionEpoch = 0, sessionId = null }: St
           </div>
         )}
 
-        {/* Row 4: Dense Collapsible Calls Ledger */}
+        {/* Row 4: Flat Collapsible Calls Ledger */}
         <div>
-          <div className="flex items-center justify-between border-b border-border bg-muted/20 px-3 py-1.5">
-            <span className="text-[11px] font-medium text-foreground">
+          <div className="flex items-center justify-between border-b border-border bg-background px-3.5 py-2">
+            <span className="text-xs font-medium text-foreground">
               最近调用明细（共 {traces.length} 条）
             </span>
-            <span className="text-[10px] text-muted-foreground">
+            <span className="text-[11px] text-muted-foreground">
               点击行可展开上下文快照
             </span>
           </div>
 
           {viewState === "ready" && traces.length === 0 ? (
-            <div className="py-8 text-center text-xs text-muted-foreground">
+            <div className="py-10 text-center text-xs text-muted-foreground">
               筛选条件下暂无调用记录。
             </div>
           ) : (
             <div className="overflow-x-auto">
               <table className="w-full border-collapse text-left text-xs">
-                <thead className="sticky top-0 bg-muted/35 text-[11px] text-muted-foreground">
+                <thead className="sticky top-0 bg-muted/25 text-[11px] text-muted-foreground">
                   <tr className="border-b border-border">
-                    <th className="w-6 py-1.5 pl-2.5" />
-                    <th className="py-1.5 pr-2 font-medium">时间</th>
-                    <th className="py-1.5 pr-2 font-medium">槽位与模型</th>
-                    <th className="py-1.5 pr-2 font-medium">输入 / 摘要</th>
-                    <th className="py-1.5 pr-2 font-medium">提示词</th>
-                    <th className="py-1.5 pr-2 font-medium">缓存读</th>
-                    <th className="py-1.5 pr-2 font-medium">命中率</th>
-                    <th className="py-1.5 pr-2 font-medium">输出</th>
-                    <th className="py-1.5 pr-2 font-medium">首字 / 耗时</th>
-                    <th className="py-1.5 pr-2.5 font-medium">工具</th>
+                    <th className="w-6 py-2 pl-3" />
+                    <th className="py-2 pr-2 font-medium">时间</th>
+                    <th className="py-2 pr-2 font-medium">槽位与模型</th>
+                    <th className="py-2 pr-2 font-medium">输入 / 摘要</th>
+                    <th className="py-2 pr-2 font-medium">提示词</th>
+                    <th className="py-2 pr-2 font-medium">缓存读</th>
+                    <th className="py-2 pr-2 font-medium">命中率</th>
+                    <th className="py-2 pr-2 font-medium">输出</th>
+                    <th className="py-2 pr-2 font-medium">首字 / 耗时</th>
+                    <th className="py-2 pr-3 font-medium">工具</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-border/50">
@@ -418,24 +418,24 @@ export function StaticsPanel({ onToast, sessionEpoch = 0, sessionId = null }: St
                         <tr
                           onClick={() => setExpandedRowId((prev) => (prev === tr.id ? null : tr.id))}
                           className={`cursor-pointer align-middle transition-colors ${
-                            expanded ? "bg-primary/8" : "hover:bg-muted/35"
+                            expanded ? "bg-primary/8" : "hover:bg-muted/30"
                           }`}
                         >
-                          <td className="py-1.5 pl-2.5 text-muted-foreground">
+                          <td className="py-2 pl-3 text-muted-foreground">
                             {expanded ? (
                               <ChevronDown className="size-3.5" />
                             ) : (
                               <ChevronRight className="size-3.5" />
                             )}
                           </td>
-                          <td className="whitespace-nowrap py-1.5 pr-2 font-mono text-[11px] tabular-nums text-muted-foreground">
+                          <td className="whitespace-nowrap py-2 pr-2 font-mono text-[11px] tabular-nums text-muted-foreground">
                             {new Date(tr.createdAt).toLocaleTimeString("zh-CN", {
                               hour: "2-digit",
                               minute: "2-digit",
                               second: "2-digit",
                             })}
                           </td>
-                          <td className="py-1.5 pr-2">
+                          <td className="py-2 pr-2">
                             <div className="flex flex-wrap items-center gap-1">
                               <SlotBadge slot={tr.slot} className="h-4 px-1 text-[10px]" />
                               <span className="font-mono text-[11px] text-foreground">
@@ -444,16 +444,16 @@ export function StaticsPanel({ onToast, sessionEpoch = 0, sessionId = null }: St
                               <ApiBadge api={tr.api} className="h-4 px-1 text-[10px]" />
                             </div>
                           </td>
-                          <td className="max-w-[200px] truncate py-1.5 pr-2 text-[11px] text-muted-foreground">
+                          <td className="max-w-[200px] truncate py-2 pr-2 text-[11px] text-muted-foreground">
                             {tr.userPreview || "—"}
                           </td>
-                          <td className="py-1.5 pr-2 font-mono text-[11px] tabular-nums">
+                          <td className="py-2 pr-2 font-mono text-[11px] tabular-nums">
                             {promptTotal.toLocaleString()}
                           </td>
-                          <td className="py-1.5 pr-2 font-mono text-[11px] tabular-nums text-emerald-600 dark:text-emerald-400">
+                          <td className="py-2 pr-2 font-mono text-[11px] tabular-nums text-emerald-600 dark:text-emerald-400">
                             {tr.cacheReadTokens.toLocaleString()}
                           </td>
-                          <td className="py-1.5 pr-2">
+                          <td className="py-2 pr-2">
                             <AnimatedBadge
                               status={tr.cacheHitRate >= 0.6 ? "success" : "neutral"}
                               size="sm"
@@ -461,14 +461,14 @@ export function StaticsPanel({ onToast, sessionEpoch = 0, sessionId = null }: St
                               {(tr.cacheHitRate * 100).toFixed(1)}%
                             </AnimatedBadge>
                           </td>
-                          <td className="py-1.5 pr-2 font-mono text-[11px] tabular-nums">
+                          <td className="py-2 pr-2 font-mono text-[11px] tabular-nums">
                             {tr.outputTokens.toLocaleString()}
                           </td>
-                          <td className="whitespace-nowrap py-1.5 pr-2 font-mono text-[11px] tabular-nums text-muted-foreground">
+                          <td className="whitespace-nowrap py-2 pr-2 font-mono text-[11px] tabular-nums text-muted-foreground">
                             {tr.ttftMs !== null ? `${tr.ttftMs}ms` : "--"} / {tr.latencyMs}ms
                             {tr.tps !== null ? ` · ${tr.tps.toFixed(0)}/s` : ""}
                           </td>
-                          <td className="py-1.5 pr-2.5">
+                          <td className="py-2 pr-3">
                             {tools.length === 0 ? (
                               <span className="text-[11px] text-muted-foreground/60">—</span>
                             ) : (
@@ -476,7 +476,7 @@ export function StaticsPanel({ onToast, sessionEpoch = 0, sessionId = null }: St
                                 {tools.slice(0, 3).map((tool, i) => (
                                   <span
                                     key={`${tool}-${i}`}
-                                    className="rounded border border-amber-500/30 bg-amber-500/10 px-1 py-0.5 font-mono text-[10px] leading-none text-amber-700 dark:text-amber-300"
+                                    className="rounded bg-amber-500/10 px-1.5 py-0.5 font-mono text-[10px] leading-none text-amber-700 dark:text-amber-300"
                                   >
                                     {tool}
                                   </span>
@@ -491,9 +491,9 @@ export function StaticsPanel({ onToast, sessionEpoch = 0, sessionId = null }: St
                           </td>
                         </tr>
                         {expanded && (
-                          <tr className="bg-muted/20">
-                            <td colSpan={10} className="px-4 py-2">
-                              <pre className="max-h-40 overflow-y-auto whitespace-pre-wrap break-words rounded border border-border bg-background/80 p-2 font-mono text-[11px] leading-relaxed text-foreground">
+                          <tr className="bg-muted/15">
+                            <td colSpan={10} className="px-4 py-2.5">
+                              <pre className="max-h-44 overflow-y-auto whitespace-pre-wrap break-words border-l-2 border-primary/40 bg-muted/25 px-3 py-2 font-mono text-[11px] leading-relaxed text-foreground">
                                 {tr.timeCardText || "（无额外上下文快照）"}
                               </pre>
                             </td>

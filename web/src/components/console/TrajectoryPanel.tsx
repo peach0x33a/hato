@@ -76,6 +76,35 @@ function parseStepsJson(raw: string | null | undefined): TraceStepRecord[] {
   }
 }
 
+interface CuratorJsonPreview {
+  persona: Array<{ content?: string; importance?: number; confidence?: number }>;
+  tech: Array<{ content?: string; importance?: number; confidence?: number }>;
+}
+
+function tryParseCuratorJson(raw: string): CuratorJsonPreview | null {
+  const cleaned = raw
+    .trim()
+    .replace(/^```(?:json)?\s*/i, "")
+    .replace(/\s*```$/i, "")
+    .trim();
+  if (!cleaned.startsWith("{")) return null;
+  try {
+    const parsed = JSON.parse(cleaned) as Record<string, unknown>;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+    if (!Array.isArray(parsed.persona) && !Array.isArray(parsed.tech)) return null;
+    return {
+      persona: Array.isArray(parsed.persona)
+        ? (parsed.persona as CuratorJsonPreview["persona"])
+        : [],
+      tech: Array.isArray(parsed.tech)
+        ? (parsed.tech as CuratorJsonPreview["tech"])
+        : [],
+    };
+  } catch {
+    return null;
+  }
+}
+
 function singleLine(text: string | null | undefined): string {
   return (text ?? "").replace(/\s+/g, " ").trim();
 }
@@ -443,10 +472,10 @@ export function TrajectoryPanel({ onToast, sessionEpoch = 0, sessionId = null }:
 
   return (
     <div className="flex min-h-0 flex-1 flex-col overflow-hidden bg-background">
-      {/* 1. DSH Sticky Dense Toolbar */}
-      <div className="flex shrink-0 flex-wrap items-center justify-between gap-2 border-b border-border bg-card/30 px-2.5 py-1">
-        <div className="flex flex-wrap items-center gap-1.5">
-          <div className="flex items-center rounded-md border border-border bg-background/70 p-0.5">
+      {/* 1. Flat Sticky Toolbar */}
+      <div className="flex shrink-0 flex-wrap items-center justify-between gap-2 border-b border-border bg-background px-3 py-1.5">
+        <div className="flex flex-wrap items-center gap-2">
+          <div className="flex items-center rounded-md bg-muted/50 p-0.5">
             {MODE_OPTIONS.map((m) => {
               const Icon = m.icon;
               const active = mode === m.id;
@@ -457,7 +486,7 @@ export function TrajectoryPanel({ onToast, sessionEpoch = 0, sessionId = null }:
                   onClick={() => setMode(m.id)}
                   className={`inline-flex h-6 items-center gap-1 rounded px-2 text-[11px] font-medium transition-colors ${
                     active
-                      ? "bg-primary/15 text-primary"
+                      ? "bg-background text-primary"
                       : "text-muted-foreground hover:text-foreground"
                   }`}
                 >
@@ -468,7 +497,7 @@ export function TrajectoryPanel({ onToast, sessionEpoch = 0, sessionId = null }:
             })}
           </div>
 
-          <div className="flex items-center gap-0.5 rounded-md border border-border bg-background/70 p-0.5">
+          <div className="flex items-center gap-0.5 rounded-md bg-muted/50 p-0.5">
             {(
               [
                 ["输入", showInputs, () => setShowInputs((v) => !v)],
@@ -484,7 +513,7 @@ export function TrajectoryPanel({ onToast, sessionEpoch = 0, sessionId = null }:
                 onClick={onToggle}
                 className={`inline-flex h-6 items-center rounded px-2 text-[11px] transition-colors ${
                   pressed
-                    ? "bg-muted font-medium text-foreground"
+                    ? "bg-background font-medium text-foreground"
                     : "text-muted-foreground/70 hover:text-foreground"
                 }`}
               >
@@ -502,7 +531,7 @@ export function TrajectoryPanel({ onToast, sessionEpoch = 0, sessionId = null }:
           />
         </div>
 
-        <div className="flex items-center gap-1.5">
+        <div className="flex flex-wrap items-center gap-1.5">
           <div className="relative flex items-center">
             <Search className="pointer-events-none absolute left-2 size-3 text-muted-foreground" />
             <input
@@ -510,7 +539,7 @@ export function TrajectoryPanel({ onToast, sessionEpoch = 0, sessionId = null }:
               value={searchText}
               onChange={(e) => setSearchText(e.target.value)}
               placeholder="搜索输出、工具、模型…"
-              className="h-7 w-44 rounded-md border border-border bg-background pr-6 pl-6 text-[11px] text-foreground outline-none focus:border-ring sm:w-52"
+              className="h-7 w-40 rounded-md border border-border/70 bg-muted/20 pr-6 pl-6 text-[11px] text-foreground outline-none transition-colors focus:border-ring focus:bg-background sm:w-52"
             />
             {searchText && (
               <button
@@ -526,9 +555,9 @@ export function TrajectoryPanel({ onToast, sessionEpoch = 0, sessionId = null }:
 
           <Button
             type="button"
-            variant={inspectorOpen ? "secondary" : "outline"}
+            variant="ghost"
             size="sm"
-            className="h-7 px-2 text-[11px]"
+            className={`h-7 px-2 text-xs ${inspectorOpen ? "bg-muted text-foreground" : ""}`}
             onClick={() => setInspectorOpen((v) => !v)}
           >
             <PanelRight className="size-3.5" />
@@ -536,22 +565,22 @@ export function TrajectoryPanel({ onToast, sessionEpoch = 0, sessionId = null }:
           </Button>
           <Button
             type="button"
-            variant="outline"
+            variant="ghost"
             size="sm"
-            className="h-7 px-2 text-[11px]"
+            className="h-7 px-2 text-xs"
             disabled={viewState === "loading"}
             onClick={() => void loadTraces()}
           >
-            <RefreshCw className={`size-3 ${viewState === "loading" ? "animate-spin" : ""}`} />
+            <RefreshCw className={`size-3.5 ${viewState === "loading" ? "animate-spin" : ""}`} />
             刷新
           </Button>
         </div>
       </div>
 
-      {/* 2. DSH 54px Compact 3-Track Swimlane */}
+      {/* 2. Compact 3-Track Swimlane */}
       {filteredTraces.length > 0 && (
-        <div className="flex h-[54px] shrink-0 overflow-hidden border-b border-border bg-card/20">
-          <div className="flex w-11 shrink-0 select-none flex-col justify-between border-r border-border bg-muted/25 px-1.5 py-1 text-right text-[10px] leading-none text-muted-foreground">
+        <div className="flex h-[54px] shrink-0 overflow-hidden border-b border-border bg-background">
+          <div className="flex w-11 shrink-0 select-none flex-col justify-between border-r border-border bg-muted/15 px-1.5 py-1 text-right text-[10px] leading-none text-muted-foreground">
             <span>输入</span>
             <span>模型</span>
             <span>工具</span>
@@ -588,7 +617,7 @@ export function TrajectoryPanel({ onToast, sessionEpoch = 0, sessionId = null }:
                   style={{ flexBasis: `${pct}%`, flexGrow: weight, minWidth: 18 }}
                   title={`[${tr.slot}] ${tr.provider}/${tr.modelId} · ${tr.latencyMs}ms`}
                   className={`flex h-full flex-col justify-between border-r border-border/50 px-0.5 py-1 transition-colors ${
-                    isSelected ? "bg-primary/12 ring-1 ring-inset ring-primary/45" : "hover:bg-muted/40"
+                    isSelected ? "bg-primary/10 shadow-[inset_0_-2px_0_0_var(--primary)]" : "hover:bg-muted/35"
                   }`}
                 >
                   <div className="flex h-2.5 items-center">
@@ -623,9 +652,9 @@ export function TrajectoryPanel({ onToast, sessionEpoch = 0, sessionId = null }:
         </div>
       )}
 
-      {/* 3. Master-Detail Split Body */}
+      {/* 3. Responsive Master-Detail Split Body */}
       {viewState === "error" ? (
-        <div className="p-3">
+        <div className="p-3 sm:p-4">
           <Alert variant="destructive" open>
             <AlertIcon />
             <AlertContent>
@@ -644,13 +673,13 @@ export function TrajectoryPanel({ onToast, sessionEpoch = 0, sessionId = null }:
           正在加载运行轨迹…
         </div>
       ) : filteredTraces.length === 0 ? (
-        <div className="flex flex-1 items-center justify-center text-xs text-muted-foreground">
+        <div className="flex flex-1 items-center justify-center px-4 text-center text-xs text-muted-foreground">
           暂无匹配的轨迹记录。发送对话或运行浏览器任务后即可在此追踪每次调用与输出。
         </div>
       ) : (
-        <div className="flex min-h-0 flex-1 overflow-hidden">
-          {/* Left: High-Density DSH Event Ledger showing actual Tool args/results & LLM output */}
-          <div className="min-w-0 flex-1 overflow-y-auto divide-y divide-border/50">
+        <div className="flex min-h-0 flex-1 flex-col overflow-hidden md:flex-row">
+          {/* Left: High-Density Event Ledger */}
+          <div className="min-h-0 min-w-0 flex-1 overflow-y-auto divide-y divide-border/50">
             {ledgerEvents.map((ev) => {
               const badge = getKindBadge(ev.kind, ev.slot);
               const isSelected =
@@ -669,10 +698,10 @@ export function TrajectoryPanel({ onToast, sessionEpoch = 0, sessionId = null }:
                     setInspectorTab("overview");
                     setInspectorOpen(true);
                   }}
-                  className={`flex min-h-7 w-full items-center gap-2 px-2.5 py-1 text-left text-xs transition-colors ${
+                  className={`flex min-h-8 w-full items-center gap-2 px-3 py-1.5 text-left text-xs transition-colors ${
                     isSelected
                       ? "bg-primary/10 text-foreground"
-                      : "hover:bg-muted/45 text-foreground/90"
+                      : "hover:bg-muted/35 text-foreground/90"
                   }`}
                 >
                   <span
@@ -717,7 +746,7 @@ export function TrajectoryPanel({ onToast, sessionEpoch = 0, sessionId = null }:
                     )}
                   </div>
 
-                  <SlotBadge slot={ev.slot} className="hidden h-4 px-1 text-[10px] md:inline-flex" />
+                  <SlotBadge slot={ev.slot} className="hidden h-4 px-1 text-[10px] sm:inline-flex" />
 
                   <span className="shrink-0 font-mono text-[10px] tabular-nums text-muted-foreground">
                     {ev.meta} · {formatTime(ev.createdAt)}
@@ -727,24 +756,36 @@ export function TrajectoryPanel({ onToast, sessionEpoch = 0, sessionId = null }:
             })}
           </div>
 
-          {/* Right: Collapsible DSH Inspector Drawer with actual LLM Output / Tool Args & Results */}
+          {/* Right/Bottom: Responsive Flat Inspector Drawer */}
           {inspectorOpen && selectedTrace && (
-            <aside className="flex w-84 shrink-0 flex-col overflow-hidden border-l border-border bg-card/35 lg:w-[440px]">
-              <div className="flex h-8 shrink-0 items-center justify-between gap-2 border-b border-border px-2.5">
+            <aside className="flex h-[52%] min-h-0 w-full shrink-0 flex-col overflow-hidden border-t border-border bg-background md:h-auto md:w-[360px] md:border-t-0 md:border-l lg:w-[440px]">
+              <div className="flex h-9 shrink-0 items-center justify-between gap-2 border-b border-border px-3">
                 <div className="flex min-w-0 items-center gap-1.5">
-                  <span
-                    className={`inline-flex h-4 items-center rounded border px-1.5 text-[10px] font-medium leading-none ${
-                      activeStep?.kind === "tool"
-                        ? "border-amber-500/35 bg-amber-500/15 text-amber-700 dark:text-amber-300"
-                        : "border-violet-500/35 bg-violet-500/15 text-violet-700 dark:text-violet-300"
-                    }`}
-                  >
-                    {activeStep?.kind === "tool" ? "工具" : "助手"}
-                  </span>
-                  <span className="truncate text-[11px] font-medium text-foreground">
+                  {(() => {
+                    const headerKind: LedgerKind =
+                      selectedEvent?.kind ??
+                      (activeStep?.kind === "tool" ? "tool" : "assistant");
+                    const badge = getKindBadge(headerKind, selectedTrace.slot);
+                    return (
+                      <span
+                        className={`inline-flex h-4 items-center rounded border px-1.5 text-[10px] font-medium leading-none ${badge.cls}`}
+                      >
+                        {badge.text}
+                      </span>
+                    );
+                  })()}
+                  <span className="truncate text-xs font-medium text-foreground">
                     第 {selectedTurnNumber} 轮
-                    {activeStep ? ` · 第 ${activeStep.step} 步` : ""}
-                    {activeStep?.kind === "tool" ? ` · ${activeStep.name}` : ""}
+                    {selectedEvent?.kind === "input"
+                      ? " · 触发输入与上下文"
+                      : selectedEvent?.kind === "recall"
+                        ? " · 记忆召回"
+                        : activeStep
+                          ? ` · 第 ${activeStep.step} 步`
+                          : ""}
+                    {activeStep?.kind === "tool" && selectedEvent?.kind !== "input"
+                      ? ` · ${activeStep.name}`
+                      : ""}
                   </span>
                   <SlotBadge slot={selectedTrace.slot} className="h-4 px-1 text-[10px]" />
                 </div>
@@ -752,22 +793,22 @@ export function TrajectoryPanel({ onToast, sessionEpoch = 0, sessionId = null }:
                   type="button"
                   aria-label="关闭检查器"
                   onClick={() => setInspectorOpen(false)}
-                  className="grid size-6 place-items-center rounded text-muted-foreground hover:bg-muted hover:text-foreground"
+                  className="grid size-6 place-items-center rounded text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
                 >
                   <X className="size-3.5" />
                 </button>
               </div>
 
-              <div className="flex h-7 shrink-0 items-center gap-1 border-b border-border px-2">
+              <div className="flex shrink-0 items-center gap-3 overflow-x-auto border-b border-border px-3">
                 {inspectorTabList.map(([tabId, label]) => (
                   <button
                     key={tabId}
                     type="button"
                     onClick={() => setInspectorTab(tabId)}
-                    className={`h-6 rounded px-2 text-[11px] transition-colors ${
+                    className={`-mb-px shrink-0 border-b-2 py-1.5 text-[11px] transition-colors ${
                       inspectorTab === tabId
-                        ? "bg-muted font-medium text-foreground"
-                        : "text-muted-foreground hover:text-foreground"
+                        ? "border-primary font-medium text-foreground"
+                        : "border-transparent text-muted-foreground hover:text-foreground"
                     }`}
                   >
                     {label}
@@ -775,10 +816,52 @@ export function TrajectoryPanel({ onToast, sessionEpoch = 0, sessionId = null }:
                 ))}
               </div>
 
-              <div className="min-h-0 flex-1 overflow-y-auto p-3 text-xs">
-                {inspectorTab === "overview" && activeStep?.kind === "tool" && (
-                  <div className="flex flex-col gap-3">
-                    <div className="grid grid-cols-[64px_1fr] gap-y-1.5 border-b border-border/60 pb-2 text-[11px]">
+              <div className="min-h-0 flex-1 overflow-y-auto p-3.5 text-xs">
+                {inspectorTab === "overview" && selectedEvent?.kind === "input" && (
+                  <div className="flex flex-col gap-3.5 divide-y divide-border/60">
+                    <div className="grid grid-cols-[64px_1fr] gap-y-1.5 pb-3 text-[11px]">
+                      <span className="text-muted-foreground">来源</span>
+                      <div className="flex flex-wrap items-center gap-1.5">
+                        <SlotBadge slot={selectedTrace.slot} className="h-4 px-1 text-[10px]" />
+                        <span className="font-mono font-medium text-foreground">
+                          {selectedTrace.provider}/{selectedTrace.modelId}
+                        </span>
+                      </div>
+                      <span className="text-muted-foreground">时间</span>
+                      <span className="font-mono text-foreground">
+                        {formatDateTime(selectedTrace.createdAt)}
+                      </span>
+                    </div>
+
+                    <div className="flex flex-col gap-1.5 pt-3">
+                      <span className="text-[11px] font-medium text-muted-foreground">触发输入 / 任务摘要</span>
+                      <div className="whitespace-pre-wrap break-words border-l-2 border-border pl-3 py-0.5 text-xs text-foreground">
+                        {selectedTrace.userPreview || "（无文本输入）"}
+                      </div>
+                    </div>
+
+                    <div className="flex flex-col gap-1.5 pt-3">
+                      <span className="text-[11px] font-medium text-muted-foreground">
+                        输入上下文 / 待处理日志
+                      </span>
+                      <pre className="max-h-80 overflow-auto whitespace-pre-wrap break-words rounded-md bg-muted/30 p-2.5 font-mono text-[11px] leading-relaxed text-foreground">
+                        {selectedTrace.timeCardText || "（本次未记录输入上下文）"}
+                      </pre>
+                      {selectedTrace.slot === "curator" &&
+                      /^curator_messages:\s*\d+$/.test(selectedTrace.timeCardText.trim()) ? (
+                        <p className="text-[11px] text-muted-foreground">
+                          注：该条为旧版提炼记录（仅保存了日志条数）；新产生的记忆提炼会在此显示完整待提炼对话日志。
+                        </p>
+                      ) : null}
+                    </div>
+                  </div>
+                )}
+
+                {inspectorTab === "overview" &&
+                  selectedEvent?.kind !== "input" &&
+                  activeStep?.kind === "tool" && (
+                  <div className="flex flex-col gap-3.5 divide-y divide-border/60">
+                    <div className="grid grid-cols-[64px_1fr] gap-y-1.5 pb-3 text-[11px]">
                       <span className="text-muted-foreground">工具名</span>
                       <span className="font-mono font-medium text-foreground">{activeStep.name}</span>
                       <span className="text-muted-foreground">状态</span>
@@ -792,25 +875,27 @@ export function TrajectoryPanel({ onToast, sessionEpoch = 0, sessionId = null }:
                       </div>
                     </div>
 
-                    <div className="flex flex-col gap-1">
-                      <span className="text-[11px] text-muted-foreground">参数</span>
-                      <pre className="max-h-48 overflow-auto whitespace-pre-wrap break-words rounded border border-border bg-background/85 p-2 font-mono text-[11px] leading-relaxed text-foreground">
+                    <div className="flex flex-col gap-1.5 pt-3">
+                      <span className="text-[11px] font-medium text-muted-foreground">参数</span>
+                      <pre className="max-h-48 overflow-auto whitespace-pre-wrap break-words rounded-md bg-muted/30 p-2.5 font-mono text-[11px] leading-relaxed text-foreground">
                         {safeStringify(activeStep.args, true) || "{}"}
                       </pre>
                     </div>
 
-                    <div className="flex flex-col gap-1">
-                      <span className="text-[11px] text-muted-foreground">结果</span>
-                      <pre className="max-h-72 overflow-auto whitespace-pre-wrap break-words rounded border border-border bg-background/85 p-2 font-mono text-[11px] leading-relaxed text-foreground">
+                    <div className="flex flex-col gap-1.5 pt-3">
+                      <span className="text-[11px] font-medium text-muted-foreground">结果</span>
+                      <pre className="max-h-72 overflow-auto whitespace-pre-wrap break-words rounded-md bg-muted/30 p-2.5 font-mono text-[11px] leading-relaxed text-foreground">
                         {activeStep.output || "（无文本返回）"}
                       </pre>
                     </div>
                   </div>
                 )}
 
-                {inspectorTab === "overview" && activeStep?.kind !== "tool" && (
-                  <div className="flex flex-col gap-3">
-                    <div className="grid grid-cols-[64px_1fr] gap-y-1.5 border-b border-border/60 pb-2 text-[11px]">
+                {inspectorTab === "overview" &&
+                  selectedEvent?.kind !== "input" &&
+                  activeStep?.kind !== "tool" && (
+                  <div className="flex flex-col gap-3.5 divide-y divide-border/60">
+                    <div className="grid grid-cols-[64px_1fr] gap-y-1.5 pb-3 text-[11px]">
                       <span className="text-muted-foreground">来源</span>
                       <div className="flex flex-wrap items-center gap-1.5">
                         <SlotBadge slot={selectedTrace.slot} className="h-4 px-1 text-[10px]" />
@@ -832,7 +917,7 @@ export function TrajectoryPanel({ onToast, sessionEpoch = 0, sessionId = null }:
                     </div>
 
                     {/* Actual LLM Output Preview */}
-                    <div className="flex flex-col gap-2">
+                    <div className="flex flex-col gap-2.5 pt-3">
                       <button
                         type="button"
                         onClick={() => setInspectorTab("preview")}
@@ -842,12 +927,12 @@ export function TrajectoryPanel({ onToast, sessionEpoch = 0, sessionId = null }:
                       </button>
 
                       {assistantOutputBlocks.length > 0 ? (
-                        <div className="flex flex-col gap-2.5">
+                        <div className="flex flex-col gap-3">
                           {assistantOutputBlocks.map((block) => (
-                            <div key={block.step} className="flex flex-col gap-1.5">
+                            <div key={block.step} className="flex flex-col gap-2">
                               {block.thinking && (
-                                <details className="rounded border border-border/70 bg-muted/25 px-2.5 py-1.5">
-                                  <summary className="cursor-pointer select-none text-[11px] text-muted-foreground">
+                                <details className="border-l-2 border-border pl-2.5 py-0.5">
+                                  <summary className="cursor-pointer select-none text-[11px] text-muted-foreground hover:text-foreground">
                                     思考过程（第 {block.step} 步）
                                   </summary>
                                   <pre className="mt-1.5 whitespace-pre-wrap break-words font-sans text-[11px] leading-relaxed text-muted-foreground">
@@ -855,12 +940,81 @@ export function TrajectoryPanel({ onToast, sessionEpoch = 0, sessionId = null }:
                                   </pre>
                                 </details>
                               )}
-                              {block.text ? (
-                                <div className="whitespace-pre-wrap break-words rounded border border-border/70 bg-background/80 p-2.5 text-xs leading-relaxed text-foreground">
-                                  {block.text}
-                                </div>
-                              ) : block.toolCalls.length > 0 ? (
-                                <div className="rounded border border-dashed border-border px-2.5 py-1.5 text-[11px] text-muted-foreground">
+                              {block.text ? (() => {
+                                const curatorParsed =
+                                  selectedTrace.slot === "curator"
+                                    ? tryParseCuratorJson(block.text)
+                                    : null;
+                                if (curatorParsed) {
+                                  const totalItems =
+                                    curatorParsed.persona.length + curatorParsed.tech.length;
+                                  return (
+                                    <div className="flex flex-col gap-2.5 text-xs">
+                                      <div className="flex items-center justify-between gap-2 text-[11px]">
+                                        <span className="font-medium text-foreground">
+                                          {totalItems === 0
+                                            ? "本次未提炼出长期记忆（均跳过）"
+                                            : `共提炼 ${totalItems} 条记忆`}
+                                        </span>
+                                        <span className="font-mono text-muted-foreground">
+                                          persona: {curatorParsed.persona.length} · tech:{" "}
+                                          {curatorParsed.tech.length}
+                                        </span>
+                                      </div>
+                                      {curatorParsed.persona.length > 0 && (
+                                        <div className="space-y-1 border-t border-border/50 pt-2">
+                                          <div className="text-[10px] font-medium text-emerald-600 dark:text-emerald-400">
+                                            persona（个人/关系）
+                                          </div>
+                                          <div className="divide-y divide-border/40">
+                                            {curatorParsed.persona.map((it, i) => (
+                                              <div
+                                                key={i}
+                                                className="py-1 text-[11px] text-foreground"
+                                              >
+                                                {it.content || safeStringify(it)}
+                                              </div>
+                                            ))}
+                                          </div>
+                                        </div>
+                                      )}
+                                      {curatorParsed.tech.length > 0 && (
+                                        <div className="space-y-1 border-t border-border/50 pt-2">
+                                          <div className="text-[10px] font-medium text-sky-600 dark:text-sky-400">
+                                            tech（技术/配置）
+                                          </div>
+                                          <div className="divide-y divide-border/40">
+                                            {curatorParsed.tech.map((it, i) => (
+                                              <div
+                                                key={i}
+                                                className="py-1 text-[11px] text-foreground"
+                                              >
+                                                {it.content || safeStringify(it)}
+                                              </div>
+                                            ))}
+                                          </div>
+                                        </div>
+                                      )}
+                                      {selectedTrace.timeCardText && (
+                                        <details className="border-t border-border/50 pt-2">
+                                          <summary className="cursor-pointer select-none text-[11px] text-muted-foreground hover:text-foreground">
+                                            查看输入日志与上下文快照
+                                          </summary>
+                                          <pre className="mt-1.5 max-h-48 overflow-auto whitespace-pre-wrap break-words rounded-md bg-muted/30 p-2 font-mono text-[11px] leading-relaxed text-foreground">
+                                            {selectedTrace.timeCardText}
+                                          </pre>
+                                        </details>
+                                      )}
+                                    </div>
+                                  );
+                                }
+                                return (
+                                  <div className="whitespace-pre-wrap break-words text-xs leading-relaxed text-foreground">
+                                    {block.text}
+                                  </div>
+                                );
+                              })() : block.toolCalls.length > 0 ? (
+                                <div className="border-l-2 border-dashed border-border pl-2.5 py-0.5 text-[11px] text-muted-foreground">
                                   该步直接发起工具调用：{block.toolCalls.map((c) => c.name).join("、")}
                                 </div>
                               ) : null}
@@ -868,22 +1022,22 @@ export function TrajectoryPanel({ onToast, sessionEpoch = 0, sessionId = null }:
                           ))}
                         </div>
                       ) : (
-                        <div className="rounded border border-dashed border-border px-2.5 py-2 text-[11px] text-muted-foreground">
+                        <div className="border-l-2 border-dashed border-border pl-2.5 py-1 text-[11px] text-muted-foreground">
                           旧版轨迹记录未保存原始输出正文（仅新产生的调用会完整记录每步模型输出）。
                         </div>
                       )}
                     </div>
 
                     {selectedTools.length > 0 && (
-                      <div className="flex flex-col gap-1 border-t border-border/60 pt-2">
-                        <span className="text-[11px] text-muted-foreground">
+                      <div className="flex flex-col gap-1.5 pt-3">
+                        <span className="text-[11px] font-medium text-muted-foreground">
                           本轮工具调用 ({selectedTools.length})
                         </span>
-                        <div className="flex flex-wrap gap-1">
+                        <div className="flex flex-wrap gap-1.5">
                           {selectedTools.map((t, i) => (
                             <span
                               key={`${t}-${i}`}
-                              className="inline-flex items-center gap-1 rounded border border-amber-500/30 bg-amber-500/10 px-1.5 py-0.5 font-mono text-[10px] text-amber-700 dark:text-amber-300"
+                              className="inline-flex items-center gap-1 rounded bg-amber-500/10 px-1.5 py-0.5 font-mono text-[10px] text-amber-700 dark:text-amber-300"
                             >
                               <Wrench className="size-2.5" />
                               {t}
@@ -896,27 +1050,27 @@ export function TrajectoryPanel({ onToast, sessionEpoch = 0, sessionId = null }:
                 )}
 
                 {inspectorTab === "preview" && activeStep?.kind === "tool" && (
-                  <pre className="overflow-auto whitespace-pre-wrap break-words rounded border border-border bg-background/85 p-2.5 font-mono text-[11px] leading-relaxed text-foreground">
+                  <pre className="overflow-auto whitespace-pre-wrap break-words rounded-md bg-muted/30 p-2.5 font-mono text-[11px] leading-relaxed text-foreground">
                     {safeStringify(activeStep.args, true) || "{}"}
                   </pre>
                 )}
 
                 {inspectorTab === "preview" && activeStep?.kind !== "tool" && (
-                  <div className="flex flex-col gap-3">
+                  <div className="flex flex-col gap-3.5 divide-y divide-border/50">
                     {assistantOutputBlocks.length === 0 ? (
                       <span className="text-[11px] text-muted-foreground">（暂无模型输出正文）</span>
                     ) : (
                       assistantOutputBlocks.map((block) => (
-                        <div key={block.step} className="flex flex-col gap-1.5">
+                        <div key={block.step} className="flex flex-col gap-2 pt-3 first:pt-0">
                           <div className="text-[11px] font-medium text-muted-foreground">
                             第 {block.step} 步输出
                           </div>
                           {block.thinking && (
-                            <pre className="whitespace-pre-wrap break-words rounded border border-border/60 bg-muted/30 p-2 font-sans text-[11px] leading-relaxed text-muted-foreground">
+                            <pre className="whitespace-pre-wrap break-words border-l-2 border-border pl-2.5 py-0.5 font-sans text-[11px] leading-relaxed text-muted-foreground">
                               {block.thinking}
                             </pre>
                           )}
-                          <div className="whitespace-pre-wrap break-words rounded border border-border bg-background/85 p-2.5 text-xs leading-relaxed text-foreground">
+                          <div className="whitespace-pre-wrap break-words text-xs leading-relaxed text-foreground">
                             {block.text || `（仅调用工具：${block.toolCalls.map((c) => c.name).join(", ")}）`}
                           </div>
                         </div>
@@ -926,13 +1080,13 @@ export function TrajectoryPanel({ onToast, sessionEpoch = 0, sessionId = null }:
                 )}
 
                 {inspectorTab === "raw" && activeStep?.kind === "tool" && (
-                  <pre className="overflow-auto whitespace-pre-wrap break-words rounded border border-border bg-background/85 p-2.5 font-mono text-[11px] leading-relaxed text-foreground">
+                  <pre className="overflow-auto whitespace-pre-wrap break-words rounded-md bg-muted/30 p-2.5 font-mono text-[11px] leading-relaxed text-foreground">
                     {activeStep.output || "（无输出内容）"}
                   </pre>
                 )}
 
                 {inspectorTab === "raw" && activeStep?.kind !== "tool" && (
-                  <pre className="overflow-auto whitespace-pre-wrap break-words rounded border border-border bg-background/85 p-2.5 font-mono text-[11px] leading-relaxed text-foreground">
+                  <pre className="overflow-auto whitespace-pre-wrap break-words rounded-md bg-muted/30 p-2.5 font-mono text-[11px] leading-relaxed text-foreground">
                     {safeStringify(
                       activeStep?.kind === "assistant" ? activeStep : selectedSteps,
                       true,
@@ -941,21 +1095,21 @@ export function TrajectoryPanel({ onToast, sessionEpoch = 0, sessionId = null }:
                 )}
 
                 {inspectorTab === "snapshot" && (
-                  <div className="flex flex-col gap-2">
+                  <div className="flex flex-col gap-3 divide-y divide-border/60">
                     <div>
-                      <span className="text-[11px] text-muted-foreground">触发输入 / 任务目标</span>
-                      <p className="mt-1 whitespace-pre-wrap break-words rounded border border-border/60 bg-background/70 p-2 text-xs text-foreground">
+                      <span className="text-[11px] font-medium text-muted-foreground">触发输入 / 任务目标</span>
+                      <p className="mt-1.5 whitespace-pre-wrap break-words border-l-2 border-border pl-2.5 py-0.5 text-xs text-foreground">
                         {selectedTrace.userPreview || "（无文本输入）"}
                       </p>
                     </div>
                     {selectedRecalled.length > 0 && (
-                      <div>
-                        <span className="text-[11px] text-muted-foreground">召回记忆 ID</span>
-                        <div className="mt-1 flex flex-wrap gap-1">
+                      <div className="pt-3">
+                        <span className="text-[11px] font-medium text-muted-foreground">召回记忆 ID</span>
+                        <div className="mt-1.5 flex flex-wrap gap-1">
                           {selectedRecalled.map((rid) => (
                             <span
                               key={rid}
-                              className="rounded border border-emerald-500/30 bg-emerald-500/10 px-1.5 py-0.5 font-mono text-[10px] text-emerald-700 dark:text-emerald-300"
+                              className="rounded bg-emerald-500/10 px-1.5 py-0.5 font-mono text-[10px] text-emerald-700 dark:text-emerald-300"
                             >
                               {rid}
                             </span>
@@ -963,9 +1117,9 @@ export function TrajectoryPanel({ onToast, sessionEpoch = 0, sessionId = null }:
                         </div>
                       </div>
                     )}
-                    <div>
-                      <span className="text-[11px] text-muted-foreground">时间卡片 / 上下文快照</span>
-                      <pre className="mt-1 overflow-x-auto whitespace-pre-wrap break-words rounded border border-border bg-background/80 p-2 font-mono text-[11px] leading-relaxed text-foreground">
+                    <div className="pt-3">
+                      <span className="text-[11px] font-medium text-muted-foreground">时间卡片 / 上下文快照</span>
+                      <pre className="mt-1.5 overflow-x-auto whitespace-pre-wrap break-words rounded-md bg-muted/30 p-2.5 font-mono text-[11px] leading-relaxed text-foreground">
                         {selectedTrace.timeCardText || "（本次未记录快照内容）"}
                       </pre>
                     </div>
@@ -1001,7 +1155,7 @@ export function TrajectoryPanel({ onToast, sessionEpoch = 0, sessionId = null }:
                         ["输出 Token", selectedTrace.outputTokens.toLocaleString()],
                       ] as const
                     ).map(([k, v]) => (
-                      <div key={k} className="flex items-center justify-between py-1.5">
+                      <div key={k} className="flex items-center justify-between py-2">
                         <span className="text-[11px] text-muted-foreground">{k}</span>
                         <span className="font-mono text-[11px] font-medium tabular-nums text-foreground">
                           {v}

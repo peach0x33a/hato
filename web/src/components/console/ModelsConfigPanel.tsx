@@ -1,423 +1,937 @@
-import { Plus, Save, Trash2 } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
-import { api, type ModelDefinitionConfig, type ModelsFileConfig, type ProviderConfig } from "@/api";
 import {
-  ApiBadge,
-  ConsoleInput,
-  ConsolePageHeader,
-  ConsoleSelect,
-  SlotBadge,
-} from "@/components/console/ConsolePrimitives";
-import { Button, StatefulButton, type ButtonState } from "@/components/motion/button";
-import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/motion/collapsible";
-import { Switch } from "@/components/motion/switch";
+  Bookmark,
+  Check,
+  ChevronsDownUp,
+  ChevronsUpDown,
+  Loader2,
+  Plus,
+  RotateCcw,
+  Save,
+  Search,
+  ServerOff,
+  X,
+} from "lucide-react";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { api, type ModelsFileConfig, type SecretState } from "@/api";
+import { AnimatedBadge } from "@/components/motion/animated-badge";
+import { Button } from "@/components/motion/button";
+import { FunctionSlotsPanel } from "./models/FunctionSlotsPanel";
+import type { ModelTestOutcome } from "./models/ModelRow";
+import { ProviderCard } from "./models/ProviderCard";
+import { ProviderDrawer } from "./models/ProviderDrawer";
+import {
+  buildApiModelsConfig,
+  createUid,
+  generateUniqueModelId,
+  parseHeadersJson,
+  serializeComparableState,
+  SLOT_DEFINITIONS,
+  toUiProviders,
+  type ProviderDraft,
+  type SlotKey,
+  type UiModelEntry,
+  type UiProviderConfig,
+} from "./models/types";
 
-const API_OPTIONS = [
-  { value: "anthropic-messages", label: "Anthropic Messages" },
-  { value: "openai-responses", label: "OpenAI Responses" },
-  { value: "openai-completions", label: "OpenAI Completions" },
-  { value: "google-generative-ai", label: "Google Gemini" },
-  { value: "hato-faux-api", label: "Faux（本地测试）" },
-];
+const PROVIDER_DRAFT_STORAGE_KEY = "hato-provider-draft-v1";
 
-const API_OVERRIDE_OPTIONS = [
-  { value: "__inherit__", label: "继承供应商默认协议" },
-  ...API_OPTIONS,
-];
-
-const SLOT_META: Array<{ key: keyof ModelsFileConfig["slots"]; label: string }> = [
-  { key: "persona", label: "主对话槽位" },
-  { key: "worker", label: "后台执行槽位" },
-  { key: "router", label: "轻量路由槽位" },
-  { key: "curator", label: "上下文整理槽位" },
-  { key: "hindsight_llm", label: "记忆抽取槽位" },
-];
+type DrawerState =
+  | { open: false }
+  | { open: true; mode: "create" }
+  | { open: true; mode: "edit"; providerUid: string };
 
 export interface ModelsConfigPanelProps {
   initialConfig: ModelsFileConfig;
+  secretStates?: SecretState[];
   onSaved: (next: ModelsFileConfig, changes?: string[]) => void;
-  onToast: (input: { title: string; description?: string; status?: "info" | "success" | "error" }) => void;
+  onSecretsUpdated?: (nextStates: SecretState[]) => void;
+  onToast: (input: {
+    title: string;
+    description?: string;
+    status?: "info" | "success" | "error";
+  }) => void;
+}
+
+function readStoredProviderDraft(): ProviderDraft | null {
+  try {
+    const raw = window.localStorage.getItem(PROVIDER_DRAFT_STORAGE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as ProviderDraft;
+    if (parsed && typeof parsed.name === "string") {
+      return parsed;
+    }
+  } catch {
+    // Ignore malformed storage
+  }
+  return null;
 }
 
 export function ModelsConfigPanel({
   initialConfig,
+  secretStates = [],
   onSaved,
+  onSecretsUpdated,
   onToast,
 }: ModelsConfigPanelProps) {
-  const [draft, setDraft] = useState<ModelsFileConfig>(() => structuredClone(initialConfig));
-  const [saveState, setSaveState] = useState<ButtonState>("idle");
-  const [newProviderSlug, setNewProviderSlug] = useState("");
+  const [slots, setSlots] = useState<ModelsFileConfig["slots"]>(() => ({
+    ...initialConfig.slots,
+  }));
+  const [providers, setProviders] = useState<UiProviderConfig[]>(() =>
+    toUiProviders(initialConfig),
+  );
+  const [savedComparable, setSavedComparable] = useState<string>(() =>
+    serializeComparableState(initialConfig.slots, toUiProviders(initialConfig)),
+  );
+  const [pendingSecrets, setPendingSecrets] = useState<Record<string, string>>({});
+  const [providerDraft, setProviderDraft] = useState<ProviderDraft | null>(() =>
+    readStoredProviderDraft(),
+  );
+  const [drawerState, setDrawerState] = useState<DrawerState>({ open: false });
+  const [collapsedProviderIds, setCollapsedProviderIds] = useState<Set<string>>(
+    () => new Set(),
+  );
+  const [expandedModelIds, setExpandedModelIds] = useState<Set<string>>(
+    () => new Set(),
+  );
+  const [newlyAddedModelUid, setNewlyAddedModelUid] = useState<string | null>(null);
+  const [testingModelIds, setTestingModelIds] = useState<Set<string>>(() => new Set());
+  const [testOutcomes, setTestOutcomes] = useState<Record<string, ModelTestOutcome>>({});
+  const [searchQuery, setSearchQuery] = useState("");
+  const [savePhase, setSavePhase] = useState<"idle" | "saving" | "saved">("idle");
 
   useEffect(() => {
-    setDraft(structuredClone(initialConfig));
+    const nextSlots = { ...initialConfig.slots };
+    const nextProviders = toUiProviders(initialConfig);
+    setSlots(nextSlots);
+    setProviders(nextProviders);
+    setSavedComparable(serializeComparableState(nextSlots, nextProviders));
+    setNewlyAddedModelUid(null);
   }, [initialConfig]);
 
-  const allTargets = useMemo(() => {
-    const out: string[] = [];
-    for (const [slug, prov] of Object.entries(draft.providers)) {
-      for (const m of prov.models) {
-        if (m.id.trim()) out.push(`${slug}/${m.id.trim()}`);
+  const isDirty = useMemo(() => {
+    if (Object.keys(pendingSecrets).length > 0) return true;
+    return serializeComparableState(slots, providers) !== savedComparable;
+  }, [slots, providers, savedComparable, pendingSecrets]);
+
+  const slotIndex = useMemo(() => {
+    const byTarget = new Map<string, SlotKey[]>();
+    const byProvider = new Map<string, SlotKey[]>();
+
+    for (const def of SLOT_DEFINITIONS) {
+      const target = slots[def.key]?.trim();
+      if (!target) continue;
+      const existing = byTarget.get(target) ?? [];
+      existing.push(def.key);
+      byTarget.set(target, existing);
+
+      const slashIdx = target.indexOf("/");
+      if (slashIdx > 0) {
+        const slug = target.slice(0, slashIdx);
+        const provList = byProvider.get(slug) ?? [];
+        provList.push(def.key);
+        byProvider.set(slug, provList);
       }
     }
-    return out;
-  }, [draft.providers]);
 
-  const updateProvider = (slug: string, patch: Partial<ProviderConfig>) => {
-    setDraft((prev) => ({
-      ...prev,
-      providers: {
-        ...prev.providers,
-        [slug]: { ...prev.providers[slug]!, ...patch },
-      },
-    }));
+    return { byTarget, byProvider };
+  }, [slots]);
+
+  const normalizedSearch = searchQuery.trim().toLowerCase();
+  const isSearchActive = normalizedSearch.length > 0;
+
+  const filteredProviderEntries = useMemo(() => {
+    if (!isSearchActive) {
+      return providers.map((provider) => ({
+        provider,
+        visibleModels: provider.models,
+      }));
+    }
+
+    return providers
+      .map((provider) => {
+        const providerMatches =
+          provider.name.toLowerCase().includes(normalizedSearch) ||
+          (provider.displayName ?? "").toLowerCase().includes(normalizedSearch) ||
+          provider.protocol.toLowerCase().includes(normalizedSearch);
+        if (providerMatches) {
+          return { provider, visibleModels: provider.models };
+        }
+        const matchedModels = provider.models.filter(
+          (m) =>
+            m.id.toLowerCase().includes(normalizedSearch) ||
+            m.displayName.toLowerCase().includes(normalizedSearch),
+        );
+        if (matchedModels.length === 0) return null;
+        return { provider, visibleModels: matchedModels };
+      })
+      .filter((entry): entry is { provider: UiProviderConfig; visibleModels: UiModelEntry[] } =>
+        Boolean(entry),
+      );
+  }, [providers, isSearchActive, normalizedSearch]);
+
+  const allCollapsed =
+    providers.length > 0 &&
+    providers.every((p) => collapsedProviderIds.has(p.uid));
+
+  const editingProvider =
+    drawerState.open && drawerState.mode === "edit"
+      ? providers.find((p) => p.uid === drawerState.providerUid) ?? null
+      : null;
+
+  const handleResetChanges = () => {
+    const nextSlots = { ...initialConfig.slots };
+    const nextProviders = toUiProviders(initialConfig);
+    setSlots(nextSlots);
+    setProviders(nextProviders);
+    setPendingSecrets({});
+    setSavedComparable(serializeComparableState(nextSlots, nextProviders));
+    setNewlyAddedModelUid(null);
+    onToast({ title: "已还原未保存更改", status: "info" });
   };
 
-  const updateModel = (
-    slug: string,
-    index: number,
-    patch: Partial<ModelDefinitionConfig>,
+  const handleToggleAllProviders = () => {
+    if (allCollapsed) {
+      setCollapsedProviderIds(new Set());
+    } else {
+      setCollapsedProviderIds(new Set(providers.map((p) => p.uid)));
+    }
+  };
+
+  const handleToggleProviderCollapse = (uid: string) => {
+    setCollapsedProviderIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(uid)) {
+        next.delete(uid);
+      } else {
+        next.add(uid);
+      }
+      return next;
+    });
+  };
+
+  const handleToggleModelExpand = (modelUid: string) => {
+    setExpandedModelIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(modelUid)) {
+        next.delete(modelUid);
+      } else {
+        next.add(modelUid);
+      }
+      return next;
+    });
+  };
+
+  const handleChangeSlot = (slotKey: SlotKey, value: string) => {
+    setSlots((prev) => ({ ...prev, [slotKey]: value }));
+  };
+
+  const handleSaveProviderDraft = (draft: ProviderDraft) => {
+    try {
+      window.localStorage.setItem(PROVIDER_DRAFT_STORAGE_KEY, JSON.stringify(draft));
+    } catch {
+      // Safe fallback in restricted environments
+    }
+    setProviderDraft(draft);
+    setDrawerState({ open: false });
+    onToast({ title: "供应商草稿已保存", status: "info" });
+  };
+
+  const handleDiscardProviderDraft = () => {
+    try {
+      window.localStorage.removeItem(PROVIDER_DRAFT_STORAGE_KEY);
+    } catch {
+      // Safe fallback
+    }
+    setProviderDraft(null);
+    onToast({ title: "已清空供应商草稿", status: "info" });
+  };
+
+  const handleCreateProviderFromDrawer = (draft: ProviderDraft) => {
+    const providerUid = createUid("prov");
+    const models: UiModelEntry[] = draft.includeInitialModel
+      ? [
+          {
+            uid: createUid("mod"),
+            id: draft.initialModelId,
+            displayName: draft.initialModelName || draft.initialModelId,
+            supportsVision: draft.initialModelVision,
+            supportsThinking: draft.initialModelThinking,
+            modelsDev: {
+              enabled: false,
+              modelRef: "",
+            },
+            advanced: {
+              contextWindow: "128000",
+              maxOutputTokens: "8192",
+              apiOverride: "__inherit__",
+              baseUrlOverride: "",
+              customHeaders: "",
+            },
+          },
+        ]
+      : [];
+
+    const newProvider: UiProviderConfig = {
+      uid: providerUid,
+      name: draft.name,
+      displayName: draft.displayName,
+      protocol: draft.protocol,
+      baseUrl: draft.baseUrl,
+      apiKeyEnv: draft.apiKeyEnv,
+      cacheTtlMinutes: draft.cacheTtlMinutes,
+      customHeaders: draft.customHeaders,
+      models,
+    };
+
+    setProviders((prev) => [...prev, newProvider]);
+
+    if (draft.apiKeyValue && draft.apiKeyEnv) {
+      setPendingSecrets((prev) => ({
+        ...prev,
+        [draft.apiKeyEnv]: draft.apiKeyValue,
+      }));
+    }
+
+    try {
+      window.localStorage.removeItem(PROVIDER_DRAFT_STORAGE_KEY);
+    } catch {
+      // Safe fallback
+    }
+    setProviderDraft(null);
+    setDrawerState({ open: false });
+    onToast({
+      title: `已添加供应商 ${draft.name}`,
+      description: "请点击右上角「保存模型配置」使配置生效",
+      status: "info",
+    });
+  };
+
+  const handleUpdateProviderSettings = (
+    uid: string,
+    patch: {
+      name: string;
+      displayName: string;
+      protocol: string;
+      baseUrl: string;
+      apiKeyEnv: string;
+      apiKeyValue: string;
+      cacheTtlMinutes: string;
+      customHeaders: string;
+    },
   ) => {
-    setDraft((prev) => {
-      const prov = prev.providers[slug]!;
-      const models = prov.models.map((m, i) => (i === index ? { ...m, ...patch } : m));
-      return {
+    const existing = providers.find((p) => p.uid === uid);
+    const oldName = existing?.name;
+
+    setProviders((prev) =>
+      prev.map((p) =>
+        p.uid === uid
+          ? {
+              ...p,
+              name: patch.name,
+              displayName: patch.displayName,
+              protocol: patch.protocol,
+              baseUrl: patch.baseUrl,
+              apiKeyEnv: patch.apiKeyEnv,
+              cacheTtlMinutes: patch.cacheTtlMinutes,
+              customHeaders: patch.customHeaders,
+            }
+          : p,
+      ),
+    );
+
+    if (oldName && oldName !== patch.name) {
+      const prefix = `${oldName}/`;
+      setSlots((prev) => {
+        const nextSlots = { ...prev };
+        (Object.keys(nextSlots) as SlotKey[]).forEach((key) => {
+          if (nextSlots[key].startsWith(prefix)) {
+            nextSlots[key] = `${patch.name}/${nextSlots[key].slice(prefix.length)}`;
+          }
+        });
+        return nextSlots;
+      });
+    }
+
+    if (patch.apiKeyValue && patch.apiKeyEnv) {
+      setPendingSecrets((prev) => ({
         ...prev,
-        providers: {
-          ...prev.providers,
-          [slug]: { ...prov, models },
-        },
-      };
+        [patch.apiKeyEnv]: patch.apiKeyValue,
+      }));
+    }
+
+    setDrawerState({ open: false });
+    onToast({
+      title: `已更新供应商 ${patch.name}`,
+      description: "请点击右上角「保存模型配置」保存并应用更改",
+      status: "info",
     });
   };
 
-  const addModel = (slug: string) => {
-    setDraft((prev) => {
-      const prov = prev.providers[slug]!;
-      return {
-        ...prev,
-        providers: {
-          ...prev.providers,
-          [slug]: {
-            ...prov,
-            models: [
-              ...prov.models,
-              {
-                id: "new-model",
-                name: "New Model",
-                reasoning: false,
-                input: ["text"],
-                context_window: 128000,
-                max_tokens: 8192,
-              },
-            ],
-          },
-        },
-      };
-    });
+  const handleDeleteProvider = (uid: string) => {
+    const target = providers.find((p) => p.uid === uid);
+    setProviders((prev) => prev.filter((p) => p.uid !== uid));
+    if (target) {
+      onToast({ title: `已移除供应商 ${target.name}`, status: "info" });
+    }
   };
 
-  const removeModel = (slug: string, index: number) => {
-    setDraft((prev) => {
-      const prov = prev.providers[slug]!;
-      return {
-        ...prev,
-        providers: {
-          ...prev.providers,
-          [slug]: {
-            ...prov,
-            models: prov.models.filter((_, i) => i !== index),
-          },
-        },
-      };
+  const handleAddModel = (providerUid: string) => {
+    const modUid = createUid("mod");
+    const targetProv = providers.find((p) => p.uid === providerUid);
+    const uniqueId = generateUniqueModelId(targetProv?.models ?? []);
+    const newModel: UiModelEntry = {
+      uid: modUid,
+      id: uniqueId,
+      displayName: uniqueId === "new-model" ? "New Model" : uniqueId,
+      supportsVision: false,
+      supportsThinking: false,
+      modelsDev: {
+        enabled: false,
+        modelRef: "",
+      },
+      advanced: {
+        contextWindow: "128000",
+        maxOutputTokens: "8192",
+        apiOverride: "__inherit__",
+        baseUrlOverride: "",
+        customHeaders: "",
+      },
+    };
+
+    setProviders((prev) =>
+      prev.map((p) =>
+        p.uid === providerUid ? { ...p, models: [...p.models, newModel] } : p,
+      ),
+    );
+    setCollapsedProviderIds((prev) => {
+      if (!prev.has(providerUid)) return prev;
+      const next = new Set(prev);
+      next.delete(providerUid);
+      return next;
     });
+    setExpandedModelIds((prev) => {
+      const next = new Set(prev);
+      next.add(modUid);
+      return next;
+    });
+    setNewlyAddedModelUid(modUid);
   };
 
-  const addProvider = () => {
-    const clean = newProviderSlug
-      .trim()
-      .toLowerCase()
-      .replace(/[^a-z0-9_-]+/g, "-");
-    if (!clean || draft.providers[clean]) {
+  const handleUpdateModel = (
+    providerUid: string,
+    modelUid: string,
+    patch: Partial<UiModelEntry>,
+  ) => {
+    setProviders((prev) =>
+      prev.map((p) =>
+        p.uid === providerUid
+          ? {
+              ...p,
+              models: p.models.map((m) =>
+                m.uid === modelUid ? { ...m, ...patch } : m,
+              ),
+            }
+          : p,
+      ),
+    );
+  };
+
+  const handleUpdateModelAdvanced = (
+    providerUid: string,
+    modelUid: string,
+    patch: Partial<UiModelEntry["advanced"]>,
+  ) => {
+    setProviders((prev) =>
+      prev.map((p) =>
+        p.uid === providerUid
+          ? {
+              ...p,
+              models: p.models.map((m) =>
+                m.uid === modelUid
+                  ? { ...m, advanced: { ...m.advanced, ...patch } }
+                  : m,
+              ),
+            }
+          : p,
+      ),
+    );
+  };
+
+  const handleRemoveModel = (providerUid: string, modelUid: string) => {
+    setProviders((prev) =>
+      prev.map((p) =>
+        p.uid === providerUid
+          ? { ...p, models: p.models.filter((m) => m.uid !== modelUid) }
+          : p,
+      ),
+    );
+  };
+
+  const handleTestModel = async (providerUid: string, modelUid: string) => {
+    const prov = providers.find((p) => p.uid === providerUid);
+    const model = prov?.models.find((m) => m.uid === modelUid);
+    if (!prov || !model) return;
+
+    const slug = prov.name.trim();
+    const modelId = model.id.trim();
+    if (!slug || !prov.baseUrl.trim() || !modelId) {
       onToast({
-        title: "无法添加供应商",
-        description: "请填写未重复的英文名称（例如 openrouter）",
+        title: "无法发起模型测试",
+        description: "请先完善供应商名称、Base URL 与模型 ID",
         status: "error",
       });
       return;
     }
-    const envGuess = `${clean.replace(/-/g, "_").toUpperCase()}_API_KEY`;
-    setDraft((prev) => ({
-      ...prev,
-      providers: {
-        ...prev.providers,
-        [clean]: {
-          api: "openai-responses",
-          base_url: "https://api.openai.com/v1",
-          api_key_env: envGuess,
-          models: [
-            {
-              id: "gpt-4.1-mini",
-              name: "GPT-4.1 Mini",
-              reasoning: false,
-              input: ["text", "image"],
-              context_window: 128000,
-              max_tokens: 8192,
-            },
-          ],
-        },
-      },
-    }));
-    setNewProviderSlug("");
-  };
 
-  const removeProvider = (slug: string) => {
-    setDraft((prev) => {
-      const nextProviders = { ...prev.providers };
-      delete nextProviders[slug];
-      return { ...prev, providers: nextProviders };
-    });
-  };
+    const provHeadersRes = parseHeadersJson(prov.customHeaders, `供应商 "${slug}" 请求头`);
+    if (!provHeadersRes.ok) {
+      onToast({ title: "无法发起模型测试", description: provHeadersRes.error, status: "error" });
+      return;
+    }
 
-  const handleSave = async () => {
-    setSaveState("loading");
+    const modHeadersRes = parseHeadersJson(
+      model.advanced.customHeaders,
+      `模型 "${slug}/${modelId}" 自定义请求头`,
+    );
+    if (!modHeadersRes.ok) {
+      onToast({ title: "无法发起模型测试", description: modHeadersRes.error, status: "error" });
+      return;
+    }
+
+    setTestingModelIds((prev) => new Set(prev).add(modelUid));
     try {
-      const res = await api.saveModelsConfig(draft);
-      setSaveState("success");
-      onSaved(draft, res.changes);
+      const res = await api.testModel({
+        providerSlug: slug,
+        api: prov.protocol,
+        baseUrl: prov.baseUrl.trim(),
+        apiKeyEnv: prov.apiKeyEnv.trim() || undefined,
+        apiKeyOverride: prov.apiKeyEnv.trim() ? pendingSecrets[prov.apiKeyEnv.trim()] : undefined,
+        providerHeaders: provHeadersRes.headers,
+        model: {
+          id: modelId,
+          name: model.displayName.trim() || modelId,
+          api:
+            model.advanced.apiOverride && model.advanced.apiOverride !== "__inherit__"
+              ? model.advanced.apiOverride
+              : undefined,
+          base_url: model.advanced.baseUrlOverride.trim() || undefined,
+          headers: modHeadersRes.headers,
+          reasoning: model.supportsThinking,
+          input: model.supportsVision ? ["text", "image"] : ["text"],
+        },
+      });
+
+      const outcome = res.result;
+      setTestOutcomes((prev) => ({
+        ...prev,
+        [modelUid]: {
+          ok: outcome.ok,
+          latencyMs: outcome.latencyMs,
+          replyPreview: outcome.replyPreview,
+          error: outcome.error,
+        },
+      }));
+
+      if (outcome.ok) {
+        onToast({
+          title: `测试成功 · ${outcome.target}`,
+          description: `问好回复: "${outcome.replyPreview ?? "hello"}" · 耗时 ${outcome.latencyMs}ms`,
+          status: "success",
+        });
+      } else {
+        onToast({
+          title: `测试失败 · ${outcome.target}`,
+          description: outcome.error || "未知错误",
+          status: "error",
+        });
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      setTestOutcomes((prev) => ({
+        ...prev,
+        [modelUid]: {
+          ok: false,
+          latencyMs: 0,
+          error: msg,
+        },
+      }));
+      onToast({
+        title: `测试失败 · ${slug}/${modelId}`,
+        description: msg,
+        status: "error",
+      });
+    } finally {
+      setTestingModelIds((prev) => {
+        const next = new Set(prev);
+        next.delete(modelUid);
+        return next;
+      });
+    }
+  };
+
+  const handleSaveConfig = useCallback(async () => {
+    if (savePhase === "saving") return;
+
+    const built = buildApiModelsConfig(slots, providers);
+    if (!built.ok) {
+      if (built.providerUid) {
+        setCollapsedProviderIds((prev) => {
+          if (!prev.has(built.providerUid!)) return prev;
+          const next = new Set(prev);
+          next.delete(built.providerUid!);
+          return next;
+        });
+      }
+      if (built.modelUid) {
+        setExpandedModelIds((prev) => {
+          if (prev.has(built.modelUid!)) return prev;
+          const next = new Set(prev);
+          next.add(built.modelUid!);
+          return next;
+        });
+      }
+      onToast({
+        title: "无法保存模型配置",
+        description: built.error,
+        status: "error",
+      });
+      return;
+    }
+
+    setSavePhase("saving");
+    try {
+      const res = await api.saveModelsConfig(built.config);
+      const changeList = [...(res.changes ?? [])];
+
+      const secretEntries = Object.entries(pendingSecrets).filter(
+        ([k, v]) => k.trim().length > 0 && v.trim().length > 0,
+      );
+      if (secretEntries.length > 0) {
+        const secRes = await api.saveSecrets(Object.fromEntries(secretEntries));
+        setPendingSecrets({});
+        onSecretsUpdated?.(secRes.secretStates);
+        if (secRes.writtenKeys.length > 0) {
+          changeList.push(`已更新密钥: ${secRes.writtenKeys.join(", ")}`);
+        }
+      }
+
+      setSavedComparable(serializeComparableState(slots, providers));
+      setSavePhase("saved");
+      onSaved(built.config, changeList);
       onToast({
         title: "模型配置已保存",
-        description: res.changes?.length ? res.changes.join("；") : "配置已生效",
+        description: changeList.length > 0 ? changeList.join("；") : "配置已生效",
         status: "success",
       });
-      setTimeout(() => setSaveState("idle"), 1600);
+      window.setTimeout(() => setSavePhase("idle"), 1600);
     } catch (err) {
-      setSaveState("error");
+      setSavePhase("idle");
       onToast({
         title: "保存模型配置失败",
         description: err instanceof Error ? err.message : String(err),
         status: "error",
       });
-      setTimeout(() => setSaveState("idle"), 2000);
     }
-  };
+  }, [savePhase, slots, providers, pendingSecrets, onSecretsUpdated, onSaved, onToast]);
+
+  // Cmd/Ctrl + S shortcut when drawer is closed
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (drawerState.open) return;
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "s") {
+        e.preventDefault();
+        void handleSaveConfig();
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [drawerState.open, handleSaveConfig]);
+
+  const pendingSecretCount = Object.keys(pendingSecrets).length;
 
   return (
-    <div className="flex flex-col gap-4">
-      <ConsolePageHeader
-        title="模型与供应商"
-        actions={
-          <StatefulButton
-            type="button"
-            size="sm"
-            state={saveState}
-            loadingText="保存中…"
-            successText="已保存"
-            errorText="保存失败"
-            icon={<Save className="size-3.5" />}
-            onClick={() => void handleSave()}
-          >
-            保存模型配置
-          </StatefulButton>
-        }
-      />
-
-      {/* Unified Slots + Providers Sheet */}
-      <div className="overflow-hidden rounded-xl border border-border bg-card divide-y divide-border">
-        <div className="space-y-3 p-4">
-          <div className="text-xs font-semibold text-foreground">功能槽位</div>
-          <div className="grid gap-3 md:grid-cols-2 lg:grid-cols-5">
-            {SLOT_META.map((item) => {
-              const val = draft.slots[item.key];
-              const options = (allTargets.includes(val) ? allTargets : [val, ...allTargets]).map(
-                (target) => ({ value: target, label: target }),
-              );
-              return (
-                <div key={item.key} className="space-y-1.5">
-                  <div className="flex items-center gap-1.5">
-                    <SlotBadge slot={item.key} />
-                    <span className="text-[11px] text-muted-foreground">{item.label}</span>
-                  </div>
-                  <ConsoleSelect
-                    value={val}
-                    options={options}
-                    onValueChange={(next) =>
-                      setDraft((prev) => ({
-                        ...prev,
-                        slots: { ...prev.slots, [item.key]: next },
-                      }))
-                    }
-                  />
-                </div>
-              );
-            })}
+    <div className="flex flex-col">
+      {/* Sticky Page Header */}
+      <div className="sticky top-0 z-20 border-b border-border bg-background/95 px-6 py-3.5 backdrop-blur-sm">
+        <div className="mx-auto flex max-w-[1280px] flex-wrap items-center justify-between gap-4">
+          <div className="flex min-w-0 items-center gap-3">
+            <h1 className="text-base font-semibold tracking-tight text-balance text-foreground">
+              模型与供应商
+            </h1>
+            {isDirty ? (
+              <AnimatedBadge status="warning" size="sm">
+                {pendingSecretCount > 0
+                  ? `有未保存更改 · 含 ${pendingSecretCount} 项待写入密钥`
+                  : "有未保存更改"}
+              </AnimatedBadge>
+            ) : (
+              <span className="hidden text-xs text-muted-foreground sm:inline">
+                配置与运行时路由映射 · ⌘/Ctrl+S 快速保存
+              </span>
+            )}
           </div>
-        </div>
 
-        {/* Providers Section Bar */}
-        <div className="flex flex-wrap items-center justify-between gap-2 bg-muted/25 px-4 py-2.5">
-          <span className="text-xs font-semibold text-foreground">
-            供应商与模型（{Object.keys(draft.providers).length}）
-          </span>
-          <div className="flex items-center gap-2">
-            <div className="w-56">
-              <ConsoleInput
+          <div className="flex shrink-0 items-center gap-2">
+            {isDirty ? (
+              <Button
+                type="button"
                 size="sm"
-                value={newProviderSlug}
-                onChange={setNewProviderSlug}
-                placeholder="新增供应商名称 (如 deepseek)"
-              />
-            </div>
-            <Button type="button" variant="outline" size="sm" onClick={addProvider}>
-              <Plus className="size-3.5" />
-              添加供应商
+                variant="outline"
+                disabled={savePhase === "saving"}
+                onClick={handleResetChanges}
+              >
+                <RotateCcw className="size-3.5" />
+                <span>还原</span>
+              </Button>
+            ) : null}
+
+            <Button
+              type="button"
+              size="sm"
+              disabled={savePhase === "saving"}
+              onClick={() => void handleSaveConfig()}
+            >
+              {savePhase === "saving" ? (
+                <>
+                  <Loader2 className="size-3.5 animate-spin" />
+                  <span>保存中…</span>
+                </>
+              ) : savePhase === "saved" ? (
+                <>
+                  <Check className="size-3.5" />
+                  <span>已保存</span>
+                </>
+              ) : (
+                <>
+                  <Save className="size-3.5" />
+                  <span>保存模型配置</span>
+                </>
+              )}
             </Button>
           </div>
         </div>
-
-        {/* Continuous Provider Blocks separated by hairlines */}
-        {Object.entries(draft.providers).map(([slug, prov]) => (
-          <div key={slug} className="divide-y divide-border/70">
-            <div className="flex flex-wrap items-center justify-between gap-2 bg-muted/10 px-4 py-2.5">
-              <div className="flex flex-wrap items-center gap-2">
-                <span className="font-mono text-sm font-semibold text-foreground">{slug}</span>
-                <ApiBadge api={prov.api} />
-                <span className="text-xs text-muted-foreground">
-                  {prov.models.length} 个模型
-                </span>
-              </div>
-              <div className="flex items-center gap-2">
-                <Button type="button" variant="outline" size="sm" onClick={() => addModel(slug)}>
-                  <Plus className="size-3.5" />
-                  添加模型
-                </Button>
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="sm"
-                  onClick={() => removeProvider(slug)}
-                  className="text-destructive hover:text-destructive"
-                >
-                  <Trash2 className="size-3.5" />
-                  删除供应商
-                </Button>
-              </div>
-            </div>
-
-            <div className="grid gap-3 px-4 py-3 md:grid-cols-3">
-              <ConsoleSelect
-                label="接口协议"
-                value={prov.api}
-                options={API_OPTIONS}
-                onValueChange={(next) => updateProvider(slug, { api: next })}
-              />
-              <ConsoleInput
-                label="Base URL"
-                value={prov.base_url}
-                onChange={(v) => updateProvider(slug, { base_url: v })}
-                placeholder="https://api.example.com/v1"
-              />
-              <ConsoleInput
-                label="密钥变量名"
-                value={prov.api_key_env}
-                onChange={(v) => updateProvider(slug, { api_key_env: v })}
-                placeholder="ANTHROPIC_API_KEY"
-              />
-            </div>
-
-            {prov.models.map((m, idx) => (
-              <div key={`${slug}-m-${idx}`} className="bg-muted/5 px-4 py-3">
-                <div className="grid items-end gap-3 md:grid-cols-12">
-                  <div className="md:col-span-4">
-                    <ConsoleInput
-                      label="模型 ID"
-                      value={m.id}
-                      onChange={(v) => updateModel(slug, idx, { id: v })}
-                    />
-                  </div>
-                  <div className="md:col-span-3">
-                    <ConsoleInput
-                      label="显示名称"
-                      value={m.name ?? ""}
-                      onChange={(v) => updateModel(slug, idx, { name: v || undefined })}
-                    />
-                  </div>
-                  <div className="md:col-span-3 flex h-9 items-center gap-4">
-                    <label className="flex items-center gap-2 text-xs text-muted-foreground">
-                      <span>识图</span>
-                      <Switch
-                        checked={Boolean(m.input?.includes("image"))}
-                        onCheckedChange={(on) =>
-                          updateModel(slug, idx, { input: on ? ["text", "image"] : ["text"] })
-                        }
-                      />
-                    </label>
-                    <label className="flex items-center gap-2 text-xs text-muted-foreground">
-                      <span>思考</span>
-                      <Switch
-                        checked={Boolean(m.reasoning)}
-                        onCheckedChange={(on) => updateModel(slug, idx, { reasoning: on })}
-                      />
-                    </label>
-                  </div>
-                  <div className="md:col-span-2 flex h-9 items-center justify-end">
-                    <Button
-                      type="button"
-                      variant="ghost"
-                      size="sm"
-                      onClick={() => removeModel(slug, idx)}
-                      className="text-destructive hover:text-destructive"
-                    >
-                      移除模型
-                    </Button>
-                  </div>
-                </div>
-
-                <Collapsible className="mt-2.5">
-                  <CollapsibleTrigger className="rounded-lg border border-border px-2.5 py-1 text-[11px] text-muted-foreground hover:text-foreground">
-                    高级参数（上下文大小与接口覆盖）
-                  </CollapsibleTrigger>
-                  <CollapsibleContent className="mt-2.5 grid gap-3 pt-1 md:grid-cols-4">
-                    <ConsoleInput
-                      label="上下文窗口"
-                      type="number"
-                      value={String(m.context_window ?? 128000)}
-                      onChange={(v) =>
-                        updateModel(slug, idx, { context_window: Number(v) || 128000 })
-                      }
-                    />
-                    <ConsoleInput
-                      label="最大输出 Tokens"
-                      type="number"
-                      value={String(m.max_tokens ?? 8192)}
-                      onChange={(v) =>
-                        updateModel(slug, idx, { max_tokens: Number(v) || 8192 })
-                      }
-                    />
-                    <ConsoleSelect
-                      label="覆盖协议"
-                      value={m.api ?? "__inherit__"}
-                      options={API_OVERRIDE_OPTIONS}
-                      onValueChange={(v) =>
-                        updateModel(slug, idx, {
-                          api: v === "__inherit__" ? undefined : v,
-                        })
-                      }
-                    />
-                    <ConsoleInput
-                      label="覆盖 Base URL"
-                      value={m.base_url ?? ""}
-                      onChange={(v) =>
-                        updateModel(slug, idx, { base_url: v.trim() || undefined })
-                      }
-                      placeholder={prov.base_url}
-                    />
-                  </CollapsibleContent>
-                </Collapsible>
-              </div>
-            ))}
-          </div>
-        ))}
       </div>
+
+      {/* Main Content Container */}
+      <div className="mx-auto flex w-full max-w-[1280px] flex-col gap-8 px-6 py-6">
+        {/* Section 1: Function Slots */}
+        <FunctionSlotsPanel
+          slots={slots}
+          providers={providers}
+          secretStates={secretStates}
+          pendingSecrets={pendingSecrets}
+          onChangeSlot={handleChangeSlot}
+          onConfigureProvider={(providerUid) =>
+            setDrawerState({ open: true, mode: "edit", providerUid })
+          }
+        />
+
+        {/* Section 2: Providers & Models */}
+        <div className="flex flex-col gap-5 border-t border-border pt-6">
+          {/* Toolbar */}
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div className="flex flex-wrap items-center gap-3">
+              <h2 className="text-sm font-semibold text-foreground">
+                供应商与模型{" "}
+                <span className="font-mono text-muted-foreground tabular-nums">
+                  ({isSearchActive ? `${filteredProviderEntries.length}/${providers.length}` : providers.length})
+                </span>
+              </h2>
+
+              {providers.length > 0 ? (
+                <>
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="outline"
+                    onClick={handleToggleAllProviders}
+                  >
+                    {allCollapsed ? (
+                      <>
+                        <ChevronsUpDown className="size-3.5" />
+                        <span>全部展开</span>
+                      </>
+                    ) : (
+                      <>
+                        <ChevronsDownUp className="size-3.5" />
+                        <span>全部折叠</span>
+                      </>
+                    )}
+                  </Button>
+
+                  <div className="relative w-52 sm:w-64">
+                    <Search className="pointer-events-none absolute top-1/2 left-2.5 size-3.5 -translate-y-1/2 text-muted-foreground" />
+                    <input
+                      type="text"
+                      value={searchQuery}
+                      onChange={(e) => setSearchQuery(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Escape" && searchQuery) {
+                          e.preventDefault();
+                          setSearchQuery("");
+                        }
+                      }}
+                      placeholder="筛选供应商或模型…"
+                      aria-label="筛选供应商或模型"
+                      className="h-8 w-full rounded-lg border border-border bg-background pr-7 pl-8 text-xs text-foreground transition-colors placeholder:text-muted-foreground focus:border-ring focus:outline-none"
+                    />
+                    {isSearchActive ? (
+                      <button
+                        type="button"
+                        onClick={() => setSearchQuery("")}
+                        aria-label="清空筛选"
+                        className="absolute top-1/2 right-1.5 inline-flex size-5 -translate-y-1/2 items-center justify-center rounded text-muted-foreground hover:text-foreground"
+                      >
+                        <X className="size-3" />
+                      </button>
+                    ) : null}
+                  </div>
+                </>
+              ) : null}
+            </div>
+
+            <div className="flex items-center gap-3">
+              {providerDraft ? (
+                <span className="hidden items-center gap-1 text-xs font-medium text-amber-600 sm:inline-flex dark:text-amber-400">
+                  <Bookmark className="size-3.5" />
+                  <span>有未完成供应商草稿</span>
+                </span>
+              ) : null}
+
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                onClick={() => setDrawerState({ open: true, mode: "create" })}
+              >
+                <Plus className="size-3.5" />
+                <span>
+                  {providerDraft ? "继续编辑草稿 / 添加供应商" : "添加供应商"}
+                </span>
+              </Button>
+            </div>
+          </div>
+
+          {/* Providers List */}
+          {providers.length === 0 ? (
+            <div className="flex flex-col items-center justify-center gap-3 border-t border-border/70 py-14 text-center">
+              <ServerOff className="size-8 text-muted-foreground/60" />
+              <div className="flex flex-col gap-1">
+                <p className="text-sm font-medium text-foreground">
+                  暂无供应商配置
+                </p>
+                <p className="text-xs text-muted-foreground">
+                  点击右上角「添加供应商」在侧边抽屉中完成接口与 API Key 配置
+                </p>
+              </div>
+              <Button
+                type="button"
+                size="sm"
+                onClick={() => setDrawerState({ open: true, mode: "create" })}
+              >
+                <Plus className="size-3.5" />
+                <span>添加供应商</span>
+              </Button>
+            </div>
+          ) : filteredProviderEntries.length === 0 ? (
+            <div className="flex flex-col items-center justify-center gap-2.5 border-t border-border/70 py-12 text-center">
+              <p className="text-xs text-muted-foreground">
+                未找到匹配 “{searchQuery.trim()}” 的供应商或模型
+              </p>
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                onClick={() => setSearchQuery("")}
+              >
+                清空筛选条件
+              </Button>
+            </div>
+          ) : (
+            <div className="flex flex-col gap-5">
+              {filteredProviderEntries.map(({ provider, visibleModels }) => {
+                const slug = provider.name.trim();
+                const idCounts = new Map<string, number>();
+                const boundSlotsByModelId = new Map<string, SlotKey[]>();
+                for (const m of provider.models) {
+                  const mid = m.id.trim();
+                  if (!mid) continue;
+                  idCounts.set(mid, (idCounts.get(mid) ?? 0) + 1);
+                  const bound = slotIndex.byTarget.get(`${slug}/${mid}`);
+                  if (bound && bound.length > 0) {
+                    boundSlotsByModelId.set(mid, bound);
+                  }
+                }
+                const duplicateModelIds = new Set(
+                  [...idCounts.entries()]
+                    .filter(([, count]) => count > 1)
+                    .map(([id]) => id),
+                );
+
+                return (
+                  <ProviderCard
+                    key={provider.uid}
+                    provider={provider}
+                    visibleModels={visibleModels}
+                    isSearchActive={isSearchActive}
+                    boundSlotsByModelId={boundSlotsByModelId}
+                    providerBoundSlots={slotIndex.byProvider.get(slug) ?? []}
+                    duplicateModelIds={duplicateModelIds}
+                    newlyAddedModelUid={newlyAddedModelUid}
+                    secretStates={secretStates}
+                    pendingSecrets={pendingSecrets}
+                    isCollapsed={
+                      !isSearchActive && collapsedProviderIds.has(provider.uid)
+                    }
+                    onToggleCollapse={() =>
+                      handleToggleProviderCollapse(provider.uid)
+                    }
+                    expandedModelIds={expandedModelIds}
+                    testingModelIds={testingModelIds}
+                    testOutcomes={testOutcomes}
+                    onToggleModelExpand={handleToggleModelExpand}
+                    onTestModel={(modelUid) => void handleTestModel(provider.uid, modelUid)}
+                    onConfigureProvider={() =>
+                      setDrawerState({
+                        open: true,
+                        mode: "edit",
+                        providerUid: provider.uid,
+                      })
+                    }
+                    onDeleteProvider={() => handleDeleteProvider(provider.uid)}
+                    onAddModel={() => handleAddModel(provider.uid)}
+                    onUpdateModel={(modelUid, patch) =>
+                      handleUpdateModel(provider.uid, modelUid, patch)
+                    }
+                    onUpdateModelAdvanced={(modelUid, patch) =>
+                      handleUpdateModelAdvanced(provider.uid, modelUid, patch)
+                    }
+                    onRemoveModel={(modelUid) =>
+                      handleRemoveModel(provider.uid, modelUid)
+                    }
+                  />
+                );
+              })}
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* Add / Configure Provider Slide-Over Drawer */}
+      <ProviderDrawer
+        open={drawerState.open}
+        mode={drawerState.open ? drawerState.mode : "create"}
+        editingProvider={editingProvider}
+        savedDraft={providerDraft}
+        existingNames={providers.map((p) => p.name)}
+        secretStates={secretStates}
+        pendingSecrets={pendingSecrets}
+        onClose={() => setDrawerState({ open: false })}
+        onSaveDraft={handleSaveProviderDraft}
+        onDiscardDraft={handleDiscardProviderDraft}
+        onCreateProvider={handleCreateProviderFromDrawer}
+        onUpdateProviderSettings={handleUpdateProviderSettings}
+      />
     </div>
   );
 }

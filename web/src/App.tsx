@@ -190,19 +190,21 @@ function ConsoleShell() {
 
   if (authNeeded) {
     return (
-      <div className="flex min-h-screen items-center justify-center bg-background p-6">
-        <Card className="w-full max-w-md">
-          <CardHeader>
-            <div className="mb-1 flex items-center gap-2 text-primary">
+      <div className="flex min-h-screen items-center justify-center bg-background px-6 py-12">
+        <Card className="w-full max-w-sm border-b-0">
+          <CardHeader className="border-b border-border/75 pb-4">
+            <div className="mb-1.5 flex items-center gap-2 text-primary">
               <Lock className="size-4" />
-              <span className="text-xs font-medium">Hato 控制台</span>
+              <span className="text-xs font-medium tracking-wide">Hato 控制台</span>
             </div>
-            <CardTitle>验证访问令牌</CardTitle>
+            <CardTitle as="h2" className="text-lg tracking-tight">
+              验证访问令牌
+            </CardTitle>
             <CardDescription>请输入控制台访问令牌以继续。</CardDescription>
           </CardHeader>
-          <CardContent>
+          <CardContent className="pt-1">
             <form
-              className="flex flex-col gap-3"
+              className="flex flex-col gap-4"
               onSubmit={(e) => {
                 e.preventDefault();
                 setStoredToken(tokenInput);
@@ -230,8 +232,8 @@ function ConsoleShell() {
 
   return (
     <div className="flex h-screen flex-col bg-background text-foreground">
-      <header className="flex h-10 shrink-0 items-center justify-between gap-2 border-b border-border bg-card/85 px-2.5 backdrop-blur-sm">
-        <div className="flex min-w-0 items-center gap-2">
+      <header className="flex h-11 shrink-0 items-center justify-between gap-3 border-b border-border/80 bg-background px-3 sm:px-4">
+        <div className="flex min-w-0 items-center gap-2.5">
           <button
             type="button"
             onClick={toggleSidebar}
@@ -242,13 +244,14 @@ function ConsoleShell() {
           >
             <PanelLeft className="size-4" />
           </button>
-          <div className="grid size-6 shrink-0 place-items-center rounded-md bg-primary/15 text-primary">
+          <div className="grid size-6 shrink-0 place-items-center rounded-md bg-primary/12 text-primary">
             <Bot className="size-3.5" />
           </div>
-          <div className="flex min-w-0 items-center gap-2">
-            <h1 className="truncate text-xs font-semibold tracking-tight text-foreground">
+          <div className="flex min-w-0 items-center gap-2.5">
+            <h1 className="truncate text-[13px] font-semibold tracking-tight text-foreground">
               Hato 控制台
             </h1>
+            <span className="hidden h-3.5 w-px bg-border sm:block" aria-hidden="true" />
             {healthOffline ? (
               <AnimatedBadge status="danger" size="sm">
                 服务连接断开
@@ -279,19 +282,19 @@ function ConsoleShell() {
         <div className="flex shrink-0 items-center gap-1.5">
           <Button
             type="button"
-            variant="outline"
+            variant="ghost"
             size="sm"
-            className="h-7 px-2 text-xs"
+            className="h-7 px-2.5 text-xs text-muted-foreground hover:text-foreground"
             onClick={() => setActiveTab("browser")}
           >
             <Compass className="size-3.5" />
-            远程浏览器
+            <span className="hidden sm:inline">远程浏览器</span>
           </Button>
           <StatefulButton
             type="button"
-            variant="outline"
+            variant="ghost"
             size="sm"
-            className="h-7 px-2 text-xs"
+            className="h-7 px-2.5 text-xs text-muted-foreground hover:text-foreground"
             state={reloadState}
             loadingText="重载中…"
             successText="已重载"
@@ -301,6 +304,7 @@ function ConsoleShell() {
           >
             重载配置
           </StatefulButton>
+          <span className="mx-0.5 h-3.5 w-px bg-border/80" aria-hidden="true" />
           <ThemeToggle variant="circle-blur" />
         </div>
       </header>
@@ -308,14 +312,14 @@ function ConsoleShell() {
       <div className="flex min-h-0 flex-1 flex-col lg:flex-row">
         <aside
           data-sidebar-collapsed={sidebarCollapsed ? "true" : "false"}
-          className={`flex shrink-0 flex-col border-b border-border bg-card/45 p-1.5 transition-[width] duration-150 lg:border-r lg:border-b-0 ${
-            sidebarCollapsed ? "lg:w-[52px]" : "lg:w-48"
+          className={`flex shrink-0 flex-col border-b border-border/80 bg-muted/20 p-2 transition-[width] duration-150 lg:border-r lg:border-b-0 ${
+            sidebarCollapsed ? "lg:w-[52px]" : "lg:w-52"
           }`}
         >
           <SharedLayoutBg
             as="div"
             inset={0}
-            pillClassName="rounded-md bg-muted/80"
+            pillClassName="rounded-md bg-muted"
             className="flex shrink-0 gap-1 overflow-x-auto lg:flex-col"
           >
             {NAV_ITEMS.map((item) => {
@@ -337,12 +341,14 @@ function ConsoleShell() {
                     sidebarCollapsed ? "justify-center px-2.5 lg:px-0" : "px-2.5 text-left"
                   } ${
                     isActive
-                      ? "bg-primary/12 font-medium text-primary"
+                      ? "bg-muted font-medium text-foreground"
                       : "text-muted-foreground hover:text-foreground"
                   }`}
                 >
-                  <div className={`flex items-center ${sidebarCollapsed ? "gap-2 lg:gap-0" : "gap-2"}`}>
-                    <Icon className="size-4 shrink-0" />
+                  <div className={`flex items-center ${sidebarCollapsed ? "gap-2 lg:gap-0" : "gap-2.5"}`}>
+                    <Icon
+                      className={`size-4 shrink-0 ${isActive ? "text-primary" : ""}`}
+                    />
                     <span
                       className={`truncate text-xs ${sidebarCollapsed ? "lg:hidden" : ""}`}
                     >
@@ -361,11 +367,11 @@ function ConsoleShell() {
             })}
           </SharedLayoutBg>
 
-          {/* Compact Read-Only Session History (DSH sidebar style) */}
+          {/* Compact Read-Only Session History */}
           {!sidebarCollapsed && (
-            <div className="mt-2 hidden min-h-0 flex-1 flex-col border-t border-border/70 pt-2 lg:flex">
-              <div className="mb-1 flex items-center justify-between px-2 text-[10px] font-medium text-muted-foreground">
-                <span className="flex items-center gap-1">
+            <div className="mt-3 hidden min-h-0 flex-1 flex-col border-t border-border/75 pt-3 lg:flex">
+              <div className="mb-1.5 flex items-center justify-between px-2 text-[10px] font-medium tracking-wide text-muted-foreground">
+                <span className="flex items-center gap-1.5">
                   <History className="size-3" />
                   会话记录
                 </span>
@@ -381,7 +387,7 @@ function ConsoleShell() {
                   }}
                   className={`flex w-full items-center justify-between rounded-md px-2 py-1.5 text-left text-xs transition-colors ${
                     activeTab === "chat" && selectedSessionId === null
-                      ? "bg-primary/12 font-medium text-primary"
+                      ? "bg-muted font-medium text-foreground"
                       : "text-muted-foreground hover:bg-muted/60 hover:text-foreground"
                   }`}
                 >
@@ -404,9 +410,9 @@ function ConsoleShell() {
                         setSelectedSessionId(sess.id);
                         setActiveTab("chat");
                       }}
-                      className={`flex w-full flex-col gap-0.5 rounded-md px-2 py-1 text-left transition-colors ${
+                      className={`flex w-full flex-col gap-0.5 rounded-md px-2 py-1.5 text-left transition-colors ${
                         isSel
-                          ? "bg-primary/12 text-primary"
+                          ? "bg-muted text-foreground"
                           : "text-muted-foreground hover:bg-muted/60 hover:text-foreground"
                       }`}
                     >
@@ -423,7 +429,7 @@ function ConsoleShell() {
           )}
         </aside>
 
-        <main className="min-h-0 flex-1 overflow-y-auto">
+        <main className="min-h-0 flex-1 overflow-y-auto bg-background">
           {activeTab === "chat" && (
             <div className="flex h-full min-h-0 w-full flex-col">
               <ChatPanel
@@ -440,7 +446,7 @@ function ConsoleShell() {
           )}
 
           {activeTab === "browser" && (
-            <div className="flex h-full min-h-0 w-full flex-col p-2 sm:p-2.5">
+            <div className="flex h-full min-h-0 w-full flex-col p-3 sm:p-5">
               <RemoteBrowserPanel
                 onToast={notify}
                 onPendingTakeoverChange={setPendingTakeover}
@@ -456,40 +462,58 @@ function ConsoleShell() {
             </div>
           )}
 
-          {(activeTab === "models" ||
-            activeTab === "runtime" ||
-            activeTab === "prompt" ||
-            activeTab === "secrets") && (
-            <div className="mx-auto flex w-full max-w-5xl flex-col gap-3 p-3 sm:p-4">
-              {activeTab === "models" && configSnap && (
-                <ModelsConfigPanel
-                  initialConfig={configSnap.modelsConfig}
-                  onToast={notify}
-                  onSaved={(next) => {
-                    setConfigSnap((prev) => (prev ? { ...prev, modelsConfig: next } : prev));
-                  }}
-                />
-              )}
+          {activeTab === "models" && configSnap && (
+            <ModelsConfigPanel
+              initialConfig={configSnap.modelsConfig}
+              secretStates={configSnap.secretStates}
+              onToast={notify}
+              onSaved={(next) => {
+                setConfigSnap((prev) => (prev ? { ...prev, modelsConfig: next } : prev));
+              }}
+              onSecretsUpdated={(nextStates) => {
+                setConfigSnap((prev) =>
+                  prev ? { ...prev, secretStates: nextStates } : prev,
+                );
+              }}
+            />
+          )}
 
+          {activeTab === "prompt" && configSnap && (
+            <PromptPanel
+              promptPath={configSnap.promptPath}
+              initialPrompt={configSnap.promptText}
+              promptLayers={configSnap.promptLayers}
+              onToast={notify}
+              onSaved={(nextPrompt) => {
+                setConfigSnap((prev) =>
+                  prev ? { ...prev, promptText: nextPrompt } : prev,
+                );
+              }}
+              onLayersSynced={(next) => {
+                setConfigSnap((prev) =>
+                  prev
+                    ? {
+                        ...prev,
+                        hatoConfig: next.hatoConfig ?? prev.hatoConfig,
+                        promptPath: next.promptPath ?? prev.promptPath,
+                        promptText: next.promptText ?? prev.promptText,
+                        promptLayers: next.promptLayers ?? prev.promptLayers,
+                      }
+                    : prev,
+                );
+              }}
+            />
+          )}
+
+          {(activeTab === "runtime" ||
+            activeTab === "secrets") && (
+            <div className="mx-auto flex w-full max-w-4xl flex-col gap-6 px-4 py-6 sm:px-6">
               {activeTab === "runtime" && configSnap && (
                 <RuntimeConfigPanel
                   initialConfig={configSnap.hatoConfig}
                   onToast={notify}
                   onSaved={(next) => {
                     setConfigSnap((prev) => (prev ? { ...prev, hatoConfig: next } : prev));
-                  }}
-                />
-              )}
-
-              {activeTab === "prompt" && configSnap && (
-                <PromptPanel
-                  promptPath={configSnap.promptPath}
-                  initialPrompt={configSnap.promptText}
-                  onToast={notify}
-                  onSaved={(nextPrompt) => {
-                    setConfigSnap((prev) =>
-                      prev ? { ...prev, promptText: nextPrompt } : prev,
-                    );
                   }}
                 />
               )}
