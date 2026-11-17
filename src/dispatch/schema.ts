@@ -42,6 +42,9 @@ export const MandateSchema = Type.Object({
   allowed_mcp_servers: Type.Array(Type.String()),
   confirm_before: Type.Array(Type.String()),
   deliver_files: Type.Optional(Type.Boolean()),
+  execution_mode: Type.Optional(
+    Type.Union([Type.Literal("isolated"), Type.Literal("vm_unrestricted")]),
+  ),
 });
 export type WorkerMandate = Static<typeof MandateSchema>;
 

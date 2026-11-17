@@ -14,6 +14,8 @@ import {
   resolveTavilySearchConfig,
   resolveWebBrowserConfig,
   resolveWebFetchConfig,
+  resolveWorkerExecutionMode,
+  resolveWorkerVmWorkdir,
   type HatoConfig,
 } from "../config/app.js";
 import type { ModelRegistry } from "../config/models.js";
@@ -142,6 +144,8 @@ export async function runSelfConfigAction(
         default_backend: cfg.worker.default_backend,
         effective_default_backend: resolveEffectiveDefaultBackend(cfg),
         routing_mode: cfg.worker.routing_mode ?? "smart",
+        execution_mode: resolveWorkerExecutionMode(cfg),
+        vm_workdir: resolveWorkerVmWorkdir(cfg),
         enabled_backends: listEnabledWorkerBackends(cfg),
         external_cli: {
           "codex-cli": {

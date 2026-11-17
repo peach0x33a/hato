@@ -1,11 +1,13 @@
 import { execFile } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
-import { resolve, sep } from "node:path";
+import { homedir } from "node:os";
+import { basename, resolve, sep } from "node:path";
 import { promisify } from "node:util";
 import { Agent, type AgentMessage, type AgentTool } from "@earendil-works/pi-agent-core";
 import { clampThinkingLevel, type AssistantMessage, type TextContent } from "@earendil-works/pi-ai";
 import { arr, num, obj, opt, oneOf, str } from "@earendil-works/pi-schema";
 import { resolveSkillsDir, type HatoConfig } from "../config/app.js";
+import { resolveHatoHomeDir } from "../config/paths.js";
 import { supportsCustomFetchOption, type ModelRegistry } from "../config/models.js";
 import type { ScopedProxyRouter } from "../config/proxy.js";
 import type { HatoRepository } from "../db/repo.js";
@@ -35,6 +37,60 @@ const WORKER_SYSTEM_PROMPT = `You are Hato's isolated background engineering wor
 - Operate strictly within your workspace boundary. Never ask the user to paste raw secrets into chat; list required secret names in \`required_secrets\`.
 - NEVER read \`.env\` or call Telegram/QQ Bot APIs (such as \`forwardMessage\`, \`sendMessage\`, etc.) via shell commands to fetch historical messages or media. Use \`read_task_context\` / \`expand_earlier_context\` (which include saved attachment \`路径=...\` paths), and call \`ask_user\` if a file is missing.
 - When finished, ALWAYS call \`finish_task\` with an accurate, concise \`narration_hint\`, any verbatim blocks/artifacts, and caveats.`;
+
+const VM_UNRESTRICTED_PROMPT_SUFFIX = `
+
+## VM Unrestricted Mode
+- You are running in \`vm_unrestricted\` mode inside a dedicated VM with a persistent working directory.
+- You may read/write files across the VM (including \`~\` and absolute paths) and run shell commands with real \`HOME\` and full \`PATH\`.
+- STRICT SECURITY RULE: You are STILL strictly forbidden from reading, modifying, or printing Hato's \`.env\` / \`.env.*\` secret files (e.g. in \`~/.hato/\` or Hato's repo).`;
+
+function isEnvFileName(name: string): boolean {
+  return name === ".env" || name.startsWith(".env.");
+}
+
+export function isProtectedEnvPath(targetPath: string): boolean {
+  const normalized = resolve(targetPath);
+  const candidates = [normalized];
+  try {
+    if (existsSync(normalized)) {
+      candidates.push(realpathSync(normalized));
+    }
+  } catch {
+    // ignore realpath errors
+  }
+
+  const protectedRoots = [resolve(process.cwd()), resolve(resolveHatoHomeDir())];
+  for (const candidate of candidates) {
+    if (!isEnvFileName(basename(candidate))) continue;
+    for (const root of protectedRoots) {
+      if (candidate === resolve(root, basename(candidate)) || candidate.startsWith(root + sep)) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+function isCommandReferencingProtectedEnv(command: string, workspaceRoot: string): boolean {
+  const normalizedCmd = command.trim();
+  if (!normalizedCmd) return false;
+  if (!/(?:^|[\s"'`=/])\.env(?:\.[A-Za-z0-9_.-]+)?(?=$|[\s"'`;|&)>])/.test(normalizedCmd)) {
+    return false;
+  }
+  const hatoHome = resolve(resolveHatoHomeDir());
+  const repoRoot = resolve(process.cwd());
+  if (
+    normalizedCmd.includes(".hato") ||
+    normalizedCmd.includes("HATO_HOME") ||
+    normalizedCmd.includes(hatoHome) ||
+    normalizedCmd.includes(repoRoot)
+  ) {
+    return true;
+  }
+  const ws = resolve(workspaceRoot);
+  return ws === repoRoot || ws.startsWith(repoRoot + sep) || ws === hatoHome || ws.startsWith(hatoHome + sep);
+}
 
 const ReadContextParams = obj({
   context_id: str({ description: "Assigned context_id for this ticket" }),
@@ -157,9 +213,14 @@ export class BuiltinPiRunner implements ExecutionRunner {
       },
     });
 
+    const systemPrompt =
+      mandate.execution_mode === "vm_unrestricted"
+        ? WORKER_SYSTEM_PROMPT + VM_UNRESTRICTED_PROMPT_SUFFIX
+        : WORKER_SYSTEM_PROMPT;
+
     const agent = new Agent({
       initialState: {
-        systemPrompt: WORKER_SYSTEM_PROMPT,
+        systemPrompt,
         model: resolved.model,
         thinkingLevel: clampThinkingLevel(resolved.model, resolved.model.reasoning ? "medium" : "off"),
         tools,
@@ -354,11 +415,22 @@ export class BuiltinPiRunner implements ExecutionRunner {
       maxTotalMessages: hatoConfig.context.lookback.max_total_messages,
       maxHours: hatoConfig.context.lookback.max_hours,
     };
+    const isVmUnrestricted = mandate.execution_mode === "vm_unrestricted";
+    mkdirSync(mandate.workspace_dir, { recursive: true });
     const workspaceRoot = realpathSync(mandate.workspace_dir);
 
     const resolveSafeWorkspacePath = (relPath: string): string => {
-      const target = resolve(workspaceRoot, relPath);
-      if (target !== workspaceRoot && !target.startsWith(workspaceRoot + sep)) {
+      const expanded =
+        isVmUnrestricted && (relPath === "~" || relPath.startsWith("~/"))
+          ? relPath === "~"
+            ? homedir()
+            : resolve(homedir(), relPath.slice(2))
+          : relPath;
+      const target = resolve(workspaceRoot, expanded);
+      if (isProtectedEnvPath(target)) {
+        throw new Error(`安全策略禁止访问 Hato 的 .env 密钥文件: "${relPath}"`);
+      }
+      if (!isVmUnrestricted && target !== workspaceRoot && !target.startsWith(workspaceRoot + sep)) {
         throw new Error(`路径越界: "${relPath}" 超出工单工作区边界`);
       }
       return target;
@@ -442,18 +514,23 @@ export class BuiltinPiRunner implements ExecutionRunner {
       {
         name: "run_command",
         label: "执行命令",
-        description: "Execute a shell command inside the ticket workspace.",
+        description: isVmUnrestricted
+          ? "Execute a shell command in the VM working directory with real HOME and PATH."
+          : "Execute a shell command inside the ticket workspace.",
         parameters: RunCommandParams,
         execute: async (_id, input) => {
+          if (isCommandReferencingProtectedEnv(input.command, workspaceRoot)) {
+            throw new Error("安全策略禁止通过命令读取或修改 Hato 的 .env 密钥文件");
+          }
           const proxyEnv =
             mandate.network === "egress" ? this.deps.proxyRouter.getWorkerProxyEnv() : {};
           const { stdout, stderr } = await execFileAsync("sh", ["-lc", input.command], {
             cwd: workspaceRoot,
-            timeout: Math.min(mandate.timeout_ms, 60_000),
+            timeout: isVmUnrestricted ? mandate.timeout_ms : Math.min(mandate.timeout_ms, 60_000),
             maxBuffer: 512 * 1024,
             env: {
               PATH: process.env.PATH ?? "/usr/bin:/bin",
-              HOME: workspaceRoot,
+              HOME: isVmUnrestricted ? homedir() : workspaceRoot,
               ...proxyEnv,
             },
           });

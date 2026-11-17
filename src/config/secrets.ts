@@ -1,11 +1,12 @@
 import dotenv from "dotenv";
+import { resolveDefaultEnvPath } from "./paths.js";
 
 let envLoaded = false;
 
 /**
  * Load .env into process.env once. Only secrets (API keys / bot tokens) should live in .env.
  */
-export function loadSecretEnv(envPath = ".env"): void {
+export function loadSecretEnv(envPath = resolveDefaultEnvPath()): void {
   if (envLoaded) return;
   dotenv.config({ path: envPath, quiet: true });
   envLoaded = true;
@@ -14,7 +15,7 @@ export function loadSecretEnv(envPath = ".env"): void {
 /**
  * Force-reload .env into process.env (used by /reload after secret edits).
  */
-export function reloadSecretEnv(envPath = ".env"): void {
+export function reloadSecretEnv(envPath = resolveDefaultEnvPath()): void {
   dotenv.config({ path: envPath, override: true, quiet: true });
   envLoaded = true;
 }

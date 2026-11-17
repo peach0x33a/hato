@@ -16,6 +16,7 @@ import { loadMcpConfig, type McpConfig } from "./config/mcp.js";
 import { ModelRegistry } from "./config/models.js";
 import { ScopedProxyRouter } from "./config/proxy.js";
 import { getOptionalSecret, loadSecretEnv, reloadSecretEnv, requireSecret } from "./config/secrets.js";
+import { ensureHatoHomeConfig } from "./config/paths.js";
 import { bindQqHomeChannel, bindTelegramHomeChannel, writeHatoConfig } from "./config/store.js";
 import { openDatabase } from "./db/client.js";
 import { HatoRepository } from "./db/repo.js";
@@ -40,12 +41,13 @@ import { WorkerDispatcher } from "./worker/backend.js";
 import { BuiltinPiRunner } from "./worker/builtin-pi.js";
 import { ExternalCliRunner } from "./worker/external-cli.js";
 
-const HATO_CONFIG_PATH = "config/hato.toml";
-const MODELS_CONFIG_PATH = "config/models.toml";
-const MCP_CONFIG_PATH = "config/mcp.toml";
+const APP_PATHS = ensureHatoHomeConfig();
+const HATO_CONFIG_PATH = APP_PATHS.hatoConfigPath;
+const MODELS_CONFIG_PATH = APP_PATHS.modelsConfigPath;
+const MCP_CONFIG_PATH = APP_PATHS.mcpConfigPath;
 
 async function main(): Promise<void> {
-  loadSecretEnv();
+  loadSecretEnv(APP_PATHS.envPath);
 
   let hatoConfig = loadHatoConfig(HATO_CONFIG_PATH);
   setLogTimezone(hatoConfig.owner.timezone);
@@ -807,6 +809,7 @@ async function main(): Promise<void> {
   webConsoleServer = new WebConsoleServer({
     hatoConfigPath: HATO_CONFIG_PATH,
     modelsConfigPath: MODELS_CONFIG_PATH,
+    envPath: APP_PATHS.envPath,
     getConfig: () => hatoConfig,
     getModelRegistry: () => modelRegistry,
     getProxyRouter: () => proxyRouter,

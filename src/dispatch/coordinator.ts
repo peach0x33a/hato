@@ -2,7 +2,12 @@ import { randomBytes } from "node:crypto";
 import { existsSync } from "node:fs";
 import { resolve, sep } from "node:path";
 import type { EventBus } from "../bus/actor-bus.js";
-import { resolveWorkerExternalCliConfig, type HatoConfig } from "../config/app.js";
+import {
+  resolveWorkerExecutionMode,
+  resolveWorkerExternalCliConfig,
+  resolveWorkerVmWorkdir,
+  type HatoConfig,
+} from "../config/app.js";
 import type { HatoRepository } from "../db/repo.js";
 import type { ChannelName, InboundBatch } from "../gateway/types.js";
 import { logError, logInfo, summarizeError } from "../utils/logger.js";
@@ -560,6 +565,23 @@ function buildMandateFromRouterDecision(
   decision: Extract<RouterDecision, { decision: "ticket" }>,
 ): WorkerMandate {
   const extCfg = resolveWorkerExternalCliConfig(cfg);
+  const executionMode = resolveWorkerExecutionMode(cfg);
+
+  if (executionMode === "vm_unrestricted") {
+    const vmWorkdir = resolveWorkerVmWorkdir(cfg);
+    return {
+      workspace_mode: "host_repo",
+      workspace_dir: vmWorkdir,
+      is_host_repo: false,
+      network: "egress",
+      timeout_ms: extCfg.timeoutMs,
+      skills: decision.skills ?? [],
+      allowed_mcp_servers: decision.allowed_mcp_servers ?? [],
+      confirm_before: decision.confirm_before ?? [],
+      execution_mode: "vm_unrestricted",
+    };
+  }
+
   let workspaceDir = resolve(cfg.paths.workspaces_dir, ticketId);
   let isHostRepo = false;
 

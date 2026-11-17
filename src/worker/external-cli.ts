@@ -200,8 +200,11 @@ export class ExternalCliRunner implements ExecutionRunner {
       }
     }
 
+    const isVmUnrestricted = mandate.execution_mode === "vm_unrestricted";
     mkdirSync(mandate.workspace_dir, { recursive: true });
-    const beforeSnapshot = snapshotWorkspaceFiles(mandate.workspace_dir);
+    const beforeSnapshot = isVmUnrestricted
+      ? undefined
+      : snapshotWorkspaceFiles(mandate.workspace_dir);
 
     const selectedSkills = selectWorkerSkills(resolveSkillsDir(hatoConfig), mandate.skills);
     const workerProxyEnv =
@@ -467,6 +470,11 @@ function buildWorkerStartPrompt(params: {
   if (params.skillNames.length > 0 && params.stagedSkillsDir) {
     lines.push(
       `- 本工单已加载 Worker Skills（目录：${params.stagedSkillsDir}）：${params.skillNames.join(", ")}。`,
+    );
+  }
+  if (params.mandate.execution_mode === "vm_unrestricted") {
+    lines.push(
+      "- 当前处于 `vm_unrestricted`（虚拟机全权模式），工作目录为持久目录，可自由读写虚拟机文件与执行命令；但严格禁止读取、修改或泄露 Hato 的 `.env` / `.env.*` 密钥文件（如 `~/.hato/.env` 或 Hato 仓库 `.env`）。",
     );
   }
   if (params.mandate.confirm_before.length > 0) {

@@ -523,6 +523,7 @@ export function SettingsPanel({
   onToast,
 }: SettingsPanelProps) {
   const { theme, setTheme } = useTheme();
+  const [vmConfirmOpen, setVmConfirmOpen] = useState(false);
   const reduceMotion = useReducedMotion();
   const [searchQuery, setSearchQuery] = useState("");
   const [draft, setDraft] = useState<HatoConfig>(() => structuredClone(initialConfig));
@@ -1594,6 +1595,50 @@ export function SettingsPanel({
                 </div>
               </SettingsRow>
               <SettingsRow
+                title="机器独占权"
+                description="默认关闭。开启后 Hato 与 Worker 将获得整机持久工作目录与完整执行权限（仍保留审批机制且严格禁止读取 .env 密钥）"
+              >
+                <Switch
+                  aria-label="机器独占权"
+                  checked={draft.worker.execution_mode === "vm_unrestricted"}
+                  onCheckedChange={(checked) => {
+                    if (checked) {
+                      setVmConfirmOpen(true);
+                    } else {
+                      setDraft((prev) => ({
+                        ...prev,
+                        worker: {
+                          ...prev.worker,
+                          execution_mode: "isolated",
+                        },
+                      }));
+                    }
+                  }}
+                />
+              </SettingsRow>
+              {draft.worker.execution_mode === "vm_unrestricted" ? (
+                <SettingsRow
+                  title="VM 持久工作目录"
+                  description="留空则默认使用当前用户主目录（~）作为持久工作目录"
+                >
+                  <div className="w-full sm:w-56">
+                    <ConsoleInput
+                      value={draft.worker.vm_workdir ?? ""}
+                      placeholder="~"
+                      onChange={(val) =>
+                        setDraft((prev) => ({
+                          ...prev,
+                          worker: {
+                            ...prev.worker,
+                            vm_workdir: val,
+                          },
+                        }))
+                      }
+                    />
+                  </div>
+                </SettingsRow>
+              ) : null}
+              <SettingsRow
                 title="全局权限预设"
                 description="作为各后端选择「跟随全局」时的默认策略；下方可对单个后端单独覆写"
               >
@@ -2517,6 +2562,81 @@ export function SettingsPanel({
               <pre className="max-h-[60vh] overflow-y-auto rounded-xl border border-border/80 bg-muted/40 p-4 font-mono text-xs leading-relaxed whitespace-pre-wrap text-foreground/90 select-text">
                 {formatDiagnosticsReport(diagProbe)}
               </pre>
+            </motion.div>
+          </motion.div>
+        )}
+        {vmConfirmOpen && (
+          <motion.div
+            key="vm-unrestricted-confirm-backdrop"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            transition={{ duration: reduceMotion ? 0 : 0.16, ease: EASE_OUT }}
+            onClick={() => setVmConfirmOpen(false)}
+            className="fixed inset-0 z-50 flex items-center justify-center bg-black/55 p-4 backdrop-blur-xs"
+          >
+            <motion.div
+              role="dialog"
+              aria-modal="true"
+              aria-labelledby="vm-unrestricted-confirm-title"
+              initial={reduceMotion ? { opacity: 0 } : { opacity: 0, y: 10, scale: 0.97 }}
+              animate={{ opacity: 1, y: 0, scale: 1 }}
+              exit={reduceMotion ? { opacity: 0 } : { opacity: 0, y: 8, scale: 0.97 }}
+              transition={reduceMotion ? { duration: 0.1 } : SPRING_PANEL}
+              onClick={(e) => e.stopPropagation()}
+              className="flex w-full max-w-md flex-col gap-4 rounded-2xl border border-border/80 bg-background p-5 shadow-2xl"
+            >
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <h3
+                    id="vm-unrestricted-confirm-title"
+                    className="text-sm font-semibold text-foreground"
+                  >
+                    确认启用「机器独占权」？
+                  </h3>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setVmConfirmOpen(false)}
+                  title="关闭"
+                  aria-label="关闭确认弹窗"
+                  className="inline-flex size-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+                >
+                  <X className="size-3.5" />
+                </button>
+              </div>
+
+              <div className="rounded-xl border border-amber-500/35 bg-amber-500/10 p-3.5 text-xs leading-relaxed text-foreground">
+                <p>启用该模式后，Hato 将会把机器占为所有...这里就是她家了！</p>
+                <p className="mt-1 font-medium">她和她的worker将获得完全权限</p>
+              </div>
+
+              <div className="flex items-center justify-end gap-2">
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={() => setVmConfirmOpen(false)}
+                >
+                  取消
+                </Button>
+                <Button
+                  type="button"
+                  size="sm"
+                  onClick={() => {
+                    setDraft((prev) => ({
+                      ...prev,
+                      worker: {
+                        ...prev.worker,
+                        execution_mode: "vm_unrestricted",
+                      },
+                    }));
+                    setVmConfirmOpen(false);
+                  }}
+                >
+                  确认启用
+                </Button>
+              </div>
             </motion.div>
           </motion.div>
         )}

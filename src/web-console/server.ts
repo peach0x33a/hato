@@ -188,12 +188,29 @@ export class WebConsoleServer {
         const hato = this.deps.getConfig();
         const consoleCfg = resolveWebConsoleConfig(hato);
         const authSecret = getOptionalSecret(consoleCfg.authTokenEnv);
+        const isRoot = typeof process.getuid === "function" && process.getuid() === 0;
+        let inDocker = existsSync("/.dockerenv");
+        if (!inDocker) {
+          try {
+            if (existsSync("/proc/1/cgroup")) {
+              const cgroup = readFileSync("/proc/1/cgroup", "utf8");
+              inDocker = /(docker|containerd|kubepods|podman|lxc)/i.test(cgroup);
+            }
+          } catch {
+            // ignore
+          }
+        }
         sendJson(res, 200, {
           ok: true,
           uptimeSec: Math.round((Date.now() - this.startedAtMs) / 1000),
           telegramEnabled: hato.gateway.telegram.enabled,
           pendingTakeover: this.deps.getBrowserRuntime().isPendingTakeover(),
           authRequired: Boolean(authSecret),
+          runtime: {
+            isRoot,
+            inDocker,
+            showRootWarning: isRoot && !inDocker,
+          },
           console: {
             host: consoleCfg.host,
             port: this.boundPort ?? consoleCfg.port,

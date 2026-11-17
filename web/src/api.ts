@@ -4,6 +4,11 @@ export interface HealthResponse {
   telegramEnabled: boolean;
   pendingTakeover: boolean;
   authRequired: boolean;
+  runtime?: {
+    isRoot: boolean;
+    inDocker: boolean;
+    showRootWarning: boolean;
+  };
   console: {
     host: string;
     port: number;
@@ -244,6 +249,8 @@ export interface HatoConfig {
       | "external-pi"
       | "claude-code";
     routing_mode?: "smart" | "always_default";
+    execution_mode?: "isolated" | "vm_unrestricted";
+    vm_workdir?: string;
     workspace_ttl_days: number;
     sandbox: {
       image: string;

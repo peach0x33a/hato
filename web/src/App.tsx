@@ -1,4 +1,5 @@
 import {
+  AlertTriangle,
   ArrowLeft,
   Bot,
   Compass,
@@ -11,6 +12,7 @@ import {
   PanelLeft,
   RefreshCw,
   Settings,
+  X,
 } from "lucide-react";
 import { AnimatePresence, LayoutGroup, MotionConfig, motion, useReducedMotion } from "motion/react";
 import { ThemeProvider } from "next-themes";
@@ -165,6 +167,7 @@ function ConsoleShell() {
     }
   });
   const [health, setHealth] = useState<HealthResponse | null>(null);
+  const [rootWarningDismissed, setRootWarningDismissed] = useState(false);
   const [healthOffline, setHealthOffline] = useState(false);
   const [pendingTakeover, setPendingTakeover] = useState(false);
   const [configSnap, setConfigSnap] = useState<ConfigSnapshotResponse | null>(null);
@@ -446,6 +449,27 @@ function ConsoleShell() {
           <ThemeToggle variant="circle-blur" />
         </div>
       </header>
+
+      {health?.runtime?.showRootWarning && !rootWarningDismissed ? (
+        <div
+          role="alert"
+          className="flex shrink-0 items-center justify-between gap-3 border-b border-amber-500/35 bg-amber-500/12 px-4 py-2 text-xs text-amber-900 dark:text-amber-200"
+        >
+          <div className="flex items-center gap-2">
+            <AlertTriangle className="size-3.5 shrink-0 text-amber-600 dark:text-amber-400" />
+            <span className="font-medium">使用root用户运行Hato存在未知的风险</span>
+          </div>
+          <button
+            type="button"
+            onClick={() => setRootWarningDismissed(true)}
+            title="关闭提示"
+            aria-label="关闭 root 风险提示"
+            className="inline-flex size-6 shrink-0 items-center justify-center rounded-md text-amber-800/80 transition-colors hover:bg-amber-500/20 hover:text-amber-950 dark:text-amber-200/80 dark:hover:text-amber-50"
+          >
+            <X className="size-3.5" />
+          </button>
+        </div>
+      ) : null}
 
       <div className="relative flex min-h-0 flex-1 overflow-hidden">
         <motion.div

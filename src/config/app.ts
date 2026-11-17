@@ -1,4 +1,5 @@
 import { existsSync, readFileSync } from "node:fs";
+import { homedir } from "node:os";
 import { resolve } from "node:path";
 import { Type, type Static } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
@@ -214,6 +215,10 @@ export const HatoConfigSchema = Type.Object({
     routing_mode: Type.Optional(
       Type.Union([Type.Literal("smart"), Type.Literal("always_default")]),
     ),
+    execution_mode: Type.Optional(
+      Type.Union([Type.Literal("isolated"), Type.Literal("vm_unrestricted")]),
+    ),
+    vm_workdir: Type.Optional(Type.String()),
     workspace_ttl_days: Type.Number({ minimum: 1 }),
     sandbox: Type.Object({
       image: Type.String({ minLength: 1 }),
@@ -603,6 +608,26 @@ export function resolveExternalCliCustomEnv(config: HatoConfig): Record<string, 
     out[key] = v;
   }
   return out;
+}
+
+/**
+ * Resolve worker execution mode: "isolated" (default per-ticket sandbox) or "vm_unrestricted".
+ */
+export function resolveWorkerExecutionMode(config: HatoConfig): "isolated" | "vm_unrestricted" {
+  return config.worker.execution_mode === "vm_unrestricted" ? "vm_unrestricted" : "isolated";
+}
+
+/**
+ * Resolve persistent working directory for `vm_unrestricted` mode (defaults to user home).
+ */
+export function resolveWorkerVmWorkdir(config: HatoConfig): string {
+  const raw = config.worker.vm_workdir?.trim();
+  if (!raw) return homedir();
+  if (raw === "~") return homedir();
+  if (raw.startsWith("~/") || raw.startsWith("~\\")) {
+    return resolve(homedir(), raw.slice(2));
+  }
+  return resolve(raw);
 }
 
 /**
