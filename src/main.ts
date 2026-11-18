@@ -1,4 +1,4 @@
-import { basename } from "node:path";
+import { basename, resolve } from "node:path";
 import { ActorLock, EventBus } from "./bus/actor-bus.js";
 import { BrowserRuntime } from "./browser/runtime.js";
 import { tryHandleSlashCommand } from "./commands/slash.js";
@@ -20,6 +20,11 @@ import { ensureHatoHomeConfig } from "./config/paths.js";
 import { bindQqHomeChannel, bindTelegramHomeChannel, writeHatoConfig } from "./config/store.js";
 import { openDatabase } from "./db/client.js";
 import { HatoRepository } from "./db/repo.js";
+import {
+  filterPendingAutoArtifacts,
+  formatTicketArtifactPromptHint,
+  partitionTicketArtifacts,
+} from "./dispatch/artifact-delivery.js";
 import { TicketCoordinator } from "./dispatch/coordinator.js";
 import { NeutralRouter } from "./dispatch/router.js";
 import { parseWorkerMandate } from "./dispatch/schema.js";
@@ -248,6 +253,8 @@ async function main(): Promise<void> {
     return tgAdapter && tgTargetId ? { channel: "tg", adapter: tgAdapter, targetId: tgTargetId } : null;
   };
 
+  const narrationSentFilesByTarget = new Map<string, Set<string>>();
+
   personaRuntime.setSendFileHandler(async ({ channel, strictChannel, path, caption }) => {
     if (channel === "web") {
       return {
@@ -265,6 +272,7 @@ async function main(): Promise<void> {
       };
     }
     await outbound.adapter.sendFile(outbound.targetId, path, basename(path), caption);
+    narrationSentFilesByTarget.get(`${outbound.channel}:${outbound.targetId}`)?.add(resolve(path));
     return {
       ok: true,
       message: `已发送文件到 ${outbound.channel.toUpperCase()}: ${basename(path)}`,
@@ -319,6 +327,9 @@ async function main(): Promise<void> {
         };
       }
       await outbound.adapter.sendFile(outbound.targetId, filePath, basename(filePath), caption);
+      narrationSentFilesByTarget
+        .get(`${outbound.channel}:${outbound.targetId}`)
+        ?.add(resolve(filePath));
       sentParts.push(`文件 ${basename(filePath)}`);
     }
 
@@ -733,18 +744,36 @@ async function main(): Promise<void> {
         result.required_secrets.length > 0
           ? `\n所需环境变量密钥（勿发聊天窗口，请在 .env 配置）：${result.required_secrets.join(", ")}`
           : "";
-      const artifactNames =
-        result.artifacts.length > 0
-          ? `\n生成文件（如需发给用户可调用 send_file）：${result.artifacts.map((a) => `${a.filename} (${a.path})`).join(", ")}`
-          : "";
+      const ticketRow = repo.getTicket(result.ticket_id);
+      const deliverFiles = Boolean(
+        parseWorkerMandate(ticketRow?.mandateJson ?? null)?.deliver_files,
+      );
+      const artifactPartition = partitionTicketArtifacts({
+        artifacts: result.artifacts,
+        canAutoSend: Boolean(outbound?.adapter.sendFile),
+        deliverFiles,
+      });
+      const artifactNames = formatTicketArtifactPromptHint(artifactPartition);
       const summary = `[工单 ${result.ticket_id} · ${briefTitle}] (${result.status}): ${result.narration_hint}${caveatText}${secretsNote}`;
 
-      const bubbles = await personaRuntime.narrateBackgroundEvent({
-        canonicalUserId,
-        channel: deliveryChannel,
-        eventSummary: summary,
-        promptInstruction: `[系统事件：后台任务 "${briefTitle}" (${result.ticket_id}) 已结束，状态=${result.status}。请用自然日常口吻直接告诉用户结果要点（除非出错或用户要求，不要主动报工单号，也不要倾倒冗长执行日志）：${result.narration_hint}${artifactNames}${caveatText}${secretsNote}]`,
-      });
+      const narrationKey = outbound ? `${outbound.channel}:${outbound.targetId}` : null;
+      const sentDuringNarration = new Set<string>();
+      if (narrationKey) {
+        narrationSentFilesByTarget.set(narrationKey, sentDuringNarration);
+      }
+      let bubbles: string[];
+      try {
+        bubbles = await personaRuntime.narrateBackgroundEvent({
+          canonicalUserId,
+          channel: deliveryChannel,
+          eventSummary: summary,
+          promptInstruction: `[系统事件：后台任务 "${briefTitle}" (${result.ticket_id}) 已结束，状态=${result.status}。请用自然日常口吻直接告诉用户结果要点（除非出错或用户要求，不要主动报工单号，也不要倾倒冗长执行日志）：${result.narration_hint}${artifactNames}${caveatText}${secretsNote}]`,
+        });
+      } finally {
+        if (narrationKey) {
+          narrationSentFilesByTarget.delete(narrationKey);
+        }
+      }
       if (outbound) {
         await outbound.adapter.sendBubbles(
           outbound.targetId,
@@ -771,12 +800,12 @@ async function main(): Promise<void> {
           await outbound.adapter.sendText(outbound.targetId, text);
         }
       }
-      const ticketRow = repo.getTicket(result.ticket_id);
-      const deliverFiles = Boolean(
-        parseWorkerMandate(ticketRow?.mandateJson ?? null)?.deliver_files,
-      );
-      for (const artifact of result.artifacts) {
-        if (outbound?.adapter.sendFile && (artifact.send_as === "photo" || deliverFiles)) {
+      const pendingArtifacts = filterPendingAutoArtifacts({
+        autoDelivered: artifactPartition.autoDelivered,
+        sentPaths: sentDuringNarration,
+      });
+      for (const artifact of pendingArtifacts) {
+        if (outbound?.adapter.sendFile) {
           await outbound.adapter
             .sendFile(outbound.targetId, artifact.path, artifact.filename)
             .catch((err) => {

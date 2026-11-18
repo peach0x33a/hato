@@ -133,7 +133,7 @@ const DelegateParams = obj({
   deliver_files: opt(
     bool({
       description:
-        "Set true when the user wants generated files sent back to chat automatically upon completion; otherwise leave false.",
+        "Per-task delivery mode for generated files/images: false (default) lets you decide whether, when, and in what message order to send them via send_file/send_message after completion; true makes the system automatically send all generated artifacts right after your completion reply.",
     }),
   ),
 });
