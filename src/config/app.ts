@@ -5,6 +5,7 @@ import { Type, type Static } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
 import { parse as parseToml } from "smol-toml";
 import type { RetryPolicyConfig } from "../utils/retry.js";
+import { DEFAULT_LLM_RETRY_CONFIG, type LlmRetryConfig } from "../utils/llm-retry.js";
 
 export const ProxyRuleSchema = Type.Object({
   name: Type.String({ minLength: 1 }),
@@ -18,6 +19,15 @@ export const RetryPolicySchema = Type.Object({
   backoff_multiplier: Type.Number({ minimum: 1 }),
   max_delay_ms: Type.Number({ minimum: 0 }),
   jitter: Type.Boolean(),
+});
+
+export const LlmRetryPolicySchema = Type.Object({
+  max_retries: Type.Optional(Type.Number({ minimum: 0, maximum: 10 })),
+  initial_delay_ms: Type.Optional(Type.Number({ minimum: 0 })),
+  backoff_multiplier: Type.Optional(Type.Number({ minimum: 1 })),
+  max_delay_ms: Type.Optional(Type.Number({ minimum: 0 })),
+  jitter: Type.Optional(Type.Boolean()),
+  notify_after_retry: Type.Optional(Type.Number({ minimum: 0, maximum: 10 })),
 });
 
 export const TavilySearchConfigSchema = Type.Object({
@@ -107,6 +117,7 @@ export const HatoConfigSchema = Type.Object({
       proxies: Type.Optional(Type.Array(ProxyRuleSchema)),
     }),
   ),
+  llm_retry: Type.Optional(LlmRetryPolicySchema),
   web: Type.Optional(
     Type.Object({
       search: Type.Optional(TavilySearchConfigSchema),
@@ -377,6 +388,21 @@ export function resolveGatewayRetryConfig(config: HatoConfig): RetryPolicyConfig
     backoffMultiplier: retry?.backoff_multiplier ?? 2,
     maxDelayMs: retry?.max_delay_ms ?? 8000,
     jitter: retry?.jitter ?? true,
+  };
+}
+
+/**
+ * Resolve effective LLM call retry & exponential backoff config with safe defaults (5 retries, notify on 3rd).
+ */
+export function resolveLlmRetryConfig(config: HatoConfig): LlmRetryConfig {
+  const retry = config.llm_retry;
+  return {
+    maxRetries: retry?.max_retries ?? DEFAULT_LLM_RETRY_CONFIG.maxRetries,
+    initialDelayMs: retry?.initial_delay_ms ?? DEFAULT_LLM_RETRY_CONFIG.initialDelayMs,
+    backoffMultiplier: retry?.backoff_multiplier ?? DEFAULT_LLM_RETRY_CONFIG.backoffMultiplier,
+    maxDelayMs: retry?.max_delay_ms ?? DEFAULT_LLM_RETRY_CONFIG.maxDelayMs,
+    jitter: retry?.jitter ?? DEFAULT_LLM_RETRY_CONFIG.jitter,
+    notifyAfterRetry: retry?.notify_after_retry ?? DEFAULT_LLM_RETRY_CONFIG.notifyAfterRetry,
   };
 }
 

@@ -12,6 +12,7 @@ import {
 } from "@earendil-works/pi-ai";
 import type { BrowserRuntime, SendPhotoToUserFn } from "../browser/runtime.js";
 import {
+  resolveLlmRetryConfig,
   resolveMemoryRecallConfig,
   resolvePromptDisabled,
   resolvePromptOrder,
@@ -30,6 +31,11 @@ import {
   type SkillEntry,
 } from "../skills/loader.js";
 import { computeTurnMetrics, extractTraceSteps, formatLlmTelemetryLog } from "../stats/metrics.js";
+import {
+  formatLlmRetryNotice,
+  streamSimpleWithRetry,
+  type LlmRetryNotice,
+} from "../utils/llm-retry.js";
 import { logWarn } from "../utils/logger.js";
 import { joinPersistedBubbles, splitIntoBubbles } from "./bubbles.js";
 import {
@@ -87,6 +93,7 @@ export class PersonaRuntime {
   private lastTimeCardSnapshot = "";
   private activeCallStartPerf: number | null = null;
   private activeBeforeToolHook: ((toolName: string, input: unknown) => Promise<void>) | null = null;
+  private activeRetryNoticeHook: ((notice: LlmRetryNotice) => Promise<void>) | null = null;
   private activeTurnRecalledMemories: MemoryRecallItem[] = [];
   private activeTurnRecalledIds = new Set<string>();
   private activeTurn: ActivePersonaTurnState | null = null;
@@ -167,16 +174,29 @@ export class PersonaRuntime {
       sessionId: canonicalUserId,
       getApiKey: (provider) => this.modelRegistry.resolveApiKeyForProvider(provider),
       streamFn: (model, context, options) => {
-        this.activeCallStartPerf = performance.now();
         const scopedFetch: typeof globalThis.fetch = (input, init) =>
           this.proxyRouter.scopedFetch(input, init, `llm-calling.${model.provider}`);
-        return this.proxyRouter.runWithScope(`llm-calling.${model.provider}`, () =>
-          Promise.resolve(
-            this.modelRegistry.models.streamSimple(model, context, {
-              ...options,
-              ...(supportsCustomFetchOption(model.api) ? { fetch: scopedFetch } : {}),
-            }),
-          ),
+        return streamSimpleWithRetry(
+          () => {
+            this.activeCallStartPerf = performance.now();
+            return this.proxyRouter.runWithScope(`llm-calling.${model.provider}`, () =>
+              Promise.resolve(
+                this.modelRegistry.models.streamSimple(model, context, {
+                  ...options,
+                  ...(supportsCustomFetchOption(model.api) ? { fetch: scopedFetch } : {}),
+                }),
+              ),
+            );
+          },
+          {
+            policy: resolveLlmRetryConfig(this.hatoConfig),
+            signal: options?.signal,
+            model,
+            slot: "PERSONA",
+            onRetryNotice: async (notice) => {
+              await this.activeRetryNoticeHook?.(notice);
+            },
+          },
         );
       },
       transformContext: async (messages) => {
@@ -560,6 +580,7 @@ export class PersonaRuntime {
     options?: {
       sendPhotoToUser?: SendPhotoToUserFn;
       sendBubblesToUser?: (bubbles: string[]) => Promise<void>;
+      onRetryNotice?: (message: string, notice: LlmRetryNotice) => Promise<void>;
       shouldSuppressSend?: () => boolean;
     },
   ): Promise<PersonaTurnOutput> {
@@ -748,6 +769,17 @@ export class PersonaRuntime {
     this.activeTurnRecalledMemories = [];
     this.activeTurnRecalledIds.clear();
 
+    let retryNoticeSent = false;
+    this.activeRetryNoticeHook = options?.onRetryNotice
+      ? async (notice) => {
+          if (retryNoticeSent || turnState.abortedForSupersede || options?.shouldSuppressSend?.()) {
+            return;
+          }
+          retryNoticeSent = true;
+          await options.onRetryNotice!(formatLlmRetryNotice(notice), notice);
+        }
+      : null;
+
     const recallCfg = resolveMemoryRecallConfig(this.hatoConfig);
     if (
       (recallCfg.mode === "auto" || recallCfg.mode === "hybrid") &&
@@ -789,6 +821,7 @@ export class PersonaRuntime {
     } finally {
       turnState.promptSettled = true;
       this.activeBeforeToolHook = null;
+      this.activeRetryNoticeHook = null;
       this.browserRuntime?.setPhotoSender(null);
       unsubscribe();
       this.activeCallStartPerf = null;
@@ -1076,15 +1109,23 @@ export class PersonaRuntime {
     const callStartPerf = performance.now();
     let firstDeltaPerf: number | null = null;
     const result = await this.proxyRouter.runWithScope(`llm-calling.${resolved.providerSlug}`, async () => {
-      const stream = this.modelRegistry.models.streamSimple(
-        resolved.model,
-        { systemPrompt, messages: llmMessages },
+      const stream = streamSimpleWithRetry(
+        () =>
+          this.modelRegistry.models.streamSimple(
+            resolved.model,
+            { systemPrompt, messages: llmMessages },
+            {
+              apiKey,
+              sessionId: params.canonicalUserId,
+              disableContinuation: true,
+              ...(supportsCustomFetchOption(resolved.model.api) ? { fetch: scopedFetch } : {}),
+              reasoning: resolved.model.reasoning ? "minimal" : undefined,
+            },
+          ),
         {
-          apiKey,
-          sessionId: params.canonicalUserId,
-          disableContinuation: true,
-          ...(supportsCustomFetchOption(resolved.model.api) ? { fetch: scopedFetch } : {}),
-          reasoning: resolved.model.reasoning ? "minimal" : undefined,
+          policy: resolveLlmRetryConfig(this.hatoConfig),
+          model: resolved.model,
+          slot: "COMPACTION",
         },
       );
       for await (const ev of stream) {

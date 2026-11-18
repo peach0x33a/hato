@@ -10,6 +10,7 @@ import {
 } from "../config/app.js";
 import { resolveMcpServerEntries, type McpConfig } from "../config/mcp.js";
 import { supportsCustomFetchOption, type ModelRegistry } from "../config/models.js";
+import { streamSimpleWithRetry } from "../utils/llm-retry.js";
 import type { ScopedProxyRouter } from "../config/proxy.js";
 import type { HatoRepository, RawMessageRecord } from "../db/repo.js";
 import type { MemoryStore } from "../memory/store.js";
@@ -233,14 +234,21 @@ export class NeutralRouter {
       async () => {
         const scopedFetch: typeof globalThis.fetch = (input, init) =>
           this.deps.proxyRouter.scopedFetch(input, init, `llm-calling.${resolved.model.provider}`);
-        const stream = this.deps.modelRegistry.models.streamSimple(
-          resolved.model,
-          { systemPrompt, messages },
+        const stream = streamSimpleWithRetry(
+          () =>
+            this.deps.modelRegistry.models.streamSimple(
+              resolved.model,
+              { systemPrompt, messages },
+              {
+                apiKey: this.deps.modelRegistry.resolveApiKeyForProvider(resolved.model.provider),
+                disableContinuation: true,
+                ...(supportsCustomFetchOption(resolved.model.api) ? { fetch: scopedFetch } : {}),
+                reasoning: resolved.model.reasoning ? "minimal" : undefined,
+              },
+            ),
           {
-            apiKey: this.deps.modelRegistry.resolveApiKeyForProvider(resolved.model.provider),
-            disableContinuation: true,
-            ...(supportsCustomFetchOption(resolved.model.api) ? { fetch: scopedFetch } : {}),
-            reasoning: resolved.model.reasoning ? "minimal" : undefined,
+            model: resolved.model,
+            slot: "ROUTER",
           },
         );
         for await (const ev of stream) {

@@ -7,6 +7,7 @@ import {
   type ResolvedMemoryCuratorConfig,
 } from "../config/app.js";
 import { supportsCustomFetchOption, type ModelRegistry } from "../config/models.js";
+import { streamSimpleWithRetry } from "../utils/llm-retry.js";
 import type { ScopedProxyRouter } from "../config/proxy.js";
 import type {
   HatoRepository,
@@ -551,15 +552,22 @@ export class MemoryCurator {
     const callStartPerf = performance.now();
     let firstDeltaPerf: number | null = null;
     const result = await this.proxyRouter.runWithScope(`llm-calling.${resolved.providerSlug}`, async () => {
-      const stream = this.modelRegistry.models.streamSimple(
-        resolved.model,
-        { systemPrompt: this.curatorPrompt, messages: llmMessages },
+      const stream = streamSimpleWithRetry(
+        () =>
+          this.modelRegistry.models.streamSimple(
+            resolved.model,
+            { systemPrompt: this.curatorPrompt, messages: llmMessages },
+            {
+              apiKey,
+              sessionId: `${canonicalUserId}:curator`,
+              disableContinuation: true,
+              ...(supportsCustomFetchOption(resolved.model.api) ? { fetch: scopedFetch } : {}),
+              reasoning: resolved.model.reasoning ? "minimal" : undefined,
+            },
+          ),
         {
-          apiKey,
-          sessionId: `${canonicalUserId}:curator`,
-          disableContinuation: true,
-          ...(supportsCustomFetchOption(resolved.model.api) ? { fetch: scopedFetch } : {}),
-          reasoning: resolved.model.reasoning ? "minimal" : undefined,
+          model: resolved.model,
+          slot: "CURATOR",
         },
       );
       for await (const ev of stream) {

@@ -9,6 +9,7 @@ import { arr, num, obj, opt, oneOf, str } from "@earendil-works/pi-schema";
 import { resolveSkillsDir, type HatoConfig } from "../config/app.js";
 import { resolveHatoHomeDir } from "../config/paths.js";
 import { supportsCustomFetchOption, type ModelRegistry } from "../config/models.js";
+import { streamSimpleWithRetry } from "../utils/llm-retry.js";
 import type { ScopedProxyRouter } from "../config/proxy.js";
 import type { HatoRepository } from "../db/repo.js";
 import { expandEarlierContext, readTaskContext } from "../dispatch/context-slice.js";
@@ -231,13 +232,21 @@ export class BuiltinPiRunner implements ExecutionRunner {
       streamFn: (model, context, options) => {
         const scopedFetch: typeof globalThis.fetch = (input, init) =>
           this.deps.proxyRouter.scopedFetch(input, init, `llm-calling.${model.provider}`);
-        return this.deps.proxyRouter.runWithScope(`llm-calling.${model.provider}`, () =>
-          Promise.resolve(
-            this.deps.modelRegistry.models.streamSimple(model, context, {
-              ...options,
-              ...(supportsCustomFetchOption(model.api) ? { fetch: scopedFetch } : {}),
-            }),
-          ),
+        return streamSimpleWithRetry(
+          () =>
+            this.deps.proxyRouter.runWithScope(`llm-calling.${model.provider}`, () =>
+              Promise.resolve(
+                this.deps.modelRegistry.models.streamSimple(model, context, {
+                  ...options,
+                  ...(supportsCustomFetchOption(model.api) ? { fetch: scopedFetch } : {}),
+                }),
+              ),
+            ),
+          {
+            signal: options?.signal,
+            model,
+            slot: "WORKER",
+          },
         );
       },
     });

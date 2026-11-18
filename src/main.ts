@@ -646,6 +646,11 @@ async function main(): Promise<void> {
             );
             await adapter.sendTyping?.(targetId).catch(() => undefined);
           },
+          onRetryNotice: async (noticeText) => {
+            if (hasNewerQueuedInput()) return;
+            await adapter.sendText(targetId, noticeText).catch(() => undefined);
+            await adapter.sendTyping?.(targetId).catch(() => undefined);
+          },
         });
         bubblesToSend = output.bubbles;
         superseded = output.superseded;

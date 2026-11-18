@@ -1,8 +1,9 @@
 import { Agent, type AgentTool } from "@earendil-works/pi-agent-core";
 import { clampThinkingLevel, type AssistantMessage, type Usage } from "@earendil-works/pi-ai";
 import { bool, num, obj, oneOf, opt, str } from "@earendil-works/pi-schema";
-import { resolveWebBrowserConfig, type HatoConfig } from "../config/app.js";
+import { resolveLlmRetryConfig, resolveWebBrowserConfig, type HatoConfig } from "../config/app.js";
 import { supportsCustomFetchOption, type ModelRegistry } from "../config/models.js";
+import { streamSimpleWithRetry } from "../utils/llm-retry.js";
 import type { ScopedProxyRouter } from "../config/proxy.js";
 import type { HatoRepository } from "../db/repo.js";
 import { computeTurnMetrics, extractTraceSteps } from "../stats/metrics.js";
@@ -451,16 +452,26 @@ export class BrowserRuntime {
       },
       getApiKey: (provider) => this.modelRegistry.resolveApiKeyForProvider(provider),
       streamFn: (model, context, streamOpts) => {
-        activeCallStartPerf = performance.now();
         const scopedFetch: typeof globalThis.fetch = (reqInput, reqInit) =>
           this.proxyRouter.scopedFetch(reqInput, reqInit, `llm-calling.${model.provider}`);
-        return this.proxyRouter.runWithScope(`llm-calling.${model.provider}`, () =>
-          Promise.resolve(
-            this.modelRegistry.models.streamSimple(model, context, {
-              ...streamOpts,
-              ...(supportsCustomFetchOption(model.api) ? { fetch: scopedFetch } : {}),
-            }),
-          ),
+        return streamSimpleWithRetry(
+          () => {
+            activeCallStartPerf = performance.now();
+            return this.proxyRouter.runWithScope(`llm-calling.${model.provider}`, () =>
+              Promise.resolve(
+                this.modelRegistry.models.streamSimple(model, context, {
+                  ...streamOpts,
+                  ...(supportsCustomFetchOption(model.api) ? { fetch: scopedFetch } : {}),
+                }),
+              ),
+            );
+          },
+          {
+            policy: resolveLlmRetryConfig(this.hatoConfig),
+            signal: streamOpts?.signal,
+            model,
+            slot: "BROWSER",
+          },
         );
       },
     });

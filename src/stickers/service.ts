@@ -5,6 +5,7 @@ import { type AssistantMessage, type TextContent } from "@earendil-works/pi-ai";
 import type { HatoConfig } from "../config/app.js";
 import type { ModelRegistry } from "../config/models.js";
 import type { ScopedProxyRouter } from "../config/proxy.js";
+import { completeSimpleWithRetry } from "../utils/llm-retry.js";
 import {
   convertBufferToModelImage,
   selectTelegramStickerDownloadCandidates,
@@ -414,27 +415,31 @@ export class StickerService {
     const message: AssistantMessage = await proxyRouter.runWithScope(
       `llm-calling.${resolved.providerSlug}`,
       () =>
-        registry.models.completeSimple(
-          resolved.model,
-          {
-            systemPrompt: VISION_TAGGER_SYSTEM_PROMPT,
-            messages: [
+        completeSimpleWithRetry(
+          () =>
+            registry.models.completeSimple(
+              resolved.model,
               {
-                role: "user",
-                timestamp: Date.now(),
-                content: [
+                systemPrompt: VISION_TAGGER_SYSTEM_PROMPT,
+                messages: [
                   {
-                    type: "text",
-                    text: hintLines
-                      ? `请标注这张表情包：\n${hintLines}`
-                      : "请标注这张表情包。",
+                    role: "user",
+                    timestamp: Date.now(),
+                    content: [
+                      {
+                        type: "text",
+                        text: hintLines
+                          ? `请标注这张表情包：\n${hintLines}`
+                          : "请标注这张表情包。",
+                      },
+                      imgContent,
+                    ],
                   },
-                  imgContent,
                 ],
               },
-            ],
-          },
-          { apiKey },
+              { apiKey },
+            ),
+          { slot: "STICKER" },
         ),
     );
 

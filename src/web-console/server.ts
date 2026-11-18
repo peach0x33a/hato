@@ -860,6 +860,9 @@ export class WebConsoleServer {
             }
             emit({ type: "early_bubbles", bubbles: earlyBubbles });
           },
+          onRetryNotice: async (noticeText) => {
+            emit({ type: "early_bubbles", bubbles: [noticeText] });
+          },
         });
 
         for (const bubble of output.bubbles) {
