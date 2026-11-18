@@ -152,7 +152,7 @@ export function FunctionSlotsPanel({
       </div>
 
       {/* Desktop Routing Table */}
-      <div className="hidden overflow-x-auto md:block">
+      <div className="hidden md:block">
         <table className="w-full border-collapse text-left text-xs">
           <thead>
             <tr className="border-b border-zinc-200/80 text-zinc-500 dark:border-zinc-800/80 dark:text-zinc-400">
