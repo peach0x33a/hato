@@ -60,23 +60,27 @@ Telegram / Web Console
 - **Node.js** `>= 22.0.0`
 - 如需本地编译 `better-sqlite3` 原生模块：macOS 需安装 Xcode Command Line Tools，Linux 需安装 `python3`、`make` 与 `g++`。
 
-### 方式一：使用安装脚本（推荐）
+### 方式一：一键安装（推荐）
 
-从 [Releases](https://github.com/peach0x33a/hato/releases) 下载发行包并解压（或直接克隆本仓库），运行安装脚本：
+自动拉取最新发行版、安装依赖、初始化 `~/.hato/` 并注册 `hato` 命令：
 
 ```bash
 # 标准安装
-bash scripts/install.sh
+curl -fsSL https://raw.githubusercontent.com/peach0x33a/hato/main/scripts/install.sh | bash
 
 # 中国大陆网络环境（仅在本次安装进程临时启用 npmmirror 镜像源，不修改全局 ~/.npmrc）
-bash scripts/install.sh --cn
+curl -fsSL https://raw.githubusercontent.com/peach0x33a/hato/main/scripts/install.sh | bash -s -- --cn
 ```
+
+若已下载发行包或克隆源码，也可在项目目录内直接执行 `bash scripts/install.sh`（或加 `--cn`）。
 
 <details>
 <summary>安装脚本常用参数</summary>
 
 - `--cn` / `--mirror`：临时启用中国镜像源（`npmmirror`）
-- `--dir <path>`：安装到指定目录（默认在当前目录就地安装）
+- `--dir <path>`：指定安装目录（`curl` 远程安装默认 `~/.local/share/hato`）
+- `--version <tag>`：指定发行版标签（如 `v0.1.0`）
+- `--release-url <base_url>`：自定义发行版下载基础 URL
 - `--with-playwright`：同时安装 Playwright Chromium 内核
 - `--skip-setup`：跳过安装完成后的配置向导
 - `--no-bin`：不在 `~/.local/bin/hato` 创建快捷启动脚本
@@ -139,3 +143,32 @@ hato              # 启动服务
 - `/forget <关键词>`：按关键词级联遗忘长期记忆
 
 </details>
+
+---
+
+## 🤖 For LLM
+
+<details>
+<summary>展开查看 AI Coding Agent / LLM 上下文与安装指导</summary>
+
+### 仓库概览与约束
+- **核心定位**：Node.js (`>=22`) + TypeScript (ESM `NodeNext`) 编写的 1v1 个人助手；前端控制台位于 `web/`（React 19 + Vite + Tailwind CSS v4）。
+- **关键入口**：
+  - `src/cli/hato.ts`：全局 CLI 入口（`hato [start|setup|statics]`），启动前切换 `cwd` 至包根目录。
+  - `src/main.ts`：主运行时（Gateway、EventBus/ActorLock、Persona、Router、Worker、Memory、Web Console）。
+  - `src/web-console/server.ts`：内置 Web Console HTTP/SSE 服务（默认 `127.0.0.1:3820`）。
+- **核心架构约束（修改代码时需遵守）**：
+  - **三道墙隔离**：`src/persona/` 不得获得宿主机执行权限；`src/dispatch/`（Neutral Router）只圈定 `[from_msg_id .. to_msg_id]` 与签发 `context_id`，不向 Worker 泄露 `prompts/persona.md` 与情感记忆；`src/worker/` 通过 `context_id` 按需拉取原文切片。
+  - **双区隔离**：Skills 与 MCP 严格区分 `personal` / `worker` 区，外部 CLI 通过 Overlay 隔离个人凭据。
+- **配置与数据路径**：运行时配置统一位于 `~/.hato/`（可由 `HATO_HOME` 覆盖），包含 `hato.toml`、`models.toml`、`mcp.toml`、`.env`；持久化使用 SQLite + Drizzle ORM（`src/db/`）。
+- **校验命令**：修改后依次执行 `npm run typecheck`、`npm test`、`npm run build:web && npm run build`。详细设计见 [docs/architecture.md](docs/architecture.md)。
+
+### 自动化安装指导（供 Agent 为用户部署时参考）
+1. **前置检查**：确认 `node -v` `>= 22.0.0` 且存在 `npm`；若需非交互安装，传入 `--skip-setup`。
+2. **执行安装**：
+   - 预编译发行版一键安装：`curl -fsSL https://raw.githubusercontent.com/peach0x33a/hato/main/scripts/install.sh | bash -s -- --skip-setup`（中国大陆环境追加 `--cn`）。
+   - 本地源码目录安装：`npm ci && npm --prefix web ci && npm run build:web && npm run build && npm link`。
+3. **配置与启动**：提示用户运行 `hato setup`（或编辑 `~/.hato/` 下的 `hato.toml`、`models.toml`、`.env`），随后运行 `hato` 启动服务。
+
+</details>
+

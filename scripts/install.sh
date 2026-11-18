@@ -1,32 +1,47 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Hato 安装脚本（支持临时启用中国镜像源，不修改全局 npm 配置）
+# Hato 安装脚本（支持 curl 一键安装、本地源码/发行包安装，以及临时启用中国镜像源）
 
 CN_MIRROR="${HATO_CN_MIRROR:-0}"
 TARGET_DIR=""
+VERSION="${HATO_VERSION:-}"
+RELEASE_BASE_URL="${HATO_RELEASE_BASE_URL:-}"
 SKIP_SETUP=0
 WITH_PLAYWRIGHT=0
 INSTALL_BIN=1
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SOURCE_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+REPO_SLUG="peach0x33a/hato"
+DEFAULT_INSTALL_DIR="${HOME}/.local/share/hato"
+
+SCRIPT_PATH="${BASH_SOURCE[0]:-}"
+SOURCE_ROOT=""
+if [[ -n "$SCRIPT_PATH" && -f "$SCRIPT_PATH" ]]; then
+  SCRIPT_DIR="$(cd "$(dirname "$SCRIPT_PATH")" && pwd)"
+  SOURCE_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+fi
 
 usage() {
   cat <<'EOF'
-用法: bash scripts/install.sh [选项]
+用法:
+  bash scripts/install.sh [选项]
+  curl -fsSL https://raw.githubusercontent.com/peach0x33a/hato/main/scripts/install.sh | bash -s -- [选项]
 
 选项:
-  --cn, --mirror       临时使用中国镜像源 (npmmirror) 安装依赖，不修改全局 ~/.npmrc
-  --dir <path>         将 Hato 安装/复制到指定目录（默认在当前项目/发行包目录就地安装）
-  --with-playwright    同时安装 Playwright Chromium 浏览器内核
-  --skip-setup         跳过安装后的交互式配置向导 (setup)
-  --no-bin             不在 ~/.local/bin/hato 创建快捷启动脚本
-  -h, --help           显示此帮助信息
+  --cn, --mirror            临时使用中国镜像源 (npmmirror) 安装依赖，不修改全局 ~/.npmrc
+  --dir <path>              指定安装目标目录（curl 安装默认 ~/.local/share/hato）
+  --version <tag>           指定要下载的发行版标签（如 v0.1.0，默认获取 latest）
+  --release-url <base_url>  自定义发行版下载基础 URL（可用于镜像加速）
+  --with-playwright         同时安装 Playwright Chromium 浏览器内核
+  --skip-setup              跳过安装后的交互式配置向导 (setup)
+  --no-bin                  不在 ~/.local/bin/hato 创建快捷启动脚本
+  -h, --help                显示此帮助信息
 
 环境变量:
-  HATO_CN_MIRROR=1     等效于 --cn
-  HATO_HOME=<path>     自定义配置与数据目录（默认 ~/.hato）
+  HATO_CN_MIRROR=1          等效于 --cn
+  HATO_VERSION=<tag>        等效于 --version
+  HATO_RELEASE_BASE_URL     等效于 --release-url
+  HATO_HOME=<path>          自定义配置与数据目录（默认 ~/.hato）
 EOF
 }
 
@@ -47,6 +62,22 @@ while [[ $# -gt 0 ]]; do
         exit 1
       fi
       TARGET_DIR="$2"
+      shift 2
+      ;;
+    --version)
+      if [[ $# -lt 2 ]]; then
+        log_err "--version 需要指定版本号"
+        exit 1
+      fi
+      VERSION="$2"
+      shift 2
+      ;;
+    --release-url)
+      if [[ $# -lt 2 ]]; then
+        log_err "--release-url 需要指定基础 URL"
+        exit 1
+      fi
+      RELEASE_BASE_URL="$2"
       shift 2
       ;;
     --with-playwright)
@@ -93,7 +124,6 @@ fi
 
 log_info "检测到 Node.js v${NODE_VERSION} / npm $(npm -v)"
 
-# 检查原生模块编译工具链（仅提示，不强制阻塞，因为多数平台可直接命中预编译包）
 if ! command -v python3 >/dev/null 2>&1 || ! command -v make >/dev/null 2>&1; then
   log_warn "未检测到完整的 python3 / make 编译工具链；若 better-sqlite3 无预编译包，可能需要安装 Xcode CLT (macOS) 或 build-essential (Linux)"
 fi
@@ -106,7 +136,61 @@ if [[ "$CN_MIRROR" == "1" ]]; then
   log_info "已临时启用中国镜像源 (npmmirror)，本次安装结束后自动失效"
 fi
 
-# 3. 确定安装目录
+# 3. 判断是本地仓库/发行包执行，还是远程 curl 一键安装
+TMP_DOWNLOAD_DIR=""
+cleanup() {
+  if [[ -n "$TMP_DOWNLOAD_DIR" && -d "$TMP_DOWNLOAD_DIR" ]]; then
+    rm -rf "$TMP_DOWNLOAD_DIR"
+  fi
+}
+trap cleanup EXIT
+
+HAS_LOCAL_SOURCE=0
+if [[ -n "$SOURCE_ROOT" && -f "${SOURCE_ROOT}/package.json" ]]; then
+  HAS_LOCAL_SOURCE=1
+fi
+
+if [[ "$HAS_LOCAL_SOURCE" == "0" ]]; then
+  if ! command -v curl >/dev/null 2>&1; then
+    log_err "远程安装需要 curl，请先安装 curl"
+    exit 1
+  fi
+  if ! command -v tar >/dev/null 2>&1; then
+    log_err "远程安装需要 tar，请先安装 tar"
+    exit 1
+  fi
+
+  if [[ -z "$VERSION" ]]; then
+    log_info "正在查询最新发行版本..."
+    VERSION="$(curl -fsSL "https://api.github.com/repos/${REPO_SLUG}/releases/latest" \
+      | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1 || true)"
+    if [[ -z "$VERSION" ]]; then
+      VERSION="v0.1.0"
+      log_warn "未能从 GitHub API 获取最新版本，回退至 ${VERSION}"
+    fi
+  fi
+  TAG="v${VERSION#v}"
+  ARCHIVE_NAME="hato-${TAG}.tar.gz"
+  BASE_URL="${RELEASE_BASE_URL:-https://github.com/${REPO_SLUG}/releases/download/${TAG}}"
+  DOWNLOAD_URL="${BASE_URL%/}/${ARCHIVE_NAME}"
+
+  TMP_DOWNLOAD_DIR="$(mktemp -d)"
+  log_info "正在下载发行包: ${DOWNLOAD_URL}"
+  curl -fL --progress-bar "$DOWNLOAD_URL" -o "${TMP_DOWNLOAD_DIR}/${ARCHIVE_NAME}"
+  tar -xzf "${TMP_DOWNLOAD_DIR}/${ARCHIVE_NAME}" -C "$TMP_DOWNLOAD_DIR"
+
+  SOURCE_ROOT="${TMP_DOWNLOAD_DIR}/hato-${TAG}"
+  if [[ ! -f "${SOURCE_ROOT}/package.json" ]]; then
+    log_err "解压后的发行包缺少 package.json: ${SOURCE_ROOT}"
+    exit 1
+  fi
+
+  if [[ -z "$TARGET_DIR" ]]; then
+    TARGET_DIR="$DEFAULT_INSTALL_DIR"
+  fi
+fi
+
+# 4. 确定安装目录并同步文件
 INSTALL_DIR="$SOURCE_ROOT"
 if [[ -n "$TARGET_DIR" ]]; then
   mkdir -p "$TARGET_DIR"
@@ -135,7 +219,7 @@ fi
 
 cd "$INSTALL_DIR"
 
-# 4. 安装依赖（区分预编译发行包模式与源码构建模式）
+# 5. 安装依赖（区分预编译发行包模式与源码构建模式）
 IS_RELEASE_BUNDLE=0
 if [[ -f "${INSTALL_DIR}/dist/main.js" && -f "${INSTALL_DIR}/web/dist/index.html" && ! -d "${INSTALL_DIR}/src" ]]; then
   IS_RELEASE_BUNDLE=1
@@ -166,13 +250,12 @@ else
   npm run build
 fi
 
-# 可选安装 Playwright 浏览器内核
 if [[ "$WITH_PLAYWRIGHT" == "1" ]]; then
   log_info "正在安装 Playwright Chromium 内核..."
   npx playwright install chromium
 fi
 
-# 5. 初始化 ~/.hato 配置目录（不覆盖已有配置）
+# 6. 初始化 ~/.hato 配置目录（不覆盖已有配置）
 HATO_HOME_DIR="${HATO_HOME:-${HOME}/.hato}"
 if [[ "$HATO_HOME_DIR" == ~* ]]; then
   HATO_HOME_DIR="${HOME}${HATO_HOME_DIR#\~}"
@@ -189,7 +272,7 @@ if [[ ! -f "${HATO_HOME_DIR}/mcp.toml" && -f "${INSTALL_DIR}/config/mcp.example.
   log_info "已初始化 MCP 模板: ${HATO_HOME_DIR}/mcp.toml"
 fi
 
-# 6. 可选创建 ~/.local/bin/hato 快捷启动脚本
+# 7. 创建全局快捷命令 ~/.local/bin/hato
 if [[ -f "${INSTALL_DIR}/dist/cli/hato.js" ]]; then
   chmod +x "${INSTALL_DIR}/dist/cli/hato.js"
 fi
@@ -210,14 +293,14 @@ fi
 
 log_ok "Hato 安装完成！"
 
-# 7. 引导运行交互式配置向导
+# 8. 引导运行交互式配置向导
 if [[ "$SKIP_SETUP" == "0" ]]; then
-  if [[ -t 0 && -t 1 ]]; then
-    log_info "即将启动交互式配置向导 (setup)..."
-    node "${INSTALL_DIR}/dist/cli/setup.js"
+  if [[ -t 1 && ( -t 0 || -r /dev/tty ) ]]; then
+    log_info "即将启动交互式配置向导 (hato setup)..."
+    node "${INSTALL_DIR}/dist/cli/hato.js" setup </dev/tty
   else
-    log_info "当前为非交互终端，请稍后手动执行: cd \"${INSTALL_DIR}\" && node dist/cli/setup.js"
+    log_info "当前为非交互终端，请稍后手动执行: node \"${INSTALL_DIR}/dist/cli/hato.js\" setup"
   fi
 else
-  log_info "已跳过配置向导。启动前请先配置 ${HATO_HOME_DIR} 或运行: node \"${INSTALL_DIR}/dist/cli/setup.js\""
+  log_info "已跳过配置向导。启动前请先运行: node \"${INSTALL_DIR}/dist/cli/hato.js\" setup"
 fi
