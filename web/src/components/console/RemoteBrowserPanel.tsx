@@ -703,7 +703,7 @@ export function RemoteBrowserPanel({
                     .catch(() => undefined);
                 }
               }}
-              className={`relative w-full select-none overflow-hidden bg-zinc-950 outline-none ${
+              className={`relative w-full touch-none select-none overflow-hidden bg-zinc-950 outline-none ${
                 controlling ? "cursor-crosshair" : "cursor-default"
               }`}
             >

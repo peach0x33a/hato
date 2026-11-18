@@ -262,7 +262,7 @@ function GatewayStatusCard({
         </div>
 
         {/* Bottom metadata grid */}
-        <div className="grid grid-cols-3 gap-3 border-t border-border/50 pt-3 text-xs">
+        <div className="grid grid-cols-2 gap-3 border-t border-border/50 pt-3 text-xs sm:grid-cols-3">
           <div>
             <div className="text-[11px] text-muted-foreground">运行时长</div>
             <div className="mt-0.5 font-mono font-medium text-foreground">
@@ -630,7 +630,7 @@ export function OverviewPanel({
                 </Button>
               </div>
             </CardHeader>
-            <CardContent className="grid grid-cols-3 gap-3">
+            <CardContent className="grid grid-cols-2 gap-3 sm:grid-cols-3">
               <div className="rounded-xl border border-border/60 bg-muted/30 p-3">
                 <div className="text-[11px] text-muted-foreground">总消息数</div>
                 <div className="mt-1 font-mono text-lg font-semibold text-foreground">
@@ -697,7 +697,7 @@ export function OverviewPanel({
               </div>
             </CardHeader>
             <CardContent className="flex flex-col gap-3">
-              <div className="grid grid-cols-3 gap-3">
+              <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
                 <div className="rounded-xl border border-border/60 bg-muted/30 p-3">
                   <div className="text-[11px] text-muted-foreground">后台工单</div>
                   <div className="mt-1 font-mono text-base font-semibold text-foreground">

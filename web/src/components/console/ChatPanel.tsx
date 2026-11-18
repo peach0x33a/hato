@@ -3,6 +3,7 @@ import {
   Bot,
   Compass,
   Database,
+  History,
   ImagePlus,
   Loader2,
   RefreshCw,
@@ -77,6 +78,7 @@ export interface ChatPanelProps {
   onOpenBrowserPanel: () => void;
   onAuthError: () => void;
   pendingTakeover: boolean;
+  sessions?: ChatSessionRecord[];
   selectedSessionId?: string | null;
   onSelectSession?: (id: string | null) => void;
   onSessionsChanged?: () => void;
@@ -164,6 +166,7 @@ export function ChatPanel({
   onOpenBrowserPanel,
   onAuthError,
   pendingTakeover,
+  sessions = [],
   selectedSessionId = null,
   onSelectSession,
   onSessionsChanged,
@@ -182,6 +185,7 @@ export function ChatPanel({
   const [historyError, setHistoryError] = useState("");
   const [hoverTraceOpen, setHoverTraceOpen] = useState(false);
   const [hoverMemoryOpen, setHoverMemoryOpen] = useState(false);
+  const [mobileSessionsOpen, setMobileSessionsOpen] = useState(false);
   const [latestTrace, setLatestTrace] = useState<TurnTraceRecord | null>(null);
   const [traceLoading, setTraceLoading] = useState(false);
   const [slashBusy, setSlashBusy] = useState(false);
@@ -548,8 +552,8 @@ export function ChatPanel({
       className="flex h-full min-h-0 min-w-0 w-full flex-col gap-0 overflow-hidden"
     >
       {/* Flat Top Header: 对话 | 轨迹 | 统计 + Model & Quick Actions */}
-      <div className="flex min-h-11 shrink-0 flex-wrap items-center justify-between gap-2 border-b border-border bg-background px-3 py-1 sm:px-4">
-        <div className="flex min-w-0 flex-1 items-center gap-3">
+      <div className="relative flex min-h-11 shrink-0 flex-wrap items-center justify-between gap-2 border-b border-border bg-background px-3 py-1 sm:px-4">
+        <div className="flex min-w-0 flex-1 items-center gap-2 sm:gap-3">
           <TabsList wrapperClassName="w-auto shrink-0" className="shrink-0 border-b-0">
             <TabsTrigger value="chat" className="py-2 text-xs">对话</TabsTrigger>
             <TabsTrigger value="trajectory" className="py-2 text-xs">轨迹</TabsTrigger>
@@ -573,6 +577,21 @@ export function ChatPanel({
               浏览器待接管
             </AnimatedBadge>
           )}
+          <Button
+            type="button"
+            variant={selectedSessionId ? "secondary" : "ghost"}
+            size="sm"
+            onClick={() => setMobileSessionsOpen(true)}
+            className="ml-auto h-7 shrink-0 gap-1 px-2 text-xs lg:hidden"
+            title="会话记录"
+            aria-label="打开会话记录"
+          >
+            <History className="size-3.5" />
+            <span>会话</span>
+            <span className="font-mono text-[10px] text-muted-foreground tabular-nums">
+              {sessions.length + 1}
+            </span>
+          </Button>
         </div>
 
         {subTab === "chat" && (
@@ -590,7 +609,7 @@ export function ChatPanel({
             ) : (
               <>
                 {/* Click-toggled Popover: 查看 Trace */}
-                <div ref={traceRef} className="relative">
+                <div ref={traceRef} className="sm:relative">
                   <Button
                     type="button"
                     variant="ghost"
@@ -611,7 +630,7 @@ export function ChatPanel({
                   </Button>
 
                   {hoverTraceOpen && (
-                    <div className="absolute top-full right-0 z-50 mt-1 w-[min(22rem,calc(100vw-2rem))] rounded-lg border border-border bg-popover p-3 text-xs shadow-md">
+                    <div className="absolute top-full inset-x-3 z-50 mt-1 rounded-lg border border-border bg-popover p-3 text-xs shadow-md sm:inset-x-auto sm:right-0 sm:w-[min(22rem,calc(100vw-2rem))]">
                       <div className="mb-2 flex items-center justify-between border-b border-border/70 pb-1.5">
                         <span className="font-medium text-foreground">最近一次调用 Trace</span>
                         <button
@@ -668,7 +687,7 @@ export function ChatPanel({
                 </div>
 
                 {/* Click-toggled Popover: 压缩记忆 */}
-                <div ref={memoryRef} className="relative">
+                <div ref={memoryRef} className="sm:relative">
                   <Button
                     type="button"
                     variant="ghost"
@@ -686,7 +705,7 @@ export function ChatPanel({
                   </Button>
 
                   {hoverMemoryOpen && (
-                    <div className="absolute top-full right-0 z-50 mt-1 w-[min(20rem,calc(100vw-2rem))] rounded-lg border border-border bg-popover p-3 text-xs shadow-md">
+                    <div className="absolute top-full inset-x-3 z-50 mt-1 rounded-lg border border-border bg-popover p-3 text-xs shadow-md sm:inset-x-auto sm:right-0 sm:w-[min(20rem,calc(100vw-2rem))]">
                       <div className="mb-1.5 flex items-center justify-between border-b border-border/70 pb-1.5">
                         <span className="font-medium text-foreground">工作记忆摘要</span>
                         <Button
@@ -1108,6 +1127,95 @@ export function ChatPanel({
           />
         )}
       </TabsContent>
+
+      {mobileSessionsOpen && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-label="会话记录"
+          className="fixed inset-0 z-50 flex items-end justify-center bg-background/80 backdrop-blur-xs sm:items-center sm:p-4 lg:hidden"
+          onClick={() => setMobileSessionsOpen(false)}
+        >
+          <div
+            className="flex max-h-[75dvh] w-full flex-col overflow-hidden rounded-t-xl border border-border bg-popover shadow-lg sm:max-w-md sm:rounded-xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between border-b border-border/80 px-4 py-3">
+              <div className="flex items-center gap-2 text-xs font-medium text-foreground">
+                <History className="size-3.5 text-muted-foreground" />
+                <span>会话记录</span>
+                <span className="font-mono text-[11px] text-muted-foreground tabular-nums">
+                  {sessions.length + 1}
+                </span>
+              </div>
+              <button
+                type="button"
+                aria-label="关闭会话记录"
+                onClick={() => setMobileSessionsOpen(false)}
+                className="inline-flex size-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+              >
+                <X className="size-4" />
+              </button>
+            </div>
+
+            <div className="min-h-0 flex-1 space-y-1 overflow-y-auto p-2.5">
+              <button
+                type="button"
+                onClick={() => {
+                  onSelectSession?.(null);
+                  setMobileSessionsOpen(false);
+                }}
+                className={`flex w-full items-center justify-between rounded-md px-3 py-2 text-left text-xs transition-colors ${
+                  selectedSessionId === null
+                    ? "bg-muted font-medium text-foreground"
+                    : "text-muted-foreground hover:bg-muted/60 hover:text-foreground"
+                }`}
+              >
+                <span className="truncate">当前会话</span>
+                <span className="size-2 shrink-0 rounded-full bg-emerald-500" />
+              </button>
+
+              {sessions.length === 0 ? (
+                <p className="px-3 py-4 text-center text-xs text-muted-foreground/75">
+                  暂无历史会话记录
+                </p>
+              ) : (
+                sessions.map((sess) => {
+                  const isSel = selectedSessionId === sess.id;
+                  const endedDate = new Date(sess.endedAt);
+                  const shortDate = Number.isNaN(endedDate.getTime())
+                    ? "--"
+                    : endedDate.toLocaleDateString("zh-CN", {
+                        month: "2-digit",
+                        day: "2-digit",
+                      });
+                  return (
+                    <button
+                      key={sess.id}
+                      type="button"
+                      onClick={() => {
+                        onSelectSession?.(sess.id);
+                        setMobileSessionsOpen(false);
+                      }}
+                      className={`flex w-full flex-col gap-0.5 rounded-md px-3 py-2 text-left transition-colors ${
+                        isSel
+                          ? "bg-muted text-foreground"
+                          : "text-muted-foreground hover:bg-muted/60 hover:text-foreground"
+                      }`}
+                    >
+                      <span className="truncate text-xs font-medium">{sess.title}</span>
+                      <div className="flex items-center justify-between font-mono text-[11px] text-muted-foreground/80">
+                        <span>{shortDate}</span>
+                        <span>{sess.messageCount}条 · 只读</span>
+                      </div>
+                    </button>
+                  );
+                })
+              )}
+            </div>
+          </div>
+        </div>
+      )}
     </Tabs>
   );
 }

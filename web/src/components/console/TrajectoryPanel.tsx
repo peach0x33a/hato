@@ -589,14 +589,14 @@ export function TrajectoryPanel({ onToast, sessionEpoch = 0, sessionId = null }:
 
       {/* 2. Compact 3-Track Swimlane */}
       {filteredTraces.length > 0 && (
-        <div className="flex h-[54px] min-w-0 shrink-0 overflow-hidden border-b border-border bg-background">
+        <div className="flex min-h-[54px] min-w-0 shrink-0 border-b border-border bg-background">
           <div className="flex w-11 shrink-0 select-none flex-col justify-between border-r border-border bg-muted/15 px-1.5 py-1 text-right text-[10px] leading-none text-muted-foreground">
             <span>输入</span>
             <span>模型</span>
             <span>工具</span>
           </div>
 
-          <div className="flex min-w-0 flex-1 overflow-x-auto">
+          <div className="flex min-w-0 flex-1 touch-pan-x overflow-x-auto">
             {filteredTraces.map((tr) => {
               const weight =
                 mode === "turns"

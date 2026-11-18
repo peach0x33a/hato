@@ -457,7 +457,7 @@ export function StaticsPanel({ onToast, sessionEpoch = 0, sessionId = null }: St
               筛选条件下暂无调用记录。
             </div>
           ) : (
-            <div className="overflow-x-clip">
+            <div className="overflow-x-auto">
               <table className="w-full border-collapse text-left text-xs">
                 <thead className="sticky top-0 z-10 bg-background text-[11px] text-muted-foreground">
                   <tr className="border-b border-border">

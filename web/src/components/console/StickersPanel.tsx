@@ -154,8 +154,8 @@ export function StickersPanel({ onToast }: StickersPanelProps) {
           <p className="mt-0.5 text-xs text-muted-foreground">共 {stickers.length} 张</p>
         </div>
 
-        <div className="flex items-center gap-2">
-          <div className="relative w-56">
+        <div className="flex w-full flex-wrap items-center gap-2 sm:w-auto sm:flex-nowrap">
+          <div className="relative min-w-0 flex-1 sm:w-56 sm:flex-none">
             <ConsoleInput
               value={query}
               onChange={(val) => setQuery(val)}
@@ -308,7 +308,7 @@ export function StickersPanel({ onToast }: StickersPanelProps) {
               exit={reduceMotion ? undefined : { opacity: 0, y: 8, scale: 0.97, transition: { duration: 0.12, ease: EASE_OUT } }}
               transition={reduceMotion ? { duration: 0 } : SPRING_LAYOUT}
               onClick={(e) => e.stopPropagation()}
-              className="flex w-full max-w-md flex-col gap-4 rounded-2xl border border-border/80 bg-background p-5 shadow-2xl"
+              className="flex max-h-[90dvh] w-full max-w-md flex-col gap-4 overflow-y-auto rounded-2xl border border-border/80 bg-background p-5 shadow-2xl"
             >
             <div className="flex items-center justify-between">
               <h3 className="text-sm font-semibold">编辑表情包语义标签</h3>

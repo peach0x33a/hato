@@ -1249,7 +1249,7 @@ export function SettingsPanel({
                         handleAddTgWhitelistIds();
                       }
                     }}
-                    placeholder="输入 Telegram 用户 ID（如 123456789，支持逗号批量添加）"
+                    placeholder="输入 Telegram 用户 ID（支持逗号分隔）"
                   />
                 </div>
                 <Button
@@ -2441,7 +2441,7 @@ export function SettingsPanel({
           </div>
         </div>
 
-        <nav className="flex flex-1 gap-1 overflow-x-auto px-2.5 pb-3 md:flex-col md:overflow-y-auto md:pb-5">
+        <nav className="flex flex-1 flex-wrap gap-1 px-2.5 pb-3 md:flex-col md:flex-nowrap md:overflow-y-auto md:pb-5">
           {matchingNavItems.length === 0 ? (
             <div className="px-2.5 py-4 text-xs text-muted-foreground">无匹配设置分类</div>
           ) : (
@@ -2451,7 +2451,7 @@ export function SettingsPanel({
               return (
                 <div
                   key={group.id}
-                  className="flex shrink-0 items-center gap-1 md:mb-3 md:flex-col md:items-stretch md:gap-0.5"
+                  className="flex flex-wrap items-center gap-1 md:mb-3 md:flex-col md:flex-nowrap md:items-stretch md:gap-0.5"
                 >
                   <div className="hidden px-2.5 py-1 text-[11px] font-medium text-muted-foreground/85 md:block">
                     {group.label}

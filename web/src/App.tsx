@@ -427,9 +427,9 @@ function ConsoleShell() {
   }
 
   return (
-    <div className="flex h-screen flex-col bg-background text-foreground">
-      <header className="flex h-11 shrink-0 items-center justify-between gap-3 border-b border-border/80 bg-background px-3 sm:px-4">
-        <div className="flex min-w-0 items-center gap-2.5">
+    <div className="flex h-dvh flex-col bg-background text-foreground">
+      <header className="flex h-11 shrink-0 items-center justify-between gap-2 border-b border-border/80 bg-background px-3 sm:gap-3 sm:px-4">
+        <div className="flex min-w-0 items-center gap-1.5 sm:gap-2.5">
           {activeTab === "settings" ? (
             <button
               type="button"
@@ -455,8 +455,8 @@ function ConsoleShell() {
           <div className="grid size-6 shrink-0 place-items-center rounded-md bg-primary/12 text-primary">
             <Bot className="size-3.5" />
           </div>
-          <div className="flex min-w-0 items-center gap-2.5">
-            <h1 className="truncate text-[13px] font-semibold tracking-tight text-foreground">
+          <div className="flex min-w-0 items-center gap-1.5 sm:gap-2.5">
+            <h1 className="shrink-0 whitespace-nowrap text-[13px] font-semibold tracking-tight text-foreground">
               Hato 控制台
             </h1>
             <span className="hidden h-3.5 w-px bg-border sm:block" aria-hidden="true" />
@@ -477,7 +477,7 @@ function ConsoleShell() {
               <button
                 type="button"
                 onClick={() => navigateToTab("browser")}
-                className="cursor-pointer"
+                className="hidden cursor-pointer sm:inline-flex"
               >
                 <AnimatedBadge status="warning" size="sm" pulse>
                   浏览器待操作 · 点击处理
@@ -487,12 +487,14 @@ function ConsoleShell() {
           </div>
         </div>
 
-        <div className="flex shrink-0 items-center gap-1.5">
+        <div className="flex shrink-0 items-center gap-1 sm:gap-1.5">
           <Button
             type="button"
             variant="ghost"
             size="sm"
-            className="h-7 px-2.5 text-xs text-muted-foreground hover:text-foreground"
+            title="远程浏览器"
+            aria-label="远程浏览器"
+            className="h-7 px-2 text-xs text-muted-foreground hover:text-foreground sm:px-2.5"
             onClick={() => navigateToTab("browser")}
           >
             <Compass className="size-3.5" />
@@ -502,7 +504,9 @@ function ConsoleShell() {
             type="button"
             variant="ghost"
             size="sm"
-            className="h-7 px-2.5 text-xs text-muted-foreground hover:text-foreground"
+            title="重载配置"
+            aria-label="重载配置"
+            className="h-7 px-2 text-xs text-muted-foreground hover:text-foreground sm:px-2.5"
             state={reloadState}
             loadingText="重载中…"
             successText="已重载"
@@ -510,7 +514,7 @@ function ConsoleShell() {
             icon={<RefreshCw className="size-3" />}
             onClick={() => void handleGlobalReload()}
           >
-            重载配置
+            <span className="hidden sm:inline">重载配置</span>
           </StatefulButton>
           <span className="mx-0.5 h-3.5 w-px bg-border/80" aria-hidden="true" />
           <ThemeToggle variant="circle-blur" start="top-right" />
@@ -578,7 +582,7 @@ function ConsoleShell() {
               as="div"
               inset={0}
               pillClassName="rounded-md bg-muted"
-              className="flex min-w-0 flex-1 gap-1 overflow-x-auto lg:flex-none lg:flex-col"
+              className="flex flex-row min-w-0 flex-1 gap-1 overflow-x-auto lg:flex-none lg:flex-col"
             >
               {NAV_ITEMS.map((item) => {
                 const Icon = item.icon;
@@ -749,6 +753,7 @@ function ConsoleShell() {
                       onPendingTakeoverChange={setPendingTakeover}
                       onOpenBrowserPanel={() => navigateToTab("browser")}
                       onAuthError={() => setAuthNeeded(true)}
+                      sessions={sessions}
                       selectedSessionId={selectedSessionId}
                       onSelectSession={setSelectedSessionId}
                       onSessionsChanged={() => void refreshSessions()}
