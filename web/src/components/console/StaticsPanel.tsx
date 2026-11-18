@@ -41,6 +41,13 @@ export interface StaticsPanelProps {
   sessionId?: string | null;
 }
 
+function formatUsd(usd: number): string {
+  if (usd <= 0) return "$0.00";
+  if (usd < 0.0001) return `$${usd.toFixed(6)}`;
+  if (usd < 0.01) return `$${usd.toFixed(4)}`;
+  return `$${usd.toFixed(3)}`;
+}
+
 function parseToolsJson(raw: string | null | undefined): string[] {
   if (!raw) return [];
   try {
@@ -136,6 +143,7 @@ export function StaticsPanel({ onToast, sessionEpoch = 0, sessionId = null }: St
         cacheRead: number;
         promptTotal: number;
         outputTokens: number;
+        costUsd?: number;
       }
     >();
     for (const tr of traces) {
@@ -157,6 +165,9 @@ export function StaticsPanel({ onToast, sessionEpoch = 0, sessionId = null }: St
       existing.cacheRead += tr.cacheReadTokens;
       existing.promptTotal += tr.inputTokens + tr.cacheReadTokens + tr.cacheWriteTokens;
       existing.outputTokens += tr.outputTokens;
+      if (typeof tr.costUsd === "number") {
+        existing.costUsd = (existing.costUsd ?? 0) + tr.costUsd;
+      }
       map.set(key, existing);
     }
     return [...map.values()].sort((a, b) => b.count - a.count);
@@ -266,8 +277,8 @@ export function StaticsPanel({ onToast, sessionEpoch = 0, sessionId = null }: St
           </div>
         )}
 
-        {/* Row 1: Flat 6-Cell KPI Strip */}
-        <div className="grid grid-cols-2 divide-x divide-y divide-border sm:grid-cols-3 lg:grid-cols-6 lg:divide-y-0">
+        {/* Row 1: Flat 7-Cell KPI Strip */}
+        <div className="grid grid-cols-2 divide-x divide-y divide-border sm:grid-cols-4 lg:grid-cols-7 lg:divide-y-0">
           {(
             [
               ["调用次数", kpiValue(String(summary?.turns ?? 0)), summary ? `热缓存 ${summary.warmTurns} 次` : ""],
@@ -299,6 +310,19 @@ export function StaticsPanel({ onToast, sessionEpoch = 0, sessionId = null }: St
                 "平均耗时",
                 kpiValue(summary ? `${summary.avgLatencyMs}ms` : "--"),
                 summary ? `P95 ${summary.p95LatencyMs}ms` : "",
+              ],
+              [
+                "预估成本",
+                kpiValue(
+                  summary && (summary.pricedTurns ?? 0) > 0
+                    ? formatUsd(summary.totalCostUsd ?? 0)
+                    : "--",
+                ),
+                summary && (summary.totalSavedUsd ?? 0) > 0
+                  ? `缓存省 ${formatUsd(summary.totalSavedUsd ?? 0)}`
+                  : summary && (summary.pricedTurns ?? 0) > 0
+                    ? `已计价 ${summary.pricedTurns} 轮`
+                    : "",
               ],
             ] as const
           ).map(([label, val, sub]) => (
@@ -373,6 +397,9 @@ export function StaticsPanel({ onToast, sessionEpoch = 0, sessionId = null }: St
                         <span>命中 {hit.toFixed(1)}%</span>
                         <span>出 {item.outputTokens.toLocaleString()}</span>
                         <span>均 {avgLat}ms</span>
+                        {item.costUsd !== undefined ? (
+                          <span className="text-foreground">{formatUsd(item.costUsd)}</span>
+                        ) : null}
                       </div>
                     </div>
                   );
@@ -443,6 +470,7 @@ export function StaticsPanel({ onToast, sessionEpoch = 0, sessionId = null }: St
                     <th className="py-2 pr-2 font-medium">命中率</th>
                     <th className="py-2 pr-2 font-medium">输出</th>
                     <th className="py-2 pr-2 font-medium">首字 / 耗时</th>
+                    <th className="py-2 pr-2 font-medium">成本</th>
                     <th className="py-2 pr-3 font-medium">工具</th>
                   </tr>
                 </thead>
@@ -515,6 +543,9 @@ export function StaticsPanel({ onToast, sessionEpoch = 0, sessionId = null }: St
                               return displayTps !== null ? ` · ${displayTps.toFixed(0)}/s` : "";
                             })()}
                           </td>
+                          <td className="whitespace-nowrap py-2 pr-2 font-mono text-[11px] tabular-nums text-muted-foreground">
+                            {typeof tr.costUsd === "number" ? formatUsd(tr.costUsd) : "—"}
+                          </td>
                           <td className="py-2 pr-3">
                             {tools.length === 0 ? (
                               <span className="text-[11px] text-muted-foreground/60">—</span>
@@ -539,7 +570,7 @@ export function StaticsPanel({ onToast, sessionEpoch = 0, sessionId = null }: St
                         </tr>
                         {expanded && (
                           <tr className="bg-muted/15">
-                            <td colSpan={10} className="px-4 py-2.5">
+                            <td colSpan={11} className="px-4 py-2.5">
                               <pre className="max-h-44 overflow-y-auto whitespace-pre-wrap break-words border-l-2 border-primary/40 bg-muted/25 px-3 py-2 font-mono text-[11px] leading-relaxed text-foreground">
                                 {tr.timeCardText || "（无额外上下文快照）"}
                               </pre>

@@ -47,7 +47,12 @@ import {
   probeTelegramGateway,
   type TelegramUserProfileResult,
 } from "../setup/probe.js";
-import { parseSinceSpec, summarizeTurnTraces } from "../stats/metrics.js";
+import {
+  computeTurnCostUsd,
+  type ModelCostRates,
+  parseSinceSpec,
+  summarizeTurnTraces,
+} from "../stats/metrics.js";
 import type { StickerService } from "../stickers/service.js";
 import { logInfo, summarizeError } from "../utils/logger.js";
 import {
@@ -1579,6 +1584,23 @@ export class WebConsoleServer {
     sendJson(res, 200, { ok: true, message });
   }
 
+  private buildCostResolver(): (provider: string, modelId: string) => ModelCostRates | undefined {
+    const providers = this.deps.getModelRegistry().getFileConfig().providers;
+    const byTarget = new Map<string, ModelCostRates>();
+    const byModelId = new Map<string, ModelCostRates>();
+    for (const [slug, prov] of Object.entries(providers)) {
+      for (const m of prov.models) {
+        if (!m.cost) continue;
+        byTarget.set(`${slug}/${m.id}`, m.cost);
+        if (!byModelId.has(m.id)) {
+          byModelId.set(m.id, m.cost);
+        }
+      }
+    }
+    return (provider: string, modelId: string) =>
+      byTarget.get(`${provider}/${modelId}`) ?? byModelId.get(modelId);
+  }
+
   private handleStatics(url: URL, res: ServerResponse): void {
     const repo = this.deps.getRepo();
     const uid = this.deps.getConfig().owner.canonical_user_id;
@@ -1588,6 +1610,18 @@ export class WebConsoleServer {
     const sessionId = url.searchParams.get("sessionId")?.trim() || "";
     const sinceRaw = url.searchParams.get("since")?.trim();
     const scope = url.searchParams.get("scope")?.trim();
+    const resolveCostRates = this.buildCostResolver();
+
+    const attachCost = <T extends Parameters<typeof computeTurnCostUsd>[0] & { provider: string; modelId: string }>(
+      rows: readonly T[],
+    ) =>
+      rows.map((row) => {
+        const rates = resolveCostRates(row.provider, row.modelId);
+        return {
+          ...row,
+          costUsd: rates ? Number(computeTurnCostUsd(row, rates).costUsd.toFixed(6)) : null,
+        };
+      });
 
     if (sessionId) {
       const session = repo.getChatSession(sessionId);
@@ -1602,8 +1636,8 @@ export class WebConsoleServer {
         sinceMs: session.startedAt,
         untilMs: session.endedAt,
       });
-      const summary = summarizeTurnTraces(traces);
-      sendJson(res, 200, { ok: true, session, summary, traces });
+      const summary = summarizeTurnTraces(traces, resolveCostRates);
+      sendJson(res, 200, { ok: true, session, summary, traces: attachCost(traces) });
       return;
     }
 
@@ -1611,8 +1645,8 @@ export class WebConsoleServer {
     const afterMs = scope === "history" ? undefined : repo.getSessionResetAt(uid) ?? undefined;
 
     const traces = repo.listTurnTraces({ limit, slot, sinceMs, afterMs });
-    const summary = summarizeTurnTraces(traces);
-    sendJson(res, 200, { ok: true, summary, traces });
+    const summary = summarizeTurnTraces(traces, resolveCostRates);
+    sendJson(res, 200, { ok: true, summary, traces: attachCost(traces) });
   }
 
   private handleBrowserStream(req: IncomingMessage, res: ServerResponse): void {

@@ -173,6 +173,13 @@ export interface TurnTraceStatRow {
   createdAt: number;
 }
 
+export interface ModelCostRates {
+  input?: number;
+  output?: number;
+  cache_read?: number;
+  cache_write?: number;
+}
+
 export interface TurnStatsSummary {
   turns: number;
   totalInputTokens: number;
@@ -193,6 +200,36 @@ export interface TurnStatsSummary {
   avgDecodeTps: number | null;
   avgE2eTps: number | null;
   measuredTpsCount: number;
+  totalCostUsd: number;
+  totalSavedUsd: number;
+  pricedTurns: number;
+}
+
+/**
+ * Compute USD cost and cache savings for a single turn using USD-per-1M-token rates.
+ */
+export function computeTurnCostUsd(
+  row: Pick<TurnTraceStatRow, "inputTokens" | "outputTokens" | "cacheReadTokens" | "cacheWriteTokens">,
+  rates: ModelCostRates,
+): { costUsd: number; savedUsd: number } {
+  const inputRate = rates.input ?? 0;
+  const outputRate = rates.output ?? 0;
+  const cacheReadRate = rates.cache_read ?? 0;
+  const cacheWriteRate = rates.cache_write ?? 0;
+
+  const costUsd =
+    (Math.max(0, row.inputTokens) * inputRate +
+      Math.max(0, row.outputTokens) * outputRate +
+      Math.max(0, row.cacheReadTokens) * cacheReadRate +
+      Math.max(0, row.cacheWriteTokens) * cacheWriteRate) /
+    1_000_000;
+
+  const savedUsd =
+    inputRate > cacheReadRate
+      ? (Math.max(0, row.cacheReadTokens) * (inputRate - cacheReadRate)) / 1_000_000
+      : 0;
+
+  return { costUsd, savedUsd };
 }
 
 /**
@@ -246,12 +283,18 @@ export function computeTurnMetrics(input: RawTurnUsage): ComputedTurnMetrics {
 /**
  * Aggregate overall cache hit rate, latency percentiles, TTFT, and TPS across trace rows.
  */
-export function summarizeTurnTraces(rows: readonly TurnTraceStatRow[]): TurnStatsSummary {
+export function summarizeTurnTraces(
+  rows: readonly TurnTraceStatRow[],
+  resolveCostRates?: (provider: string, modelId: string) => ModelCostRates | undefined,
+): TurnStatsSummary {
   const turns = rows.length;
   let totalInputTokens = 0;
   let totalCacheReadTokens = 0;
   let totalCacheWriteTokens = 0;
   let totalOutputTokens = 0;
+  let totalCostUsd = 0;
+  let totalSavedUsd = 0;
+  let pricedTurns = 0;
 
   let warmCacheRead = 0;
   let warmPromptTokens = 0;
@@ -295,6 +338,16 @@ export function summarizeTurnTraces(rows: readonly TurnTraceStatRow[]): TurnStat
     } else if (rowE2eTps !== null && hasBogusDecodeWindow) {
       decodeTpsList.push(rowE2eTps);
     }
+
+    if (resolveCostRates) {
+      const rates = resolveCostRates(row.provider, row.modelId);
+      if (rates) {
+        pricedTurns += 1;
+        const { costUsd, savedUsd } = computeTurnCostUsd(row, rates);
+        totalCostUsd += costUsd;
+        totalSavedUsd += savedUsd;
+      }
+    }
   }
 
   const totalPromptTokens = totalInputTokens + totalCacheReadTokens + totalCacheWriteTokens;
@@ -324,6 +377,9 @@ export function summarizeTurnTraces(rows: readonly TurnTraceStatRow[]): TurnStat
       decodeTpsList.length > 0 ? Number((average(decodeTpsList)!).toFixed(2)) : null,
     avgE2eTps: e2eTpsList.length > 0 ? Number((average(e2eTpsList)!).toFixed(2)) : null,
     measuredTpsCount: decodeTpsList.length,
+    totalCostUsd: Number(totalCostUsd.toFixed(6)),
+    totalSavedUsd: Number(totalSavedUsd.toFixed(6)),
+    pricedTurns,
   };
 }
 

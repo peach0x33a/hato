@@ -603,6 +603,7 @@ export interface TurnTraceRecord {
   timeCardText: string;
   toolCallsJson: string;
   stepsJson?: string;
+  costUsd?: number | null;
   createdAt: number;
 }
 
@@ -626,6 +627,9 @@ export interface StaticsSummary {
   avgDecodeTps: number | null;
   avgE2eTps: number | null;
   measuredTpsCount: number;
+  totalCostUsd?: number;
+  totalSavedUsd?: number;
+  pricedTurns?: number;
 }
 
 export interface StaticsResponse {
