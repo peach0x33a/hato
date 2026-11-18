@@ -24,8 +24,17 @@ test("resolveWorkerExecutionMode and resolveWorkerVmWorkdir handle isolated and 
 
 test("ensureHatoHomeConfig migrates legacy files into HATO_HOME once without overwriting", () => {
   const prevHome = process.env.HATO_HOME;
+  const prevCwd = process.cwd();
   const tempHome = mkdtempSync(join(tmpdir(), "hato-home-"));
+  const tempRepo = mkdtempSync(join(tmpdir(), "hato-legacy-repo-"));
+  mkdirSync(join(tempRepo, "config"), { recursive: true });
+  writeFileSync(join(tempRepo, "config", "hato.toml"), "[owner]\ntimezone = \"UTC\"\n", "utf8");
+  writeFileSync(join(tempRepo, "config", "models.toml"), "[slots]\n", "utf8");
+  writeFileSync(join(tempRepo, "config", "mcp.toml"), "# mcp\n", "utf8");
+  writeFileSync(join(tempRepo, ".env"), "TG_BOT_TOKEN=dummy\n", "utf8");
+
   process.env.HATO_HOME = tempHome;
+  process.chdir(tempRepo);
   try {
     assert.equal(resolveHatoHomeDir(), resolve(tempHome));
     const paths = ensureHatoHomeConfig();
@@ -34,14 +43,19 @@ test("ensureHatoHomeConfig migrates legacy files into HATO_HOME once without ove
     assert.equal(paths.mcpConfigPath, join(resolve(tempHome), "mcp.toml"));
     assert.equal(paths.envPath, join(resolve(tempHome), ".env"));
     assert.equal(existsSync(paths.hatoConfigPath), true);
+    assert.equal(existsSync(paths.modelsConfigPath), true);
+    assert.equal(existsSync(paths.mcpConfigPath), true);
+    assert.equal(existsSync(paths.envPath), true);
 
     writeFileSync(paths.hatoConfigPath, "# custom sentinel\n", "utf8");
     ensureHatoHomeConfig();
     assert.equal(readFileSync(paths.hatoConfigPath, "utf8"), "# custom sentinel\n");
   } finally {
+    process.chdir(prevCwd);
     if (prevHome === undefined) delete process.env.HATO_HOME;
     else process.env.HATO_HOME = prevHome;
     rmSync(tempHome, { recursive: true, force: true });
+    rmSync(tempRepo, { recursive: true, force: true });
   }
 });
 
@@ -69,11 +83,29 @@ test("isProtectedEnvPath blocks Hato .env files in cwd and HATO_HOME while allow
 });
 
 test("hato-self-ops and hato-vm-ops skills are discoverable in personal and worker zones", () => {
-  const personal = loadZoneSkills("data/skills", "personal");
-  assert.ok(personal.some((s) => s.name === "hato-self-ops"));
+  const tempSkills = mkdtempSync(join(tmpdir(), "hato-skills-zone-"));
+  try {
+    mkdirSync(join(tempSkills, "personal", "hato-self-ops"), { recursive: true });
+    mkdirSync(join(tempSkills, "worker", "hato-vm-ops"), { recursive: true });
+    writeFileSync(
+      join(tempSkills, "personal", "hato-self-ops", "SKILL.md"),
+      "---\nname: hato-self-ops\ndescription: self ops\n---\nbody\n",
+      "utf8",
+    );
+    writeFileSync(
+      join(tempSkills, "worker", "hato-vm-ops", "SKILL.md"),
+      "---\nname: hato-vm-ops\ndescription: vm ops\n---\nbody\n",
+      "utf8",
+    );
 
-  const worker = selectWorkerSkills("data/skills", ["hato-vm-ops"]);
-  assert.ok(worker.some((s) => s.name === "hato-vm-ops"));
+    const personal = loadZoneSkills(tempSkills, "personal");
+    assert.ok(personal.some((s) => s.name === "hato-self-ops"));
+
+    const worker = selectWorkerSkills(tempSkills, ["hato-vm-ops"]);
+    assert.ok(worker.some((s) => s.name === "hato-vm-ops"));
+  } finally {
+    rmSync(tempSkills, { recursive: true, force: true });
+  }
 });
 
 test("send_message and send_file support explicit cross-platform channel routing", async () => {

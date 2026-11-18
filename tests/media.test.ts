@@ -67,6 +67,15 @@ test("detectMediaMimeType and convertBufferToModelImage normalize JPEG, WebP, an
   assert.equal(detectMediaMimeType(tgsBytes), "application/x-tgsticker");
   assert.equal(await convertBufferToModelImage({ buffer: tgsBytes, filePath: "stickers/a.tgs" }), null);
 
+  const hasFfmpeg = (() => {
+    try {
+      execFileSync("ffmpeg", ["-version"], { stdio: "ignore" });
+      return true;
+    } catch {
+      return false;
+    }
+  })();
+
   // Standard 1x1 lossless WebP (RIFF....WEBPVP8L) to verify real ffmpeg WebP -> PNG decoding.
   const webpBytes = Buffer.from(
     "UklGRh4AAABXRUJQVlA4TBEAAAAvAAAAAAfQ//73v/+BiOh/AAA=",
@@ -79,8 +88,14 @@ test("detectMediaMimeType and convertBufferToModelImage normalize JPEG, WebP, an
     filePath: "stickers/s1.webp",
   });
   assert.ok(convertedWebp);
-  assert.equal(convertedWebp.mimeType, "image/png");
-  assert.equal(detectMediaMimeType(Buffer.from(convertedWebp.data, "base64")), "image/png");
+  if (hasFfmpeg) {
+    assert.equal(convertedWebp.mimeType, "image/png");
+    assert.equal(detectMediaMimeType(Buffer.from(convertedWebp.data, "base64")), "image/png");
+  } else {
+    assert.equal(convertedWebp.mimeType, "image/webp");
+  }
+
+  if (!hasFfmpeg) return;
 
   // Also test real GIF frame extraction via ffmpeg -> PNG.
   const dir = mkdtempSync(join(tmpdir(), "hato-gif-test-"));
