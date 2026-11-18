@@ -161,7 +161,6 @@ export function FunctionSlotsPanel({
               <th className="px-3 py-2.5 font-medium">当前模型</th>
               <th className="px-3 py-2.5 font-medium">供应商</th>
               <th className="px-3 py-2.5 font-medium">能力</th>
-              <th className="px-3 py-2.5 font-medium">备用策略</th>
               <th className="px-5 py-2.5 text-right font-medium">状态</th>
             </tr>
           </thead>
@@ -170,11 +169,13 @@ export function FunctionSlotsPanel({
               const rawValue = slots[slot.key] ?? "";
               const effectiveValue =
                 rawValue || (slot.key === "vision" ? slots.persona : "");
+              const selectValue =
+                slot.key === "vision" && !rawValue ? "__inherit_persona__" : effectiveValue;
               const matched = targetMap.get(effectiveValue);
               const isMissing = effectiveValue.length > 0 && !matched;
-              const visionInherited = slot.key === "vision" && !rawValue;
               const visionUnsupported =
                 slot.key === "vision" && Boolean(matched && !matched.model.supportsVision);
+              const personaLabel = targetMap.get(slots.persona ?? "")?.label;
 
               return (
                 <tr
@@ -196,11 +197,22 @@ export function FunctionSlotsPanel({
                   <td className="px-3 py-2.5">
                     <div className="w-60">
                       <ConsoleSelect
-                        value={effectiveValue}
+                        value={selectValue}
                         disabled={options.length === 0 && !isMissing}
                         placeholder="暂无可用模型"
-                        onValueChange={(next) => onChangeSlot(slot.key, next)}
+                        onValueChange={(next) =>
+                          onChangeSlot(slot.key, next === "__inherit_persona__" ? "" : next)
+                        }
                         options={[
+                          ...(slot.key === "vision"
+                            ? [
+                                {
+                                  value: "__inherit_persona__",
+                                  label: "跟随主对话 (persona)",
+                                  hint: personaLabel,
+                                },
+                              ]
+                            : []),
                           ...(isMissing
                             ? [{ value: effectiveValue, label: `${effectiveValue}（未找到）` }]
                             : []),
@@ -261,16 +273,6 @@ export function FunctionSlotsPanel({
                     )}
                   </td>
 
-                  <td className="px-3 py-2.5 whitespace-nowrap text-zinc-500 dark:text-zinc-400">
-                    {slot.key === "vision" ? (
-                      <span className="font-mono text-[11px]">
-                        {visionInherited ? "已回退至 persona" : "未配时回退 persona"}
-                      </span>
-                    ) : (
-                      <span className="text-zinc-400 dark:text-zinc-600">—</span>
-                    )}
-                  </td>
-
                   <td className="px-5 py-2.5 text-right whitespace-nowrap">
                     <SlotStatusBadge
                       isMissing={isMissing}
@@ -291,10 +293,13 @@ export function FunctionSlotsPanel({
         {visibleSlots.map((slot) => {
           const rawValue = slots[slot.key] ?? "";
           const effectiveValue = rawValue || (slot.key === "vision" ? slots.persona : "");
+          const selectValue =
+            slot.key === "vision" && !rawValue ? "__inherit_persona__" : effectiveValue;
           const matched = targetMap.get(effectiveValue);
           const isMissing = effectiveValue.length > 0 && !matched;
           const visionUnsupported =
             slot.key === "vision" && Boolean(matched && !matched.model.supportsVision);
+          const personaLabel = targetMap.get(slots.persona ?? "")?.label;
 
           return (
             <div key={slot.key} className="flex flex-col gap-2 px-4 py-3">
@@ -325,11 +330,22 @@ export function FunctionSlotsPanel({
               </div>
 
               <ConsoleSelect
-                value={effectiveValue}
+                value={selectValue}
                 disabled={options.length === 0 && !isMissing}
                 placeholder="暂无可用模型"
-                onValueChange={(next) => onChangeSlot(slot.key, next)}
+                onValueChange={(next) =>
+                  onChangeSlot(slot.key, next === "__inherit_persona__" ? "" : next)
+                }
                 options={[
+                  ...(slot.key === "vision"
+                    ? [
+                        {
+                          value: "__inherit_persona__",
+                          label: "跟随主对话 (persona)",
+                          hint: personaLabel,
+                        },
+                      ]
+                    : []),
                   ...(isMissing
                     ? [{ value: effectiveValue, label: `${effectiveValue}（未找到）` }]
                     : []),
