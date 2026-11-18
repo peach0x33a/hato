@@ -547,8 +547,7 @@ async function runModelProbeCompletion(params: {
   }
 
   try {
-    const scopedFetch: typeof globalThis.fetch = (input, init) =>
-      params.proxyRouter.scopedFetch(input, init, scope);
+    const scopedFetch = params.proxyRouter.createScopedFetch(scope);
 
     const result = await params.proxyRouter.runWithScope(scope, () =>
       params.modelsClient.completeSimple(

@@ -5,22 +5,18 @@
   "type": "module",
   "description": "Personal companion & delegated task agent",
   "bin": {
-    "hato": "./dist/cli/hato.js"
+    "hato": "./src/cli/hato.ts"
   },
   "scripts": {
-    "dev": "tsx watch src/main.ts",
-    "setup": "tsx src/cli/setup.ts",
-    "statics": "tsx src/cli/statics.ts",
-    "start": "node dist/main.js",
-    "build": "tsc -p tsconfig.json",
-    "build:web": "npm --prefix web run build",
-    "dev:web": "npm --prefix web run dev",
+    "dev": "bun --watch src/main.ts",
+    "setup": "bun src/cli/setup.ts",
+    "statics": "bun src/cli/statics.ts",
+    "start": "bun src/main.ts",
+    "build:web": "bun run --cwd web build",
+    "dev:web": "bun run --cwd web dev",
     "typecheck": "tsc --noEmit -p tsconfig.json",
-    "test": "tsx --test tests/**/*.test.ts",
+    "test": "bun test --timeout 20000 tests/",
     "release:pack": "bash scripts/pack-release.sh"
-  },
-  "engines": {
-    "node": ">=22.0.0"
   },
   "dependencies": {
     "@clack/prompts": "^1.9.0",
@@ -29,20 +25,17 @@
     "@earendil-works/pi-schema": "^1.5.2",
     "@modelcontextprotocol/sdk": "^1.32.2",
     "@sinclair/typebox": "^0.34.52",
-    "better-sqlite3": "^13.2.0",
     "dotenv": "^18.0.10",
     "drizzle-orm": "^0.45.4",
     "grammy": "^1.46.0",
     "https-proxy-agent": "^9.1.0",
     "playwright-core": "^1.65.1",
     "smol-toml": "^1.9.1",
-    "socks-proxy-agent": "^10.1.0",
-    "undici": "^8.12.4"
+    "socks-proxy-agent": "^10.1.0"
   },
   "devDependencies": {
-    "@types/better-sqlite3": "^9.6.0",
+    "@types/bun": "^1.4.4",
     "@types/node": "^26.6.6",
-    "tsx": "^4.23.15",
     "typescript": "^7.0.2"
   }
 }

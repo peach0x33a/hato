@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import Database from "better-sqlite3";
+import { Database } from "bun:sqlite";
 import { runStaticsCli } from "../src/cli/statics.js";
 import { openDatabase } from "../src/db/client.js";
 import { HatoRepository } from "../src/db/repo.js";

@@ -1,13 +1,13 @@
 import { mkdirSync } from "node:fs";
 import { dirname, resolve } from "node:path";
-import Database from "better-sqlite3";
-import { drizzle, type BetterSQLite3Database } from "drizzle-orm/better-sqlite3";
+import { Database } from "bun:sqlite";
+import { drizzle, type BunSQLiteDatabase } from "drizzle-orm/bun-sqlite";
 import * as schema from "./schema.js";
 
-export type HatoDb = BetterSQLite3Database<typeof schema>;
+export type HatoDb = BunSQLiteDatabase<typeof schema>;
 
 export interface DbHandle {
-  sqlite: Database.Database;
+  sqlite: Database;
   db: HatoDb;
   close(): void;
 }
@@ -215,9 +215,7 @@ export function openDatabase(sqlitePath: string): DbHandle {
     mkdirSync(dirname(resolve(sqlitePath)), { recursive: true });
   }
   const sqlite = new Database(sqlitePath);
-  sqlite.pragma("journal_mode = WAL");
-  sqlite.pragma("synchronous = NORMAL");
-  sqlite.pragma("foreign_keys = ON");
+  sqlite.exec("PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL; PRAGMA foreign_keys = ON;");
   sqlite.exec(INIT_SQL);
   migrateTurnTracesTable(sqlite);
 
@@ -231,7 +229,7 @@ export function openDatabase(sqlitePath: string): DbHandle {
   };
 }
 
-function migrateTurnTracesTable(sqlite: Database.Database): void {
+function migrateTurnTracesTable(sqlite: Database): void {
   const existingCols = new Set(
     (sqlite.prepare("PRAGMA table_info(turn_traces)").all() as Array<{ name: string }>).map(
       (col) => col.name,

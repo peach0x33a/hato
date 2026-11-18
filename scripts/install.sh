@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Hato 安装脚本（支持 curl 一键安装、本地源码/发行包安装，以及临时启用中国镜像源）
+# Hato 安装脚本（Bun 运行时，支持 curl 一键安装与临时中国镜像源）
 
 CN_MIRROR="${HATO_CN_MIRROR:-0}"
 TARGET_DIR=""
@@ -28,7 +28,7 @@ usage() {
   curl -fsSL https://raw.githubusercontent.com/peach0x33a/hato/main/scripts/install.sh | bash -s -- [选项]
 
 选项:
-  --cn, --mirror            临时使用中国镜像源 (npmmirror) 安装依赖，不修改全局 ~/.npmrc
+  --cn, --mirror            临时使用中国镜像源 (npmmirror) 安装依赖，不修改全局配置
   --dir <path>              指定安装目标目录（curl 安装默认 ~/.local/share/hato）
   --version <tag>           指定要下载的发行版标签（如 v0.1.0，默认获取 latest）
   --release-url <base_url>  自定义发行版下载基础 URL（可用于镜像加速）
@@ -104,34 +104,19 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-# 1. 检查 Node.js >= 22 与 npm
-if ! command -v node >/dev/null 2>&1; then
-  log_err "未检测到 node，请先安装 Node.js >= 22.0.0"
+# 1. 检查 Bun 运行时
+if ! command -v bun >/dev/null 2>&1; then
+  log_err "未检测到 bun，请先安装 Bun（https://bun.sh）: curl -fsSL https://bun.sh/install | bash"
   exit 1
 fi
 
-NODE_VERSION="$(node -v | sed 's/^v//')"
-NODE_MAJOR="${NODE_VERSION%%.*}"
-if [[ -z "$NODE_MAJOR" || "$NODE_MAJOR" -lt 22 ]]; then
-  log_err "当前 Node.js 版本为 v${NODE_VERSION}，Hato 需要 Node.js >= 22.0.0"
-  exit 1
-fi
+BUN_VERSION="$(bun --version)"
+log_info "检测到 Bun v${BUN_VERSION}"
 
-if ! command -v npm >/dev/null 2>&1; then
-  log_err "未检测到 npm，请确认 Node.js 安装完整"
-  exit 1
-fi
-
-log_info "检测到 Node.js v${NODE_VERSION} / npm $(npm -v)"
-
-if ! command -v python3 >/dev/null 2>&1 || ! command -v make >/dev/null 2>&1; then
-  log_warn "未检测到完整的 python3 / make 编译工具链；若 better-sqlite3 无预编译包，可能需要安装 Xcode CLT (macOS) 或 build-essential (Linux)"
-fi
-
-# 2. 配置临时中国镜像源（仅作用于当前脚本子进程，不写入 ~/.npmrc）
+# 2. 配置临时中国镜像源（仅作用于当前脚本子进程，不写入全局配置文件）
 if [[ "$CN_MIRROR" == "1" ]]; then
   export npm_config_registry="https://registry.npmmirror.com"
-  export npm_config_better_sqlite3_binary_host_mirror="https://npmmirror.com/mirrors/better-sqlite3"
+  export BUN_CONFIG_REGISTRY="https://registry.npmmirror.com"
   export PLAYWRIGHT_DOWNLOAD_HOST="https://npmmirror.com/mirrors/playwright"
   log_info "已临时启用中国镜像源 (npmmirror)，本次安装结束后自动失效"
 fi
@@ -221,38 +206,33 @@ cd "$INSTALL_DIR"
 
 # 5. 安装依赖（区分预编译发行包模式与源码构建模式）
 IS_RELEASE_BUNDLE=0
-if [[ -f "${INSTALL_DIR}/dist/main.js" && -f "${INSTALL_DIR}/web/dist/index.html" && ! -d "${INSTALL_DIR}/src" ]]; then
+if [[ -f "${INSTALL_DIR}/web/dist/index.html" && ! -d "${INSTALL_DIR}/web/src" ]]; then
   IS_RELEASE_BUNDLE=1
 fi
 
 if [[ "$IS_RELEASE_BUNDLE" == "1" ]]; then
-  log_info "检测到预编译发行包，正在安装生产依赖..."
-  if [[ -f "${INSTALL_DIR}/package-lock.json" ]]; then
-    npm ci --omit=dev
+  log_info "检测到发行包，正在安装生产依赖..."
+  if [[ -f "${INSTALL_DIR}/bun.lock" ]]; then
+    bun install --frozen-lockfile --production
   else
-    npm install --omit=dev
+    bun install --production
   fi
 else
-  log_info "检测到源码目录，正在安装依赖并构建前后端..."
-  if [[ -f "${INSTALL_DIR}/package-lock.json" ]]; then
-    npm ci
+  log_info "检测到源码目录，正在安装依赖并构建 Web Console..."
+  if [[ -f "${INSTALL_DIR}/bun.lock" ]]; then
+    bun install --frozen-lockfile
   else
-    npm install
+    bun install
   fi
   if [[ -f "${INSTALL_DIR}/web/package.json" ]]; then
-    if [[ -f "${INSTALL_DIR}/web/package-lock.json" ]]; then
-      npm --prefix "${INSTALL_DIR}/web" ci
-    else
-      npm --prefix "${INSTALL_DIR}/web" install
-    fi
-    npm run build:web
+    bun install --cwd "${INSTALL_DIR}/web"
+    bun run build:web
   fi
-  npm run build
 fi
 
 if [[ "$WITH_PLAYWRIGHT" == "1" ]]; then
   log_info "正在安装 Playwright Chromium 内核..."
-  npx playwright install chromium
+  bunx playwright install chromium
 fi
 
 # 6. 初始化 ~/.hato 配置目录（不覆盖已有配置）
@@ -273,8 +253,8 @@ if [[ ! -f "${HATO_HOME_DIR}/mcp.toml" && -f "${INSTALL_DIR}/config/mcp.example.
 fi
 
 # 7. 创建全局快捷命令 ~/.local/bin/hato
-if [[ -f "${INSTALL_DIR}/dist/cli/hato.js" ]]; then
-  chmod +x "${INSTALL_DIR}/dist/cli/hato.js"
+if [[ -f "${INSTALL_DIR}/src/cli/hato.ts" ]]; then
+  chmod +x "${INSTALL_DIR}/src/cli/hato.ts"
 fi
 
 if [[ "$INSTALL_BIN" == "1" ]]; then
@@ -284,7 +264,7 @@ if [[ "$INSTALL_BIN" == "1" ]]; then
     cat > "$BIN_PATH" <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
-exec node "${INSTALL_DIR}/dist/cli/hato.js" "\$@"
+exec bun "${INSTALL_DIR}/src/cli/hato.ts" "\$@"
 EOF
     chmod +x "$BIN_PATH"
     log_ok "已创建快捷命令: ${BIN_PATH}（请确保 ${BIN_DIR} 已加入 PATH）"
@@ -297,10 +277,10 @@ log_ok "Hato 安装完成！"
 if [[ "$SKIP_SETUP" == "0" ]]; then
   if [[ -t 1 && ( -t 0 || -r /dev/tty ) ]]; then
     log_info "即将启动交互式配置向导 (hato setup)..."
-    node "${INSTALL_DIR}/dist/cli/hato.js" setup </dev/tty
+    bun "${INSTALL_DIR}/src/cli/hato.ts" setup </dev/tty
   else
-    log_info "当前为非交互终端，请稍后手动执行: node \"${INSTALL_DIR}/dist/cli/hato.js\" setup"
+    log_info "当前为非交互终端，请稍后手动执行: bun \"${INSTALL_DIR}/src/cli/hato.ts\" setup"
   fi
 else
-  log_info "已跳过配置向导。启动前请先运行: node \"${INSTALL_DIR}/dist/cli/hato.js\" setup"
+  log_info "已跳过配置向导。启动前请先运行: bun \"${INSTALL_DIR}/src/cli/hato.ts\" setup"
 fi

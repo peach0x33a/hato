@@ -452,8 +452,7 @@ export class BrowserRuntime {
       },
       getApiKey: (provider) => this.modelRegistry.resolveApiKeyForProvider(provider),
       streamFn: (model, context, streamOpts) => {
-        const scopedFetch: typeof globalThis.fetch = (reqInput, reqInit) =>
-          this.proxyRouter.scopedFetch(reqInput, reqInit, `llm-calling.${model.provider}`);
+        const scopedFetch = this.proxyRouter.createScopedFetch(`llm-calling.${model.provider}`);
         return streamSimpleWithRetry(
           () => {
             activeCallStartPerf = performance.now();

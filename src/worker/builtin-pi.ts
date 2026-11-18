@@ -230,8 +230,7 @@ export class BuiltinPiRunner implements ExecutionRunner {
       sessionId: ticket.ticketId,
       getApiKey: (provider) => this.deps.modelRegistry.resolveApiKeyForProvider(provider),
       streamFn: (model, context, options) => {
-        const scopedFetch: typeof globalThis.fetch = (input, init) =>
-          this.deps.proxyRouter.scopedFetch(input, init, `llm-calling.${model.provider}`);
+        const scopedFetch = this.deps.proxyRouter.createScopedFetch(`llm-calling.${model.provider}`);
         return streamSimpleWithRetry(
           () =>
             this.deps.proxyRouter.runWithScope(`llm-calling.${model.provider}`, () =>

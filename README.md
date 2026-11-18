@@ -7,7 +7,7 @@
 兼顾长期情感陪伴（时间感知、跨轮记忆、拟真气泡节奏、主动关怀）与安全隔离的工程任务委托执行
 
 [![Release](https://img.shields.io/github/v/release/peach0x33a/hato?style=flat-square&color=blue)](https://github.com/peach0x33a/hato/releases)
-[![Node.js](https://img.shields.io/badge/Node.js-%3E%3D22.0.0-339933?style=flat-square&logo=nodedotjs&logoColor=white)](https://nodejs.org/)
+[![Bun](https://img.shields.io/badge/Bun-%3E%3D1.2-fbf0df?style=flat-square&logo=bun&logoColor=black)](https://bun.sh/)
 [![TypeScript](https://img.shields.io/badge/TypeScript-ESM-3178C6?style=flat-square&logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
 
 [快速开始](#-快速开始) · [核心特性](#-核心特性) · [常用命令](#-常用命令) · [架构文档](docs/architecture.md)
@@ -57,8 +57,7 @@ Telegram / Web Console
 
 ### 环境要求
 
-- **Node.js** `>= 22.0.0`
-- 如需本地编译 `better-sqlite3` 原生模块：macOS 需安装 Xcode Command Line Tools，Linux 需安装 `python3`、`make` 与 `g++`。
+- **Bun** `>= 1.2`（内置 `bun:sqlite` 与原生 TypeScript 运行时，无需 C++ 编译工具链）
 
 ### 方式一：一键安装（推荐）
 
@@ -90,10 +89,10 @@ curl -fsSL https://raw.githubusercontent.com/peach0x33a/hato/main/scripts/instal
 ### 方式二：从源码手动构建
 
 ```bash
-npm install
-npm --prefix web install
-npm run build:web && npm run build
-npm link          # 注册全局 hato 命令（可选）
+bun install
+bun install --cwd web
+bun run build:web
+bun link          # 注册全局 hato 命令（可选）
 hato setup        # 运行交互式配置向导
 hato              # 启动服务
 ```
@@ -115,17 +114,16 @@ hato              # 启动服务
 | `hato -h` / `--help` | 显示帮助信息 |
 
 <details>
-<summary>开发与构建脚本（npm scripts）</summary>
+<summary>开发与构建脚本（bun run）</summary>
 
 | 命令 | 说明 |
 | --- | --- |
-| `npm run dev` | 监听 `src/main.ts` 热重启后端 |
-| `npm run dev:web` | 启动 Web Console Vite 开发服务器 |
-| `npm run build:web` | 构建前端产物至 `web/dist/` |
-| `npm run build` | 编译后端 TypeScript 至 `dist/` |
-| `npm run typecheck` | 运行 TypeScript 类型检查 |
-| `npm test` | 运行自动化测试 |
-| `npm run release:pack` | 校验、构建并打包发行版至 `release/` |
+| `bun run dev` | 监听 `src/main.ts` 热重启后端 |
+| `bun run dev:web` | 启动 Web Console Vite 开发服务器 |
+| `bun run build:web` | 构建前端产物至 `web/dist/` |
+| `bun run typecheck` | 运行 TypeScript 类型检查 |
+| `bun test` | 运行自动化测试 |
+| `bun run release:pack` | 校验、构建并打包发行版至 `release/` |
 
 </details>
 
@@ -152,7 +150,7 @@ hato              # 启动服务
 <summary>展开查看 AI Coding Agent / LLM 上下文与安装指导</summary>
 
 ### 仓库概览与约束
-- **核心定位**：Node.js (`>=22`) + TypeScript (ESM `NodeNext`) 编写的 1v1 个人助手；前端控制台位于 `web/`（React 19 + Vite + Tailwind CSS v4）。
+- **核心定位**：Bun (`>=1.2`) + TypeScript (ESM `NodeNext`) 编写的 1v1 个人助手；前端控制台位于 `web/`（React 19 + Vite + Tailwind CSS v4）。
 - **关键入口**：
   - `src/cli/hato.ts`：全局 CLI 入口（`hato [start|setup|statics]`），启动前切换 `cwd` 至包根目录。
   - `src/main.ts`：主运行时（Gateway、EventBus/ActorLock、Persona、Router、Worker、Memory、Web Console）。
@@ -160,14 +158,14 @@ hato              # 启动服务
 - **核心架构约束（修改代码时需遵守）**：
   - **三道墙隔离**：`src/persona/` 不得获得宿主机执行权限；`src/dispatch/`（Neutral Router）只圈定 `[from_msg_id .. to_msg_id]` 与签发 `context_id`，不向 Worker 泄露 `prompts/persona.md` 与情感记忆；`src/worker/` 通过 `context_id` 按需拉取原文切片。
   - **双区隔离**：Skills 与 MCP 严格区分 `personal` / `worker` 区，外部 CLI 通过 Overlay 隔离个人凭据。
-- **配置与数据路径**：运行时配置统一位于 `~/.hato/`（可由 `HATO_HOME` 覆盖），包含 `hato.toml`、`models.toml`、`mcp.toml`、`.env`；持久化使用 SQLite + Drizzle ORM（`src/db/`）。
-- **校验命令**：修改后依次执行 `npm run typecheck`、`npm test`、`npm run build:web && npm run build`。详细设计见 [docs/architecture.md](docs/architecture.md)。
+- **配置与数据路径**：运行时配置统一位于 `~/.hato/`（可由 `HATO_HOME` 覆盖），包含 `hato.toml`、`models.toml`、`mcp.toml`、`.env`；持久化使用 `bun:sqlite` + Drizzle ORM（`src/db/`）。
+- **校验命令**：修改后依次执行 `bun run typecheck`、`bun test`、`bun run build:web`。详细设计见 [docs/architecture.md](docs/architecture.md)。
 
 ### 自动化安装指导（供 Agent 为用户部署时参考）
-1. **前置检查**：确认 `node -v` `>= 22.0.0` 且存在 `npm`；若需非交互安装，传入 `--skip-setup`。
+1. **前置检查**：确认 `bun -v` 已安装；若需非交互安装，传入 `--skip-setup`。
 2. **执行安装**：
    - 预编译发行版一键安装：`curl -fsSL https://raw.githubusercontent.com/peach0x33a/hato/main/scripts/install.sh | bash -s -- --skip-setup`（中国大陆环境追加 `--cn`）。
-   - 本地源码目录安装：`npm ci && npm --prefix web ci && npm run build:web && npm run build && npm link`。
+   - 本地源码目录安装：`bun install --frozen-lockfile && bun install --cwd web && bun run build:web && bun link`。
 3. **配置与启动**：提示用户运行 `hato setup`（或编辑 `~/.hato/` 下的 `hato.toml`、`models.toml`、`.env`），随后运行 `hato` 启动服务。
 
 </details>

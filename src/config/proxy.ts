@@ -4,7 +4,6 @@ import https from "node:https";
 import { Readable } from "node:stream";
 import { HttpsProxyAgent } from "https-proxy-agent";
 import { SocksProxyAgent } from "socks-proxy-agent";
-import { Agent as UndiciAgent, ProxyAgent as UndiciProxyAgent, fetch as undiciFetch } from "undici";
 import type { ProxyRuleConfig } from "./app.js";
 
 export type ProxyResolution =
@@ -37,8 +36,6 @@ function isSocksUrl(url: string): boolean {
  */
 export class ScopedProxyRouter {
   private rules: ProxyRuleConfig[] = [];
-  private readonly undiciProxies = new Map<string, UndiciProxyAgent>();
-  private readonly directUndiciAgent = new UndiciAgent();
   private readonly nodeHttpAgents = new Map<string, http.Agent>();
   private readonly directHttpAgent = new http.Agent({ keepAlive: true });
   private readonly directHttpsAgent = new https.Agent({ keepAlive: true });
@@ -55,10 +52,6 @@ export class ScopedProxyRouter {
       scope: rule.scope.map((s) => s.trim()),
     }));
 
-    for (const agent of this.undiciProxies.values()) {
-      void agent.close();
-    }
-    this.undiciProxies.clear();
     this.nodeHttpAgents.clear();
   }
 
@@ -95,10 +88,24 @@ export class ScopedProxyRouter {
    */
   installGlobalFetchHook(): void {
     if (this.fetchInstalled) return;
-    globalThis.fetch = (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
-      return this.scopedFetch(input, init);
-    };
+    globalThis.fetch = Object.assign(
+      (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+        return this.scopedFetch(input, init);
+      },
+      { preconnect: originalGlobalFetch.preconnect },
+    );
     this.fetchInstalled = true;
+  }
+
+  /**
+   * Create a `fetch`-compatible function bound to a fixed proxy scope.
+   */
+  createScopedFetch(scope: string): typeof globalThis.fetch {
+    return Object.assign(
+      (input: string | URL | Request, init?: RequestInit): Promise<Response> =>
+        this.scopedFetch(input, init, scope),
+      { preconnect: originalGlobalFetch.preconnect },
+    );
   }
 
   uninstallGlobalFetchHook(): void {
@@ -155,22 +162,15 @@ export class ScopedProxyRouter {
     const resolved = this.resolveScope(scope);
 
     if (resolved.mode === "direct") {
-      return undiciFetch(input as Parameters<typeof undiciFetch>[0], {
-        ...(init as Parameters<typeof undiciFetch>[1]),
-        dispatcher: this.directUndiciAgent,
-      }) as unknown as Promise<Response>;
+      return originalGlobalFetch(input, init);
     }
 
     if (!isSocksUrl(resolved.url)) {
-      let dispatcher = this.undiciProxies.get(resolved.url);
-      if (!dispatcher) {
-        dispatcher = new UndiciProxyAgent({ uri: resolved.url });
-        this.undiciProxies.set(resolved.url, dispatcher);
-      }
-      return undiciFetch(input as Parameters<typeof undiciFetch>[0], {
-        ...(init as Parameters<typeof undiciFetch>[1]),
-        dispatcher,
-      }) as unknown as Promise<Response>;
+      const proxyInit = {
+        ...init,
+        proxy: resolved.url,
+      } as RequestInit;
+      return originalGlobalFetch(input, proxyInit);
     }
 
     return nodeFetchViaAgent(input, init, this.getNodeAgent(scope));
@@ -182,7 +182,10 @@ async function nodeFetchViaAgent(
   init: RequestInit | undefined,
   agent: http.Agent,
 ): Promise<Response> {
-  const reqObj = input instanceof Request ? input : new Request(input, init);
+  const reqObj =
+    input instanceof Request
+      ? input
+      : new Request(input instanceof URL ? input.toString() : input, init);
   const url = new URL(reqObj.url);
   const transport = url.protocol === "http:" ? http : https;
 

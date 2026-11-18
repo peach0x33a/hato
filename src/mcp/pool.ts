@@ -292,12 +292,9 @@ export class McpClientPool {
 
     const url = new URL(server.url);
     const headers = resolveMcpHttpHeaders(server);
-    const scopedFetch: typeof globalThis.fetch = (input, init) => {
-      if (!this.proxyRouter) {
-        return globalThis.fetch(input, init);
-      }
-      return this.proxyRouter.scopedFetch(input, init, server.proxyScope);
-    };
+    const scopedFetch = this.proxyRouter
+      ? this.proxyRouter.createScopedFetch(server.proxyScope)
+      : globalThis.fetch;
 
     const streamableTransport = new StreamableHTTPClientTransport(url, {
       fetch: scopedFetch,

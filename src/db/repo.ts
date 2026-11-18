@@ -710,11 +710,12 @@ export class HatoRepository {
   deleteRelationshipFact(key: string): boolean {
     const cleanKey = key.trim();
     if (!cleanKey) return false;
-    const res = this.db
+    const rows = this.db
       .delete(relationshipFacts)
       .where(eq(relationshipFacts.key, cleanKey))
-      .run();
-    return res.changes > 0;
+      .returning({ key: relationshipFacts.key })
+      .all();
+    return rows.length > 0;
   }
 
   listOpenLoops(canonicalUserId: string, limit = 20) {
@@ -845,13 +846,18 @@ export class HatoRepository {
         updatedAt: Date.now(),
       })
       .where(eq(scriptRegistry.id, scriptId))
-      .run();
-    return res.changes > 0;
+      .returning({ id: scriptRegistry.id })
+      .all();
+    return res.length > 0;
   }
 
   deleteScript(scriptId: string): boolean {
-    const res = this.db.delete(scriptRegistry).where(eq(scriptRegistry.id, scriptId)).run();
-    return res.changes > 0;
+    const res = this.db
+      .delete(scriptRegistry)
+      .where(eq(scriptRegistry.id, scriptId))
+      .returning({ id: scriptRegistry.id })
+      .all();
+    return res.length > 0;
   }
 
   updateOpenLoopStatus(loopId: string, status: string): boolean {
@@ -859,8 +865,9 @@ export class HatoRepository {
       .update(openLoops)
       .set({ status })
       .where(eq(openLoops.id, loopId))
-      .run();
-    return res.changes > 0;
+      .returning({ id: openLoops.id })
+      .all();
+    return res.length > 0;
   }
 
   listScripts(limit = 20) {

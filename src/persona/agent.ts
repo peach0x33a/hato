@@ -180,8 +180,7 @@ export class PersonaRuntime {
       sessionId: canonicalUserId,
       getApiKey: (provider) => this.modelRegistry.resolveApiKeyForProvider(provider),
       streamFn: (model, context, options) => {
-        const scopedFetch: typeof globalThis.fetch = (input, init) =>
-          this.proxyRouter.scopedFetch(input, init, `llm-calling.${model.provider}`);
+        const scopedFetch = this.proxyRouter.createScopedFetch(`llm-calling.${model.provider}`);
         return streamSimpleWithRetry(
           () => {
             this.activeCallStartPerf = performance.now();
@@ -1214,8 +1213,7 @@ export class PersonaRuntime {
     });
 
     const apiKey = this.modelRegistry.resolveApiKeyForProvider(resolved.providerSlug);
-    const scopedFetch: typeof globalThis.fetch = (input, init) =>
-      this.proxyRouter.scopedFetch(input, init, `llm-calling.${resolved.providerSlug}`);
+    const scopedFetch = this.proxyRouter.createScopedFetch(`llm-calling.${resolved.providerSlug}`);
 
     const callStartPerf = performance.now();
     let firstDeltaPerf: number | null = null;

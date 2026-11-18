@@ -560,8 +560,7 @@ export class MemoryCurator {
     ];
 
     const apiKey = this.modelRegistry.resolveApiKeyForProvider(resolved.providerSlug);
-    const scopedFetch: typeof globalThis.fetch = (input, init) =>
-      this.proxyRouter.scopedFetch(input, init, `llm-calling.${resolved.providerSlug}`);
+    const scopedFetch = this.proxyRouter.createScopedFetch(`llm-calling.${resolved.providerSlug}`);
 
     const callStartPerf = performance.now();
     let firstDeltaPerf: number | null = null;

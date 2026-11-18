@@ -232,8 +232,7 @@ export class NeutralRouter {
     const result: AssistantMessage = await this.deps.proxyRouter.runWithScope(
       `llm-calling.${resolved.model.provider}`,
       async () => {
-        const scopedFetch: typeof globalThis.fetch = (input, init) =>
-          this.deps.proxyRouter.scopedFetch(input, init, `llm-calling.${resolved.model.provider}`);
+        const scopedFetch = this.deps.proxyRouter.createScopedFetch(`llm-calling.${resolved.model.provider}`);
         const stream = streamSimpleWithRetry(
           () =>
             this.deps.modelRegistry.models.streamSimple(

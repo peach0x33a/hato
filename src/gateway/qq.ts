@@ -1,7 +1,6 @@
 import { readFileSync } from "node:fs";
 import { basename, dirname } from "node:path";
 import type { ImageContent } from "@earendil-works/pi-ai";
-import { ProxyAgent as UndiciProxyAgent, WebSocket as UndiciWebSocket } from "undici";
 import { resolveGatewayRetryConfig, type HatoConfig } from "../config/app.js";
 import type { ScopedProxyRouter } from "../config/proxy.js";
 import { logError, logInfo, logWarn, summarizeError } from "../utils/logger.js";
@@ -250,7 +249,7 @@ export class QqAdapter implements ChannelAdapter {
   private readonly explicitSeq = new Map<string, number>();
 
   private stopped = true;
-  private ws: UndiciWebSocket | null = null;
+  private ws: WebSocket | null = null;
   private loopPromise: Promise<void> | null = null;
   private sessionId = "";
   private seq = 0;
@@ -533,13 +532,13 @@ export class QqAdapter implements ChannelAdapter {
     const gatewayUrl = await this.client.getGatewayUrl();
     const token = await this.client.getToken();
     const proxyRes = this.proxyRouter.resolveScope("gateway.qq");
-    const dispatcher =
+    const proxyUrl =
       proxyRes.mode === "proxy" && /^https?:\/\//i.test(proxyRes.url)
-        ? new UndiciProxyAgent(proxyRes.url)
+        ? proxyRes.url
         : undefined;
 
     return await new Promise<boolean>((resolvePromise, rejectPromise) => {
-      const ws = new UndiciWebSocket(gatewayUrl, dispatcher ? { dispatcher } : undefined);
+      const ws = new WebSocket(gatewayUrl, (proxyUrl ? { proxy: proxyUrl } : undefined) as any);
       this.ws = ws;
 
       let ready = false;
