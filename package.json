@@ -4,6 +4,9 @@
   "private": true,
   "type": "module",
   "description": "Personal companion & delegated task agent",
+  "bin": {
+    "hato": "./dist/cli/hato.js"
+  },
   "scripts": {
     "dev": "tsx watch src/main.ts",
     "setup": "tsx src/cli/setup.ts",

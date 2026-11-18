@@ -190,6 +190,10 @@ if [[ ! -f "${HATO_HOME_DIR}/mcp.toml" && -f "${INSTALL_DIR}/config/mcp.example.
 fi
 
 # 6. 可选创建 ~/.local/bin/hato 快捷启动脚本
+if [[ -f "${INSTALL_DIR}/dist/cli/hato.js" ]]; then
+  chmod +x "${INSTALL_DIR}/dist/cli/hato.js"
+fi
+
 if [[ "$INSTALL_BIN" == "1" ]]; then
   BIN_DIR="${HOME}/.local/bin"
   if mkdir -p "$BIN_DIR" 2>/dev/null; then
@@ -197,16 +201,7 @@ if [[ "$INSTALL_BIN" == "1" ]]; then
     cat > "$BIN_PATH" <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
-cd "${INSTALL_DIR}"
-if [[ "\${1:-}" == "setup" ]]; then
-  shift
-  exec node "${INSTALL_DIR}/dist/cli/setup.js" "\$@"
-elif [[ "\${1:-}" == "statics" ]]; then
-  shift
-  exec node "${INSTALL_DIR}/dist/cli/statics.js" "\$@"
-else
-  exec node "${INSTALL_DIR}/dist/main.js" "\$@"
-fi
+exec node "${INSTALL_DIR}/dist/cli/hato.js" "\$@"
 EOF
     chmod +x "$BIN_PATH"
     log_ok "已创建快捷命令: ${BIN_PATH}（请确保 ${BIN_DIR} 已加入 PATH）"

@@ -128,6 +128,18 @@ npm start
 
 ## 常用命令
 
+### 全局 CLI 命令（`hato`）
+
+通过安装脚本或 `npm link` 注册全局命令后，可在任意目录直接运行：
+
+| 命令 | 说明 |
+| --- | --- |
+| `hato` / `hato start` | 启动 Hato 服务（Telegram 网关 + Web Console） |
+| `hato setup` | 运行交互式配置向导 |
+| `hato statics` | 查看运行与 Token 用量统计（别名：`hato stats`） |
+| `hato -v` / `hato --version` | 显示当前版本号 |
+| `hato -h` / `hato --help` | 显示命令行帮助 |
+
 ### npm 脚本
 
 | 命令 | 说明 |
