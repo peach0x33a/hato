@@ -428,18 +428,11 @@ export function ConsoleInput({ size = "md", className, ...props }: ConsoleInputP
   );
 }
 
-const SLOT_BADGE_STYLE: Record<string, string> = {
-  persona: "border-primary/25 bg-primary/10 text-primary",
-  worker: "border-amber-500/25 bg-amber-500/10 text-amber-700 dark:text-amber-300",
-  curator: "border-emerald-500/25 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300",
-  router: "border-sky-500/25 bg-sky-500/10 text-sky-700 dark:text-sky-300",
-  hindsight_llm: "border-violet-500/25 bg-violet-500/10 text-violet-700 dark:text-violet-300",
-  vision: "border-rose-500/25 bg-rose-500/10 text-rose-700 dark:text-rose-300",
-};
+import { SLOT_COLOR_MAP } from "@/components/console/models/types";
 
 export function SlotBadge({ slot, className }: { slot: string; className?: string }) {
   const tone =
-    SLOT_BADGE_STYLE[slot] ?? "border-border/80 bg-muted/60 text-foreground";
+    SLOT_COLOR_MAP[slot]?.pillClass ?? "border-border/80 bg-muted/60 text-foreground";
   return (
     <span
       className={cn(

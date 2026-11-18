@@ -186,6 +186,7 @@ function ConsoleShell() {
   const [authNeeded, setAuthNeeded] = useState(false);
   const [tokenInput, setTokenInput] = useState(getStoredToken);
   const [reloadState, setReloadState] = useState<ButtonState>("idle");
+  const [modelsDirty, setModelsDirty] = useState(false);
   const { toasts, showToast, dismissToast } = useAnimatedToastStack({ limit: 4 });
   const reduceMotion = useReducedMotion();
   const isSettings = activeTab === "settings";
@@ -546,6 +547,14 @@ function ConsoleShell() {
                   title={item.label}
                   aria-label={item.label}
                   onClick={() => {
+                    if (
+                      activeTab === "models" &&
+                      item.id !== "models" &&
+                      modelsDirty &&
+                      !window.confirm("「模型与供应商」存在未保存的更改，确定要离开吗？")
+                    ) {
+                      return;
+                    }
                     setActiveTab(item.id);
                     if (item.id === "chat") {
                       setSelectedSessionId(null);
@@ -716,6 +725,7 @@ function ConsoleShell() {
                 initialConfig={configSnap.modelsConfig}
                 secretStates={configSnap.secretStates}
                 hindsightEnabled={configSnap.hatoConfig.memory?.provider === "hindsight"}
+                onDirtyChange={setModelsDirty}
                 onToast={notify}
                 onSaved={(next) => {
                   setConfigSnap((prev) => (prev ? { ...prev, modelsConfig: next } : prev));

@@ -30,47 +30,51 @@ export interface SlotDefinition {
 export const SLOT_DEFINITIONS: SlotDefinition[] = [
   {
     key: "persona",
-    label: "主对话槽位",
+    label: "主对话",
     accentClass: "text-emerald-600 dark:text-emerald-400",
     pillClass:
       "border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300",
   },
   {
     key: "worker",
-    label: "后台执行槽位",
-    accentClass: "text-amber-600 dark:text-amber-400",
-    pillClass:
-      "border-amber-500/30 bg-amber-500/10 text-amber-700 dark:text-amber-300",
-  },
-  {
-    key: "router",
-    label: "轻量路由槽位",
+    label: "后台执行",
     accentClass: "text-sky-600 dark:text-sky-400",
     pillClass:
       "border-sky-500/30 bg-sky-500/10 text-sky-700 dark:text-sky-300",
   },
   {
-    key: "curator",
-    label: "上下文整理槽位",
-    accentClass: "text-teal-600 dark:text-teal-400",
+    key: "router",
+    label: "轻量路由",
+    accentClass: "text-cyan-600 dark:text-cyan-400",
     pillClass:
-      "border-teal-500/30 bg-teal-500/10 text-teal-700 dark:text-teal-300",
+      "border-cyan-500/30 bg-cyan-500/10 text-cyan-700 dark:text-cyan-300",
+  },
+  {
+    key: "curator",
+    label: "上下文整理",
+    accentClass: "text-indigo-600 dark:text-indigo-400",
+    pillClass:
+      "border-indigo-500/30 bg-indigo-500/10 text-indigo-700 dark:text-indigo-300",
   },
   {
     key: "hindsight_llm",
-    label: "记忆抽取槽位",
+    label: "记忆抽取",
+    accentClass: "text-fuchsia-600 dark:text-fuchsia-400",
+    pillClass:
+      "border-fuchsia-500/30 bg-fuchsia-500/10 text-fuchsia-700 dark:text-fuchsia-300",
+  },
+  {
+    key: "vision",
+    label: "图像理解",
     accentClass: "text-violet-600 dark:text-violet-400",
     pillClass:
       "border-violet-500/30 bg-violet-500/10 text-violet-700 dark:text-violet-300",
   },
-  {
-    key: "vision",
-    label: "图像理解槽位（未配回退主对话）",
-    accentClass: "text-rose-600 dark:text-rose-400",
-    pillClass:
-      "border-rose-500/30 bg-rose-500/10 text-rose-700 dark:text-rose-300",
-  },
 ];
+
+export const SLOT_COLOR_MAP: Record<string, SlotDefinition> = Object.fromEntries(
+  SLOT_DEFINITIONS.map((def) => [def.key, def]),
+);
 
 export interface ProviderPreset {
   id: string;
@@ -255,17 +259,30 @@ export function createUid(prefix: string): string {
 }
 
 export function formatTokenCount(raw: string): string | null {
-  const n = Number(raw.trim());
-  if (!Number.isFinite(n) || n <= 0) return null;
-  if (n >= 1_000_000) {
-    const m = n / 1_000_000;
+  const parsed = parseTokenNumber(raw);
+  if (parsed === null || parsed <= 0) return null;
+  if (parsed >= 1_000_000) {
+    const m = parsed / 1_000_000;
     return `${Number.isInteger(m) ? m : m.toFixed(1)}M`;
   }
-  if (n >= 1_000) {
-    const k = Math.round(n / 1_000);
+  if (parsed >= 1_000) {
+    const k = Math.round(parsed / 1_000);
     return `${k}K`;
   }
-  return String(Math.round(n));
+  return String(Math.round(parsed));
+}
+
+export function parseTokenNumber(raw: string): number | null {
+  const trimmed = raw.trim().replace(/,/g, "");
+  if (!trimmed) return null;
+  const match = /^(\d+(?:\.\d+)?)\s*([kKmM])?$/.exec(trimmed);
+  if (!match) return null;
+  const base = Number(match[1]);
+  if (!Number.isFinite(base) || base <= 0) return null;
+  const suffix = match[2]?.toLowerCase();
+  const multiplier = suffix === "m" ? 1_000_000 : suffix === "k" ? 1_000 : 1;
+  const val = Math.round(base * multiplier);
+  return Number.isFinite(val) && val >= 1 ? val : null;
 }
 
 export function generateUniqueModelId(
@@ -329,11 +346,46 @@ export function validatePositiveIntInput(
   if (!trimmed) {
     return { ok: false, error: `${fieldLabel}不能为空` };
   }
-  const n = Number(trimmed);
-  if (!Number.isFinite(n) || !Number.isInteger(n) || n < 1) {
-    return { ok: false, error: `${fieldLabel}必须是大于 0 的整数` };
+  const n = parseTokenNumber(trimmed);
+  if (n === null || !Number.isInteger(n) || n < 1) {
+    return { ok: false, error: `${fieldLabel}必须是大于 0 的整数（支持 128K / 1M）` };
   }
   return { ok: true, value: n };
+}
+
+export function validateModelEntry(
+  model: UiModelEntry,
+  isDuplicateId: boolean,
+): {
+  idError: string | null;
+  ctxCheck: ReturnType<typeof validatePositiveIntInput>;
+  maxOutCheck: { ok: true; value: number } | { ok: false; error: string };
+  headersCheck: ReturnType<typeof parseHeadersJson>;
+  modelsDevMissingRef: boolean;
+  hasError: boolean;
+} {
+  const trimmedId = model.id.trim();
+  const idError = !trimmedId
+    ? "请填写模型 ID"
+    : /\s/.test(trimmedId)
+      ? "模型 ID 不能包含空白字符"
+      : isDuplicateId
+        ? "当前供应商下模型 ID 重复"
+        : null;
+
+  const ctxCheck = validatePositiveIntInput(model.advanced.contextWindow, "上下文窗口");
+  const rawMaxOut = validatePositiveIntInput(model.advanced.maxOutputTokens, "最大输出");
+  const maxOutCheck: { ok: true; value: number } | { ok: false; error: string } =
+    rawMaxOut.ok && ctxCheck.ok && rawMaxOut.value > ctxCheck.value
+      ? { ok: false, error: "最大输出不能超过上下文窗口" }
+      : rawMaxOut;
+  const headersCheck = parseHeadersJson(model.advanced.customHeaders, "自定义请求头");
+  const modelsDevMissingRef = Boolean(model.modelsDev?.enabled && !model.modelsDev.modelRef.trim());
+  const hasError = Boolean(
+    idError || !ctxCheck.ok || !maxOutCheck.ok || !headersCheck.ok || modelsDevMissingRef,
+  );
+
+  return { idError, ctxCheck, maxOutCheck, headersCheck, modelsDevMissingRef, hasError };
 }
 
 export function toUiProviders(config: ModelsFileConfig): UiProviderConfig[] {
@@ -484,6 +536,14 @@ export function buildApiModelsConfig(
       );
       if (!maxOutRes.ok) {
         return { ok: false, error: maxOutRes.error, providerUid: prov.uid, modelUid: m.uid };
+      }
+      if (maxOutRes.value > ctxRes.value) {
+        return {
+          ok: false,
+          error: `模型 "${label}" 最大输出 (${maxOutRes.value}) 不能超过上下文窗口 (${ctxRes.value})`,
+          providerUid: prov.uid,
+          modelUid: m.uid,
+        };
       }
 
       const headersRes = parseHeadersJson(
