@@ -159,6 +159,17 @@ export class HatoRepository {
     };
   }
 
+  updateRawMessage(id: string, patch: { content: string; createdAt?: number }): void {
+    this.db
+      .update(rawMessages)
+      .set({
+        content: patch.content,
+        ...(patch.createdAt !== undefined ? { createdAt: patch.createdAt } : {}),
+      })
+      .where(eq(rawMessages.id, id))
+      .run();
+  }
+
   findMessageByPlatformId(channel: ChannelName, platformMsgId: string): RawMessageRecord | null {
     const row = this.db
       .select()

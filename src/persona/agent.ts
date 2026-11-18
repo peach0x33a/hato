@@ -45,6 +45,12 @@ import {
   hydrateTranscriptFromDb,
   rawRecordToAgentMessage,
 } from "./context.js";
+import {
+  buildInterruptedAssistantText,
+  parsePureErrorInterruptionNotice,
+  stripErrorInterruptionNotices,
+  summarizeErrorForContext,
+} from "./interruption.js";
 import { loadLayeredPrompts, type LoadedLayeredPrompts } from "./prompts.js";
 import { createPersonaReadOnlyTools } from "./tools.js";
 
@@ -650,6 +656,15 @@ export class PersonaRuntime {
       sentMessageRefs: new Set(),
       sentBubbles: [],
     };
+    const sentMediaNotes: string[] = [];
+
+    const trackedSendPhoto: SendPhotoToUserFn | undefined = options?.sendPhotoToUser
+      ? async (photo, caption) => {
+          await options.sendPhotoToUser!(photo, caption);
+          const cap = caption?.trim();
+          sentMediaNotes.push(cap ? `[已发送图片：${cap.slice(0, 40)}]` : "[已发送图片]");
+        }
+      : undefined;
 
     const unsubscribe = this.agent.subscribe((ev) => {
       if (ev.type === "message_start" && ev.message.role === "assistant") {
@@ -673,6 +688,24 @@ export class PersonaRuntime {
 
       if (ev.type === "tool_execution_start") {
         turnState.hasToolActivity = true;
+        return;
+      }
+
+      if (ev.type === "tool_execution_end" && ev.toolName === "send_sticker" && !ev.isError) {
+        const resObj =
+          ev.result && typeof ev.result === "object"
+            ? (ev.result as {
+                details?: { ok?: boolean; stickerId?: string };
+                content?: Array<{ type?: string; text?: string }>;
+              })
+            : undefined;
+        if (resObj?.details?.ok) {
+          const textBlock = Array.isArray(resObj.content)
+            ? (resObj.content.find((c) => c.type === "text")?.text ?? "")
+            : "";
+          const note = textBlock.trim() || `已发送表情包 ${resObj.details.stickerId ?? ""}`.trim();
+          sentMediaNotes.push(`[${note}]`);
+        }
         return;
       }
 
@@ -808,7 +841,8 @@ export class PersonaRuntime {
       }
     }
 
-    this.browserRuntime?.setPhotoSender(options?.sendPhotoToUser ?? null);
+    this.browserRuntime?.setPhotoSender(trackedSendPhoto ?? null);
+    let promptErr: unknown = null;
     try {
       if (!turnState.abortedForSupersede && !options?.shouldSuppressSend?.()) {
         await this.agent.prompt(userAgentMsg);
@@ -818,6 +852,8 @@ export class PersonaRuntime {
       } else {
         turnState.abortedForSupersede = true;
       }
+    } catch (err) {
+      promptErr = err;
     } finally {
       turnState.promptSettled = true;
       this.activeBeforeToolHook = null;
@@ -870,8 +906,20 @@ export class PersonaRuntime {
 
     this.pendingSupersededImages.delete(canonicalUserId);
 
-    if (this.agent.state.errorMessage) {
-      throw new Error(this.agent.state.errorMessage);
+    const turnFailure =
+      promptErr ?? (this.agent.state.errorMessage ? new Error(this.agent.state.errorMessage) : null);
+    if (turnFailure) {
+      this.persistInterruptedTurn({
+        canonicalUserId,
+        channel: batch.originChannel,
+        minCreatedAt: savedUserMsg.createdAt + 1,
+        compactedUntilTs: wmState.compactedUntilTs,
+        sentParts: [...preReplyState.sentBubbles, ...sentMediaNotes],
+        err: turnFailure,
+      });
+      this.activeTurnRecalledIds.clear();
+      this.refreshTranscriptFromDb();
+      throw turnFailure;
     }
 
     const newMessages = this.agent.state.messages.slice(startIndex);
@@ -969,6 +1017,61 @@ export class PersonaRuntime {
    * Narrate a background ticket result, question, or schedule event in Persona's voice
    * without touching verbatim blocks or artifacts.
    */
+  private persistInterruptedTurn(params: {
+    canonicalUserId: string;
+    channel: InboundBatch["originChannel"];
+    minCreatedAt: number;
+    compactedUntilTs: number;
+    sentParts: string[];
+    err: unknown;
+  }): void {
+    const errorSummary = summarizeErrorForContext(params.err);
+    const createdAt = Math.max(Date.now(), params.minCreatedAt);
+    const sentParts = params.sentParts.map((p) => p.trim()).filter(Boolean);
+    const delimiter = this.hatoConfig.gateway.bubbles.enabled
+      ? this.hatoConfig.gateway.bubbles.delimiter
+      : "\n";
+
+    if (sentParts.length === 0) {
+      const recent = this.repo.listRecentMessages(params.canonicalUserId, 8);
+      for (let i = recent.length - 1; i >= 0; i--) {
+        const msg = recent[i]!;
+        if (msg.role === "user") {
+          continue;
+        }
+        if (msg.role === "assistant" && msg.createdAt > params.compactedUntilTs) {
+          const parsed = parsePureErrorInterruptionNotice(msg.content);
+          if (parsed) {
+            this.repo.updateRawMessage(msg.id, {
+              content: buildInterruptedAssistantText({
+                sentParts: [],
+                errorSummary,
+                consecutiveCount: parsed.count + 1,
+                delimiter,
+              }),
+              createdAt,
+            });
+            return;
+          }
+        }
+        break;
+      }
+    }
+
+    this.repo.appendRawMessage({
+      canonicalUserId: params.canonicalUserId,
+      channel: params.channel,
+      role: "assistant",
+      content: buildInterruptedAssistantText({
+        sentParts,
+        errorSummary,
+        consecutiveCount: 1,
+        delimiter,
+      }),
+      createdAt,
+    });
+  }
+
   async narrateBackgroundEvent(params: {
     canonicalUserId: string;
     channel: InboundBatch["originChannel"];
@@ -1084,7 +1187,15 @@ export class PersonaRuntime {
       });
     }
     for (const row of params.messagesToSummarize) {
-      agentMessages.push(rawRecordToAgentMessage(row, this.repo));
+      if (row.role === "assistant") {
+        const cleaned = stripErrorInterruptionNotices(row.content);
+        if (!cleaned && row.attachments.length === 0) {
+          continue;
+        }
+        agentMessages.push(rawRecordToAgentMessage({ ...row, content: cleaned }, this.repo));
+      } else {
+        agentMessages.push(rawRecordToAgentMessage(row, this.repo));
+      }
     }
 
     const llmMessages: Message[] = convertHatoMessagesToLlm(agentMessages, {

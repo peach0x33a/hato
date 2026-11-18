@@ -16,6 +16,7 @@ import type {
   RawMessageRecord,
 } from "../db/repo.js";
 import { computeTurnMetrics, extractTraceSteps, formatLlmTelemetryLog } from "../stats/metrics.js";
+import { stripErrorInterruptionNotices } from "../persona/interruption.js";
 import { formatLocalDateTime } from "../time/clock.js";
 import { logInfo, logWarn } from "../utils/logger.js";
 import type { MemoryStore } from "./store.js";
@@ -502,40 +503,53 @@ export class MemoryCurator {
     const resolved = this.modelRegistry.resolveSlot("curator");
     const tz = this.getEffectiveTimezone(canonicalUserId);
 
-    const transcriptLines = messages.map((msg) => {
-      const stamp = formatFullDateTime(msg.createdAt, tz);
-      const roleTag =
-        msg.role === "user"
-          ? "USER"
-          : msg.role === "assistant"
-            ? "CHAT_RELAY"
-            : "EVENT";
+    const transcriptLines = messages
+      .map((msg) => {
+        const stamp = formatFullDateTime(msg.createdAt, tz);
+        const roleTag =
+          msg.role === "user"
+            ? "USER"
+            : msg.role === "assistant"
+              ? "CHAT_RELAY"
+              : "EVENT";
 
-      let replyPrefix = "";
-      if (msg.replyToId) {
-        const ref = this.repo.findMessageByPlatformId(msg.channel, msg.replyToId);
-        if (ref) {
-          const preview = ref.content.replace(/\s+/g, " ").trim().slice(0, 100);
-          replyPrefix = `[引用 ${ref.role === "assistant" ? "CHAT_RELAY" : "USER"}: "${preview}"] `;
+        let replyPrefix = "";
+        if (msg.replyToId) {
+          const ref = this.repo.findMessageByPlatformId(msg.channel, msg.replyToId);
+          if (ref) {
+            const preview = stripErrorInterruptionNotices(ref.content)
+              .replace(/\s+/g, " ")
+              .trim()
+              .slice(0, 100);
+            if (preview) {
+              replyPrefix = `[引用 ${ref.role === "assistant" ? "CHAT_RELAY" : "USER"}: "${preview}"] `;
+            }
+          }
         }
-      }
 
-      const attachmentNotes = msg.attachments
-        .map((att) =>
-          att.summary
-            ? `[附件 ${att.kind}: ${att.summary}]`
-            : `[附件 ${att.kind}${att.filename ? `: ${att.filename}` : ""}]`,
-        )
-        .join(" ");
+        const attachmentNotes = msg.attachments
+          .map((att) =>
+            att.summary
+              ? `[附件 ${att.kind}: ${att.summary}]`
+              : `[附件 ${att.kind}${att.filename ? `: ${att.filename}` : ""}]`,
+          )
+          .join(" ");
 
-      const body = [replyPrefix, msg.content.trim(), attachmentNotes]
-        .filter(Boolean)
-        .join(" ")
-        .replace(/\s+/g, " ")
-        .trim();
+        const cleanedContent =
+          msg.role === "assistant" ? stripErrorInterruptionNotices(msg.content) : msg.content.trim();
 
-      return `[${stamp}] [${roleTag}] ${body}`;
-    });
+        const body = [replyPrefix, cleanedContent, attachmentNotes]
+          .filter(Boolean)
+          .join(" ")
+          .replace(/\s+/g, " ")
+          .trim();
+
+        if (!body) {
+          return null;
+        }
+        return `[${stamp}] [${roleTag}] ${body}`;
+      })
+      .filter((line): line is string => line !== null);
 
     const llmMessages: Message[] = [
       {
