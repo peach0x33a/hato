@@ -725,7 +725,11 @@ function ConsoleShell() {
                     : { opacity: 0, y: -4, transition: { duration: 0.12, ease: EASE_OUT } }
                 }
                 transition={reduceMotion ? { duration: 0 } : SPRING_LAYOUT}
-                className={workspaceTab === "chat" || workspaceTab === "browser" ? "h-full min-h-0" : "min-h-full"}
+                className={
+                  workspaceTab === "chat" || workspaceTab === "browser" || workspaceTab === "prompt"
+                    ? "h-full min-h-0"
+                    : "min-h-full"
+                }
               >
                 {workspaceTab === "overview" && (
                   <OverviewPanel
