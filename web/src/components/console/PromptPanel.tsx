@@ -14,6 +14,7 @@ import {
   Trash2,
   X,
 } from "lucide-react";
+import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import { type FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   api,
@@ -24,6 +25,7 @@ import { ConsoleInput } from "@/components/console/ConsolePrimitives";
 import { AnimatedBadge } from "@/components/motion/animated-badge";
 import { Button } from "@/components/motion/button";
 import { Switch } from "@/components/motion/switch";
+import { EASE_OUT, SPRING_LAYOUT } from "@/lib/ease";
 
 export interface PromptPanelProps {
   promptPath: string;
@@ -230,6 +232,7 @@ export function PromptPanel({
   onLayersSynced,
   onToast,
 }: PromptPanelProps) {
+  const reduceMotion = useReducedMotion() ?? false;
   const [items, setItems] = useState<OrderedPromptItem[]>(() =>
     expandLayersToItems(promptLayers, promptPath),
   );
@@ -1020,19 +1023,29 @@ export function PromptPanel({
       </div>
 
       {/* Add User Prompt Block Modal */}
-      {addModalOpen ? (
-        <div
-          className="fixed inset-0 z-50 flex items-center justify-center p-4"
-          role="dialog"
-          aria-modal="true"
-          aria-labelledby="add-user-prompt-title"
-        >
-          <div
-            onClick={() => setAddModalOpen(false)}
-            className="fixed inset-0 bg-black/50 backdrop-blur-[2px]"
-          />
+      <AnimatePresence>
+        {addModalOpen ? (
+          <motion.div
+            initial={reduceMotion ? false : { opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={reduceMotion ? undefined : { opacity: 0, transition: { duration: 0.14, ease: EASE_OUT } }}
+            className="fixed inset-0 z-50 flex items-center justify-center p-4"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="add-user-prompt-title"
+          >
+            <div
+              onClick={() => setAddModalOpen(false)}
+              className="fixed inset-0 bg-black/50 backdrop-blur-[2px]"
+            />
 
-          <div className="relative z-10 w-full max-w-lg rounded-xl border border-border bg-popover text-popover-foreground shadow-xl">
+            <motion.div
+              initial={reduceMotion ? false : { opacity: 0, y: 12, scale: 0.96 }}
+              animate={{ opacity: 1, y: 0, scale: 1 }}
+              exit={reduceMotion ? undefined : { opacity: 0, y: 8, scale: 0.97, transition: { duration: 0.12, ease: EASE_OUT } }}
+              transition={reduceMotion ? { duration: 0 } : SPRING_LAYOUT}
+              className="relative z-10 w-full max-w-lg rounded-xl border border-border bg-popover text-popover-foreground shadow-xl"
+            >
             <div className="flex items-center justify-between border-b border-border px-5 py-4">
               <div>
                 <h2
@@ -1138,9 +1151,10 @@ export function PromptPanel({
                 </Button>
               </div>
             </form>
-          </div>
-        </div>
+          </motion.div>
+        </motion.div>
       ) : null}
+      </AnimatePresence>
     </div>
   );
 }

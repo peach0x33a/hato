@@ -2550,10 +2550,10 @@ export function SettingsPanel({
             <AnimatePresence mode="wait" initial={false}>
               <motion.div
                 key={activeSection}
-                initial={reduceMotion ? false : { opacity: 0, y: 6 }}
+                initial={reduceMotion ? false : { opacity: 0, y: 8 }}
                 animate={{ opacity: 1, y: 0 }}
-                exit={reduceMotion ? undefined : { opacity: 0, y: -4 }}
-                transition={reduceMotion ? { duration: 0 } : { duration: 0.16, ease: EASE_OUT }}
+                exit={reduceMotion ? undefined : { opacity: 0, y: -4, transition: { duration: 0.12, ease: EASE_OUT } }}
+                transition={reduceMotion ? { duration: 0 } : SPRING_LAYOUT}
                 className="flex flex-col gap-7"
               >
                 {activeSection !== "secrets" && (

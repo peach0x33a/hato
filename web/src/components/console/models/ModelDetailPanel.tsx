@@ -1,3 +1,4 @@
+import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import { useEffect, useRef, useState } from "react";
 import {
   AlertCircle,
@@ -21,6 +22,7 @@ import {
 } from "lucide-react";
 import { api, type ModelsDevSearchItem, type ModelsFileConfig } from "@/api";
 import { ConsoleSelect } from "@/components/console/ConsolePrimitives";
+import { EASE_OUT, SPRING_LAYOUT, SPRING_SWAP } from "@/lib/ease";
 import {
   API_OVERRIDE_OPTIONS,
   formatTokenCount,
@@ -96,6 +98,7 @@ export function ModelDetailPanel({
   onRequestRemove,
   onConfigureProvider,
 }: ModelDetailPanelProps) {
+  const reduceMotion = useReducedMotion() ?? false;
   const [moreOpen, setMoreOpen] = useState(false);
   const moreRef = useRef<HTMLDivElement | null>(null);
   const [maskHeaders, setMaskHeaders] = useState(true);
@@ -306,7 +309,13 @@ export function ModelDetailPanel({
   const testedTimeStr = formatTestTime(testOutcome?.testedAt);
 
   return (
-    <div className="flex flex-col gap-5 rounded-xl border border-zinc-200 bg-white p-5 sm:p-6 dark:border-zinc-800/90 dark:bg-[#0f1418]">
+    <motion.div
+      key={model.uid}
+      initial={reduceMotion ? false : { opacity: 0, y: 6 }}
+      animate={{ opacity: 1, y: 0 }}
+      transition={reduceMotion ? { duration: 0 } : SPRING_SWAP}
+      className="flex flex-col gap-5 rounded-xl border border-zinc-200 bg-white p-5 sm:p-6 dark:border-zinc-800/90 dark:bg-[#0f1418]"
+    >
       {/* Mobile Back Button */}
       {onBackMobile ? (
         <div className="lg:hidden">
@@ -677,8 +686,15 @@ export function ModelDetailPanel({
           </span>
         </button>
 
-        {advancedOpen ? (
-          <div className="mt-3.5 flex flex-col gap-4 rounded-lg border border-zinc-200/80 bg-zinc-50/50 p-4 dark:border-zinc-800/80 dark:bg-[#0b1014]/60">
+        <AnimatePresence initial={false}>
+          {advancedOpen ? (
+            <motion.div
+              initial={reduceMotion ? false : { opacity: 0, height: 0, overflow: "hidden" }}
+              animate={{ opacity: 1, height: "auto", transitionEnd: { overflow: "visible" } }}
+              exit={reduceMotion ? undefined : { opacity: 0, height: 0, overflow: "hidden", transition: { duration: 0.14, ease: EASE_OUT } }}
+              transition={reduceMotion ? { duration: 0 } : SPRING_LAYOUT}
+              className="mt-3.5 flex flex-col gap-4 rounded-lg border border-zinc-200/80 bg-zinc-50/50 p-4 dark:border-zinc-800/80 dark:bg-[#0b1014]/60"
+            >
             {/* Protocol / Base URL / Headers */}
             <div className="grid grid-cols-1 gap-3.5 md:grid-cols-3">
               <div className="flex flex-col gap-1.5">
@@ -909,9 +925,10 @@ export function ModelDetailPanel({
                 <span>启用自动同步</span>
               </label>
             </div>
-          </div>
+          </motion.div>
         ) : null}
+        </AnimatePresence>
       </div>
-    </div>
+    </motion.div>
   );
 }

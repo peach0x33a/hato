@@ -513,7 +513,7 @@ function ConsoleShell() {
             重载配置
           </StatefulButton>
           <span className="mx-0.5 h-3.5 w-px bg-border/80" aria-hidden="true" />
-          <ThemeToggle variant="circle-blur" />
+          <ThemeToggle variant="circle-blur" start="top-right" />
         </div>
       </header>
 
@@ -710,109 +710,128 @@ function ConsoleShell() {
               workspaceTab === "chat" ? "overflow-hidden" : "overflow-y-auto overflow-x-hidden"
             }`}
           >
-            {workspaceTab === "overview" && (
-              <OverviewPanel
-                onNavigateTab={(tab) => navigateToTab(tab)}
-                onNavigateSettings={(section) =>
-                  navigateToTab("settings", { settingsSection: section })
+            <AnimatePresence mode="wait" initial={false}>
+              <motion.div
+                key={workspaceTab}
+                initial={reduceMotion ? false : { opacity: 0, y: 8 }}
+                animate={{
+                  opacity: 1,
+                  y: 0,
+                  transitionEnd: { transform: "none" },
+                }}
+                exit={
+                  reduceMotion
+                    ? undefined
+                    : { opacity: 0, y: -4, transition: { duration: 0.12, ease: EASE_OUT } }
                 }
-                onToast={notify}
-              />
-            )}
+                transition={reduceMotion ? { duration: 0 } : SPRING_LAYOUT}
+                className={workspaceTab === "chat" || workspaceTab === "browser" ? "h-full min-h-0" : "min-h-full"}
+              >
+                {workspaceTab === "overview" && (
+                  <OverviewPanel
+                    onNavigateTab={(tab) => navigateToTab(tab)}
+                    onNavigateSettings={(section) =>
+                      navigateToTab("settings", { settingsSection: section })
+                    }
+                    onToast={notify}
+                  />
+                )}
 
-            {workspaceTab === "chat" && (
-              <div className="flex h-full min-h-0 min-w-0 w-full flex-col">
-                <ChatPanel
-                  onToast={notify}
-                  pendingTakeover={pendingTakeover}
-                  onPendingTakeoverChange={setPendingTakeover}
-                  onOpenBrowserPanel={() => navigateToTab("browser")}
-                  onAuthError={() => setAuthNeeded(true)}
-                  selectedSessionId={selectedSessionId}
-                  onSelectSession={setSelectedSessionId}
-                  onSessionsChanged={() => void refreshSessions()}
-                />
-              </div>
-            )}
+                {workspaceTab === "chat" && (
+                  <div className="flex h-full min-h-0 min-w-0 w-full flex-col">
+                    <ChatPanel
+                      onToast={notify}
+                      pendingTakeover={pendingTakeover}
+                      onPendingTakeoverChange={setPendingTakeover}
+                      onOpenBrowserPanel={() => navigateToTab("browser")}
+                      onAuthError={() => setAuthNeeded(true)}
+                      selectedSessionId={selectedSessionId}
+                      onSelectSession={setSelectedSessionId}
+                      onSessionsChanged={() => void refreshSessions()}
+                    />
+                  </div>
+                )}
 
-            {workspaceTab === "stickers" && <StickersPanel onToast={notify} />}
+                {workspaceTab === "stickers" && <StickersPanel onToast={notify} />}
 
-            {workspaceTab === "browser" && (
-              <div className="flex h-full min-h-0 w-full flex-col p-3 sm:p-5">
-                <RemoteBrowserPanel
-                  onToast={notify}
-                  onPendingTakeoverChange={setPendingTakeover}
-                  onGoToChatAndResume={() => {
-                    navigateToTab("chat");
-                    notify({
-                      title: "已解除挂起状态",
-                      description: "回到对话后可点击继续任务，或发送下一步指令。",
-                      status: "success",
-                    });
-                  }}
-                />
-              </div>
-            )}
+                {workspaceTab === "browser" && (
+                  <div className="flex h-full min-h-0 w-full flex-col p-3 sm:p-5">
+                    <RemoteBrowserPanel
+                      onToast={notify}
+                      onPendingTakeoverChange={setPendingTakeover}
+                      onGoToChatAndResume={() => {
+                        navigateToTab("chat");
+                        notify({
+                          title: "已解除挂起状态",
+                          description: "回到对话后可点击继续任务，或发送下一步指令。",
+                          status: "success",
+                        });
+                      }}
+                    />
+                  </div>
+                )}
 
-            {workspaceTab === "models" &&
-              (configSnap ? (
-                <ModelsConfigPanel
-                  initialConfig={configSnap.modelsConfig}
-                  secretStates={configSnap.secretStates}
-                  hindsightEnabled={configSnap.hatoConfig.memory?.provider === "hindsight"}
-                  onDirtyChange={setModelsDirty}
-                  onToast={notify}
-                  onSaved={(next) => {
-                    setConfigSnap((prev) => (prev ? { ...prev, modelsConfig: next } : prev));
-                  }}
-                  onSecretsUpdated={(nextStates) => {
-                    setConfigSnap((prev) =>
-                      prev ? { ...prev, secretStates: nextStates } : prev,
-                    );
-                  }}
-                />
-              ) : (
-                <ConfigFallbackState
-                  label="正在加载模型配置…"
-                  error={configError ?? (healthOffline ? "无法连接 Hato 服务" : null)}
-                  onRetry={() => void loadHealthAndConfig()}
-                />
-              ))}
+                {workspaceTab === "models" &&
+                  (configSnap ? (
+                    <ModelsConfigPanel
+                      initialConfig={configSnap.modelsConfig}
+                      secretStates={configSnap.secretStates}
+                      hindsightEnabled={configSnap.hatoConfig.memory?.provider === "hindsight"}
+                      onDirtyChange={setModelsDirty}
+                      onToast={notify}
+                      onSaved={(next) => {
+                        setConfigSnap((prev) => (prev ? { ...prev, modelsConfig: next } : prev));
+                      }}
+                      onSecretsUpdated={(nextStates) => {
+                        setConfigSnap((prev) =>
+                          prev ? { ...prev, secretStates: nextStates } : prev,
+                        );
+                      }}
+                    />
+                  ) : (
+                    <ConfigFallbackState
+                      label="正在加载模型配置…"
+                      error={configError ?? (healthOffline ? "无法连接 Hato 服务" : null)}
+                      onRetry={() => void loadHealthAndConfig()}
+                    />
+                  ))}
 
-            {workspaceTab === "prompt" &&
-              (configSnap ? (
-                <PromptPanel
-                  promptPath={configSnap.promptPath}
-                  initialPrompt={configSnap.promptText}
-                  promptLayers={configSnap.promptLayers}
-                  onDirtyChange={setPromptDirty}
-                  onToast={notify}
-                  onSaved={(nextPrompt) => {
-                    setConfigSnap((prev) =>
-                      prev ? { ...prev, promptText: nextPrompt } : prev,
-                    );
-                  }}
-                  onLayersSynced={(next) => {
-                    setConfigSnap((prev) =>
-                      prev
-                        ? {
-                            ...prev,
-                            hatoConfig: next.hatoConfig ?? prev.hatoConfig,
-                            promptPath: next.promptPath ?? prev.promptPath,
-                            promptText: next.promptText ?? prev.promptText,
-                            promptLayers: next.promptLayers ?? prev.promptLayers,
-                          }
-                        : prev,
-                    );
-                  }}
-                />
-              ) : (
-                <ConfigFallbackState
-                  label="正在加载提示词配置…"
-                  error={configError ?? (healthOffline ? "无法连接 Hato 服务" : null)}
-                  onRetry={() => void loadHealthAndConfig()}
-                />
-              ))}
+                {workspaceTab === "prompt" &&
+                  (configSnap ? (
+                    <PromptPanel
+                      promptPath={configSnap.promptPath}
+                      initialPrompt={configSnap.promptText}
+                      promptLayers={configSnap.promptLayers}
+                      onDirtyChange={setPromptDirty}
+                      onToast={notify}
+                      onSaved={(nextPrompt) => {
+                        setConfigSnap((prev) =>
+                          prev ? { ...prev, promptText: nextPrompt } : prev,
+                        );
+                      }}
+                      onLayersSynced={(next) => {
+                        setConfigSnap((prev) =>
+                          prev
+                            ? {
+                                ...prev,
+                                hatoConfig: next.hatoConfig ?? prev.hatoConfig,
+                                promptPath: next.promptPath ?? prev.promptPath,
+                                promptText: next.promptText ?? prev.promptText,
+                                promptLayers: next.promptLayers ?? prev.promptLayers,
+                              }
+                            : prev,
+                        );
+                      }}
+                    />
+                  ) : (
+                    <ConfigFallbackState
+                      label="正在加载提示词配置…"
+                      error={configError ?? (healthOffline ? "无法连接 Hato 服务" : null)}
+                      onRetry={() => void loadHealthAndConfig()}
+                    />
+                  ))}
+              </motion.div>
+            </AnimatePresence>
           </main>
         </motion.div>
 

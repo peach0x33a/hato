@@ -11,9 +11,11 @@ import {
   ShieldAlert,
   X,
 } from "lucide-react";
+import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { api, type ModelsFileConfig, type SecretState } from "@/api";
 import { Button } from "@/components/motion/button";
+import { EASE_OUT, SPRING_LAYOUT, SPRING_SWAP } from "@/lib/ease";
 import { FunctionSlotsPanel } from "./models/FunctionSlotsPanel";
 import {
   isTestOutcomeEmptyWarning,
@@ -170,6 +172,7 @@ export function ModelsConfigPanel({
   onSecretsUpdated,
   onToast,
 }: ModelsConfigPanelProps) {
+  const reduceMotion = useReducedMotion() ?? false;
   const [slots, setSlots] = useState<ModelsFileConfig["slots"]>(() => ({
     ...initialConfig.slots,
   }));
@@ -1170,30 +1173,53 @@ export function ModelsConfigPanel({
       </div>
 
       {/* Bottom Floating Save Bar (shown only when dirty) */}
-      {isDirty ? (
-        <div className="pointer-events-none fixed inset-x-0 bottom-5 z-40 flex justify-center px-4">
-          <div className="pointer-events-auto relative flex flex-wrap items-center gap-3 rounded-xl border border-zinc-200 bg-white px-4 py-2.5 shadow-xl dark:border-zinc-700 dark:bg-[#161e24]">
-            {changeListOpen && changeSummaryList.length > 0 ? (
-              <div className="absolute bottom-full left-0 mb-2 w-80 max-w-[90vw] rounded-xl border border-zinc-200 bg-white p-3 shadow-xl dark:border-zinc-700 dark:bg-[#161e24]">
-                <div className="mb-2 flex items-center justify-between text-xs font-semibold text-zinc-800 dark:text-zinc-200">
-                  <span>待保存更改清单</span>
-                  <button
-                    type="button"
-                    onClick={() => setChangeListOpen(false)}
-                    className="text-zinc-400 hover:text-zinc-700 dark:hover:text-zinc-200"
+      <AnimatePresence>
+        {isDirty ? (
+          <motion.div
+            initial={reduceMotion ? false : { opacity: 0, y: 18, scale: 0.96 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            exit={
+              reduceMotion
+                ? undefined
+                : { opacity: 0, y: 10, scale: 0.96, transition: { duration: 0.14, ease: EASE_OUT } }
+            }
+            transition={reduceMotion ? { duration: 0 } : SPRING_LAYOUT}
+            className="pointer-events-none fixed inset-x-0 bottom-5 z-40 flex justify-center px-4"
+          >
+            <div className="pointer-events-auto relative flex flex-wrap items-center gap-3 rounded-xl border border-zinc-200 bg-white px-4 py-2.5 shadow-xl dark:border-zinc-700 dark:bg-[#161e24]">
+              <AnimatePresence>
+                {changeListOpen && changeSummaryList.length > 0 ? (
+                  <motion.div
+                    initial={reduceMotion ? false : { opacity: 0, y: 8, scale: 0.97 }}
+                    animate={{ opacity: 1, y: 0, scale: 1 }}
+                    exit={
+                      reduceMotion
+                        ? undefined
+                        : { opacity: 0, y: 6, scale: 0.97, transition: { duration: 0.12, ease: EASE_OUT } }
+                    }
+                    transition={reduceMotion ? { duration: 0 } : SPRING_SWAP}
+                    className="absolute bottom-full left-0 mb-2 w-80 max-w-[90vw] rounded-xl border border-zinc-200 bg-white p-3 shadow-xl dark:border-zinc-700 dark:bg-[#161e24]"
                   >
-                    <X className="h-3.5 w-3.5" />
-                  </button>
-                </div>
-                <ul className="max-h-48 space-y-1 overflow-y-auto text-xs text-zinc-600 dark:text-zinc-300">
-                  {changeSummaryList.map((item, idx) => (
-                    <li key={idx} className="truncate font-mono text-[11px]">
-                      • {item}
-                    </li>
-                  ))}
-                </ul>
-              </div>
-            ) : null}
+                    <div className="mb-2 flex items-center justify-between text-xs font-semibold text-zinc-800 dark:text-zinc-200">
+                      <span>待保存更改清单</span>
+                      <button
+                        type="button"
+                        onClick={() => setChangeListOpen(false)}
+                        className="text-zinc-400 hover:text-zinc-700 dark:hover:text-zinc-200"
+                      >
+                        <X className="h-3.5 w-3.5" />
+                      </button>
+                    </div>
+                    <ul className="max-h-48 space-y-1 overflow-y-auto text-xs text-zinc-600 dark:text-zinc-300">
+                      {changeSummaryList.map((item, idx) => (
+                        <li key={idx} className="truncate font-mono text-[11px]">
+                          • {item}
+                        </li>
+                      ))}
+                    </ul>
+                  </motion.div>
+                ) : null}
+              </AnimatePresence>
 
             <button
               type="button"
@@ -1243,8 +1269,9 @@ export function ModelsConfigPanel({
               </Button>
             </div>
           </div>
-        </div>
+        </motion.div>
       ) : null}
+      </AnimatePresence>
 
       {/* Add / Configure Provider Slide-Over Drawer */}
       <ProviderDrawer
@@ -1263,18 +1290,26 @@ export function ModelsConfigPanel({
       />
 
       {/* Delete Protection Confirmation Modal */}
-      {deleteConfirm ? (
-        <div
-          role="dialog"
-          aria-modal="true"
-          aria-labelledby="delete-confirm-title"
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4 backdrop-blur-[2px]"
-          onClick={() => setDeleteConfirm(null)}
-        >
-          <div
-            className="flex w-full max-w-md flex-col gap-4 rounded-xl border border-zinc-200 bg-white p-5 shadow-2xl dark:border-zinc-800 dark:bg-[#0f1418]"
-            onClick={(e) => e.stopPropagation()}
+      <AnimatePresence>
+        {deleteConfirm ? (
+          <motion.div
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="delete-confirm-title"
+            initial={reduceMotion ? false : { opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={reduceMotion ? undefined : { opacity: 0, transition: { duration: 0.14, ease: EASE_OUT } }}
+            className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4 backdrop-blur-[2px]"
+            onClick={() => setDeleteConfirm(null)}
           >
+            <motion.div
+              initial={reduceMotion ? false : { opacity: 0, y: 12, scale: 0.96 }}
+              animate={{ opacity: 1, y: 0, scale: 1 }}
+              exit={reduceMotion ? undefined : { opacity: 0, y: 8, scale: 0.97, transition: { duration: 0.12, ease: EASE_OUT } }}
+              transition={reduceMotion ? { duration: 0 } : SPRING_LAYOUT}
+              className="flex w-full max-w-md flex-col gap-4 rounded-xl border border-zinc-200 bg-white p-5 shadow-2xl dark:border-zinc-800 dark:bg-[#0f1418]"
+              onClick={(e) => e.stopPropagation()}
+            >
             <div className="flex items-start gap-3">
               <span className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-rose-500/15 text-rose-600 dark:text-rose-400">
                 <ShieldAlert className="h-4 w-4" />
@@ -1324,23 +1359,32 @@ export function ModelsConfigPanel({
                 {deleteConfirm.boundSlots.length > 0 ? "请先解绑槽位" : "确认删除"}
               </button>
             </div>
-          </div>
-        </div>
+          </motion.div>
+        </motion.div>
       ) : null}
+      </AnimatePresence>
 
       {/* Model Test Detail Modal */}
-      {testDetailModal ? (
-        <div
-          role="dialog"
-          aria-modal="true"
-          aria-labelledby="test-detail-modal-title"
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4 backdrop-blur-[2px]"
-          onClick={() => setTestDetailModal(null)}
-        >
-          <div
-            className="flex max-h-[85vh] w-full max-w-xl flex-col overflow-hidden rounded-xl border border-zinc-200 bg-white shadow-2xl dark:border-zinc-800 dark:bg-[#0f1418]"
-            onClick={(e) => e.stopPropagation()}
+      <AnimatePresence>
+        {testDetailModal ? (
+          <motion.div
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="test-detail-modal-title"
+            initial={reduceMotion ? false : { opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={reduceMotion ? undefined : { opacity: 0, transition: { duration: 0.14, ease: EASE_OUT } }}
+            className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4 backdrop-blur-[2px]"
+            onClick={() => setTestDetailModal(null)}
           >
+            <motion.div
+              initial={reduceMotion ? false : { opacity: 0, y: 12, scale: 0.96 }}
+              animate={{ opacity: 1, y: 0, scale: 1 }}
+              exit={reduceMotion ? undefined : { opacity: 0, y: 8, scale: 0.97, transition: { duration: 0.12, ease: EASE_OUT } }}
+              transition={reduceMotion ? { duration: 0 } : SPRING_LAYOUT}
+              className="flex max-h-[85vh] w-full max-w-xl flex-col overflow-hidden rounded-xl border border-zinc-200 bg-white shadow-2xl dark:border-zinc-800 dark:bg-[#0f1418]"
+              onClick={(e) => e.stopPropagation()}
+            >
             <div className="flex items-center justify-between gap-3 border-b border-zinc-200 px-5 py-3.5 dark:border-zinc-800">
               <div className="flex min-w-0 items-center gap-2.5">
                 <span
@@ -1446,9 +1490,10 @@ export function ModelsConfigPanel({
                   : (testDetailModal.error || "未知错误")}
               </pre>
             </div>
-          </div>
-        </div>
+          </motion.div>
+        </motion.div>
       ) : null}
+      </AnimatePresence>
     </div>
   );
 }

@@ -4,7 +4,7 @@
 import { Moon, Sun } from "lucide-react";
 import { useReducedMotion } from "motion/react";
 import { useTheme } from "next-themes";
-import { type ComponentPropsWithoutRef, useEffect, useState } from "react";
+import { type ComponentPropsWithoutRef, type MouseEvent as ReactMouseEvent, useEffect, useState } from "react";
 import { ActionSwapIcon } from "@/components/motion/action-swap";
 import { EASE_OUT_CSS } from "@/lib/ease";
 import { useMessages } from "@/lib/i18n";
@@ -150,7 +150,7 @@ export function useThemeToggle({
   }, []);
   const isDark = mounted && resolvedTheme === "dark";
 
-  const toggle = () => {
+  const toggle = (event?: ReactMouseEvent<HTMLElement>) => {
     const next = isDark ? "light" : "dark";
 
     if (reduce || !("startViewTransition" in document)) {
@@ -167,7 +167,11 @@ export function useThemeToggle({
       // Slats sweep the whole viewport; there is no origin point to set.
       root.dataset.beuiVt = "blinds";
     } else {
-      root.style.setProperty("--beui-vt-origin", CIRCLE_ORIGIN[start]);
+      const rect = event?.currentTarget?.getBoundingClientRect();
+      const origin = rect && rect.width > 0 && rect.height > 0
+        ? `${Math.round(rect.left + rect.width / 2)}px ${Math.round(rect.top + rect.height / 2)}px`
+        : CIRCLE_ORIGIN[start];
+      root.style.setProperty("--beui-vt-origin", origin);
       root.dataset.beuiVt = variant;
     }
 

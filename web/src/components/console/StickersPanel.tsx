@@ -1,10 +1,12 @@
 import { Edit3, RefreshCw, Search, Smile, Trash2, X } from "lucide-react";
+import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import { useCallback, useEffect, useState } from "react";
 import { api, type StickerRecord } from "@/api";
 import { ConsoleInput } from "@/components/console/ConsolePrimitives";
 import { AnimatedBadge } from "@/components/motion/animated-badge";
 import { Button } from "@/components/motion/button";
 import { Card, CardContent } from "@/components/motion/card";
+import { EASE_OUT, SPRING_LAYOUT } from "@/lib/ease";
 
 export interface StickersPanelProps {
   onToast: (t: { title: string; description?: string; status?: "info" | "success" | "error" }) => void;
@@ -48,6 +50,7 @@ function StickerImage({
 }
 
 export function StickersPanel({ onToast }: StickersPanelProps) {
+  const reduceMotion = useReducedMotion() ?? false;
   const [stickers, setStickers] = useState<StickerRecord[]>([]);
   const [loading, setLoading] = useState(true);
   const [query, setQuery] = useState("");
@@ -288,17 +291,25 @@ export function StickersPanel({ onToast }: StickersPanelProps) {
         </div>
       )}
 
-      {editing ? (
-        <div
-          onClick={() => setEditing(null)}
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/55 p-4 backdrop-blur-xs"
-        >
-          <div
-            role="dialog"
-            aria-modal="true"
-            onClick={(e) => e.stopPropagation()}
-            className="flex w-full max-w-md flex-col gap-4 rounded-2xl border border-border/80 bg-background p-5 shadow-2xl"
+      <AnimatePresence>
+        {editing ? (
+          <motion.div
+            initial={reduceMotion ? false : { opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={reduceMotion ? undefined : { opacity: 0, transition: { duration: 0.14, ease: EASE_OUT } }}
+            onClick={() => setEditing(null)}
+            className="fixed inset-0 z-50 flex items-center justify-center bg-black/55 p-4 backdrop-blur-xs"
           >
+            <motion.div
+              role="dialog"
+              aria-modal="true"
+              initial={reduceMotion ? false : { opacity: 0, y: 12, scale: 0.96 }}
+              animate={{ opacity: 1, y: 0, scale: 1 }}
+              exit={reduceMotion ? undefined : { opacity: 0, y: 8, scale: 0.97, transition: { duration: 0.12, ease: EASE_OUT } }}
+              transition={reduceMotion ? { duration: 0 } : SPRING_LAYOUT}
+              onClick={(e) => e.stopPropagation()}
+              className="flex w-full max-w-md flex-col gap-4 rounded-2xl border border-border/80 bg-background p-5 shadow-2xl"
+            >
             <div className="flex items-center justify-between">
               <h3 className="text-sm font-semibold">编辑表情包语义标签</h3>
               <button
@@ -359,9 +370,10 @@ export function StickersPanel({ onToast }: StickersPanelProps) {
                 </Button>
               </div>
             </form>
-          </div>
-        </div>
+          </motion.div>
+        </motion.div>
       ) : null}
+      </AnimatePresence>
     </div>
   );
 }
