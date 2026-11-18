@@ -23,6 +23,7 @@ import {
   useRef,
   useState,
 } from "react";
+import { createPortal } from "react-dom";
 import { EASE_OUT } from "@/lib/ease";
 import { type ListboxRow, useListbox } from "@/lib/hooks/use-listbox";
 import { cn } from "@/lib/utils";
@@ -145,8 +146,10 @@ export function Select({
   // on the page body. Hand it back to the trigger before that happens.
   const close = useCallback(() => {
     const trigger = document.getElementById(`${baseId}-trigger`);
+    const list = document.getElementById(`${baseId}-list`);
     if (
-      rootRef.current?.contains(document.activeElement) &&
+      (rootRef.current?.contains(document.activeElement) ||
+        list?.contains(document.activeElement)) &&
       document.activeElement !== trigger
     )
       trigger?.focus();
@@ -202,7 +205,9 @@ export function Select({
     if (!open) return;
     const onKey = (e: KeyboardEvent) => e.key === "Escape" && close();
     const onPointer = (e: PointerEvent) => {
-      if (rootRef.current && !rootRef.current.contains(e.target as Node))
+      const target = e.target as Node;
+      const list = document.getElementById(`${baseId}-list`);
+      if (!rootRef.current?.contains(target) && !list?.contains(target))
         setOpen(false);
     };
     window.addEventListener("keydown", onKey);
@@ -382,6 +387,13 @@ export function SelectContent({ className, children }: SelectContentProps) {
     if (progress.get() === 0) setExiting(false);
   });
 
+  const [triggerRect, setTriggerRect] = useState<{
+    left: number;
+    top: number;
+    bottom: number;
+    width: number;
+  } | null>(null);
+
   useLayoutEffect(() => {
     const node = panelRef.current;
     if (!node || !present) return;
@@ -392,18 +404,35 @@ export function SelectContent({ className, children }: SelectContentProps) {
     return () => observer.disconnect();
   }, [present]);
 
-  // On open, flip upward when there isn't room below and there's more above.
+  // Anchor the portaled panel to the trigger and flip upward when there isn't room below.
   useLayoutEffect(() => {
-    if (!open) return;
-    const trigger = document.getElementById(ctx.triggerId);
-    const node = panelRef.current;
-    if (!trigger || !node) return;
-    const rect = trigger.getBoundingClientRect();
-    const h = node.offsetHeight;
-    const below = window.innerHeight - rect.bottom;
-    const above = rect.top;
-    setPlacement(below < h + 16 && above > below ? "top" : "bottom");
-  }, [open, ctx.triggerId, setPlacement]);
+    if (!present) return;
+    const updatePosition = () => {
+      const trigger = document.getElementById(ctx.triggerId);
+      const node = panelRef.current;
+      if (!trigger) return;
+      const rect = trigger.getBoundingClientRect();
+      setTriggerRect({
+        left: rect.left,
+        top: rect.top,
+        bottom: rect.bottom,
+        width: rect.width,
+      });
+      if (open && node) {
+        const h = node.offsetHeight;
+        const below = window.innerHeight - rect.bottom;
+        const above = rect.top;
+        setPlacement(below < h + 16 && above > below ? "top" : "bottom");
+      }
+    };
+    updatePosition();
+    window.addEventListener("scroll", updatePosition, true);
+    window.addEventListener("resize", updatePosition);
+    return () => {
+      window.removeEventListener("scroll", updatePosition, true);
+      window.removeEventListener("resize", updatePosition);
+    };
+  }, [present, open, ctx.triggerId, setPlacement]);
 
   const isTop = ctx.placement === "top";
 
@@ -428,7 +457,7 @@ export function SelectContent({ className, children }: SelectContentProps) {
   // a lip; with reduced motion the fade is the whole entrance.
   const opacity = useTransform(progress, reduce ? [0, 1] : [0, 0.12], [0, 1]);
 
-  return (
+  const panel = (
     <motion.div
       ref={panelRef}
       id={ctx.listId}
@@ -443,20 +472,25 @@ export function SelectContent({ className, children }: SelectContentProps) {
         else onKeyDown(event);
       }}
       style={{
-        visibility: present ? undefined : "hidden",
+        visibility: present && triggerRect ? undefined : "hidden",
         maxHeight: present ? undefined : 0,
         borderWidth: present ? undefined : 0,
         clipPath,
         borderRadius: connectedRadius,
         opacity,
         pointerEvents: open ? "auto" : "none",
-        marginTop: isTop ? 0 : -1,
-        marginBottom: isTop ? -1 : 0,
+        left: present && triggerRect ? triggerRect.left : -9999,
+        width: present && triggerRect ? triggerRect.width : undefined,
+        top:
+          present && triggerRect && !isTop ? triggerRect.bottom - 1 : undefined,
+        bottom:
+          present && triggerRect && isTop
+            ? window.innerHeight - triggerRect.top - 1
+            : undefined,
       }}
       // stays docked flush against the trigger with shared 1px border seam
       className={cn(
-        "absolute left-0 right-0 z-20 overflow-hidden border border-border bg-background shadow-lg",
-        isTop ? "bottom-full" : "top-full",
+        "fixed z-[80] overflow-hidden border border-border bg-background shadow-lg",
         className,
       )}
     >
@@ -471,6 +505,11 @@ export function SelectContent({ className, children }: SelectContentProps) {
       </ActiveOptionContext.Provider>
     </motion.div>
   );
+
+  if (typeof document === "undefined") {
+    return panel;
+  }
+  return createPortal(panel, document.body);
 }
 
 export interface SelectItemProps {

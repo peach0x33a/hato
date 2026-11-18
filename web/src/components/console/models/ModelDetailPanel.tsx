@@ -1,5 +1,6 @@
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import {
   AlertCircle,
   AlertTriangle,
@@ -120,6 +121,13 @@ export function ModelDetailPanel({
   const [showSuggestions, setShowSuggestions] = useState(false);
   const [modelRefDirty, setModelRefDirty] = useState(false);
   const suggestionsBoxRef = useRef<HTMLDivElement | null>(null);
+  const suggestionsPanelRef = useRef<HTMLDivElement | null>(null);
+  const [suggestionsPos, setSuggestionsPos] = useState<{
+    left: number;
+    width: number;
+    top?: number;
+    bottom?: number;
+  } | null>(null);
 
   useEffect(() => {
     setMoreOpen(false);
@@ -150,9 +158,11 @@ export function ModelDetailPanel({
   useEffect(() => {
     if (!showSuggestions) return;
     const onOutside = (e: MouseEvent) => {
+      const target = e.target as Node;
       if (
         suggestionsBoxRef.current &&
-        !suggestionsBoxRef.current.contains(e.target as Node)
+        !suggestionsBoxRef.current.contains(target) &&
+        !suggestionsPanelRef.current?.contains(target)
       ) {
         setShowSuggestions(false);
       }
@@ -163,6 +173,36 @@ export function ModelDetailPanel({
 
   const modelsDev = model.modelsDev ?? { enabled: false, modelRef: "" };
   const isMetadataLocked = modelsDev.enabled;
+  const suggestionsOpen = showSuggestions && modelsDev.modelRef.trim().length > 0;
+
+  useLayoutEffect(() => {
+    if (!suggestionsOpen) {
+      setSuggestionsPos(null);
+      return;
+    }
+    const updatePosition = () => {
+      const anchor = suggestionsBoxRef.current;
+      if (!anchor) return;
+      const rect = anchor.getBoundingClientRect();
+      const panelHeight = suggestionsPanelRef.current?.offsetHeight ?? 224;
+      const below = window.innerHeight - rect.bottom;
+      const above = rect.top;
+      const openUp = below < panelHeight + 12 && above > below;
+      setSuggestionsPos({
+        left: rect.left,
+        width: rect.width,
+        top: openUp ? undefined : rect.bottom + 4,
+        bottom: openUp ? window.innerHeight - rect.top + 4 : undefined,
+      });
+    };
+    updatePosition();
+    window.addEventListener("scroll", updatePosition, true);
+    window.addEventListener("resize", updatePosition);
+    return () => {
+      window.removeEventListener("scroll", updatePosition, true);
+      window.removeEventListener("resize", updatePosition);
+    };
+  }, [suggestionsOpen, suggestions.length, searchingModelsDev, modelsDevSearchError]);
 
   useEffect(() => {
     if (!showSuggestions) return;
@@ -848,54 +888,67 @@ export function ModelDetailPanel({
                   </button>
                 </div>
 
-                {showSuggestions && modelsDev.modelRef.trim().length > 0 ? (
-                  <div className="absolute top-full right-0 left-0 z-30 mt-1 max-h-56 overflow-y-auto rounded-lg border border-zinc-200 bg-white py-1 shadow-lg dark:border-zinc-800 dark:bg-[#0d1216]">
-                    {searchingModelsDev ? (
-                      <div className="flex items-center gap-2 px-3 py-2 text-xs text-zinc-500 dark:text-zinc-400">
-                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                        <span>搜索 models.dev 中…</span>
-                      </div>
-                    ) : modelsDevSearchError ? (
-                      <div className="px-3 py-2 text-xs text-rose-600 dark:text-rose-400">
-                        {modelsDevSearchError}
-                      </div>
-                    ) : suggestions.length === 0 ? (
-                      <div className="px-3 py-2 text-xs text-zinc-500 dark:text-zinc-400">
-                        未找到匹配的 models.dev 模型
-                      </div>
-                    ) : (
-                      suggestions.map((item) => (
-                        <button
-                          key={item.ref}
-                          type="button"
-                          onMouseDown={(e) => {
-                            e.preventDefault();
-                            void syncFromModelsDev(item.ref, {
-                              enableOnSuccess: true,
-                            });
-                          }}
-                          className="flex w-full items-center justify-between gap-2 px-3 py-1.5 text-left text-xs transition hover:bg-zinc-100 dark:hover:bg-zinc-800/70"
-                        >
-                          <div className="min-w-0 flex-1">
-                            <div className="truncate font-mono text-[11px] text-zinc-900 dark:text-zinc-100">
-                              {item.ref}
-                            </div>
-                            <div className="truncate text-[11px] text-zinc-500 dark:text-zinc-400">
-                              {item.name} · {item.providerName}
-                            </div>
+                {suggestionsOpen && typeof document !== "undefined"
+                  ? createPortal(
+                      <div
+                        ref={suggestionsPanelRef}
+                        style={{
+                          left: suggestionsPos?.left ?? -9999,
+                          width: suggestionsPos?.width,
+                          top: suggestionsPos?.top,
+                          bottom: suggestionsPos?.bottom,
+                          visibility: suggestionsPos ? "visible" : "hidden",
+                        }}
+                        className="fixed z-[80] max-h-56 overflow-y-auto rounded-lg border border-zinc-200 bg-white py-1 shadow-lg dark:border-zinc-800 dark:bg-[#0d1216]"
+                      >
+                        {searchingModelsDev ? (
+                          <div className="flex items-center gap-2 px-3 py-2 text-xs text-zinc-500 dark:text-zinc-400">
+                            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                            <span>搜索 models.dev 中…</span>
                           </div>
-                          <div className="flex shrink-0 items-center gap-1.5 text-[10px] text-zinc-500 dark:text-zinc-400">
-                            {item.contextWindow ? (
-                              <span className="font-mono">
-                                {formatTokenCount(String(item.contextWindow))}
-                              </span>
-                            ) : null}
+                        ) : modelsDevSearchError ? (
+                          <div className="px-3 py-2 text-xs text-rose-600 dark:text-rose-400">
+                            {modelsDevSearchError}
                           </div>
-                        </button>
-                      ))
-                    )}
-                  </div>
-                ) : null}
+                        ) : suggestions.length === 0 ? (
+                          <div className="px-3 py-2 text-xs text-zinc-500 dark:text-zinc-400">
+                            未找到匹配的 models.dev 模型
+                          </div>
+                        ) : (
+                          suggestions.map((item) => (
+                            <button
+                              key={item.ref}
+                              type="button"
+                              onMouseDown={(e) => {
+                                e.preventDefault();
+                                void syncFromModelsDev(item.ref, {
+                                  enableOnSuccess: true,
+                                });
+                              }}
+                              className="flex w-full items-center justify-between gap-2 px-3 py-1.5 text-left text-xs transition hover:bg-zinc-100 dark:hover:bg-zinc-800/70"
+                            >
+                              <div className="min-w-0 flex-1">
+                                <div className="truncate font-mono text-[11px] text-zinc-900 dark:text-zinc-100">
+                                  {item.ref}
+                                </div>
+                                <div className="truncate text-[11px] text-zinc-500 dark:text-zinc-400">
+                                  {item.name} · {item.providerName}
+                                </div>
+                              </div>
+                              <div className="flex shrink-0 items-center gap-1.5 text-[10px] text-zinc-500 dark:text-zinc-400">
+                                {item.contextWindow ? (
+                                  <span className="font-mono">
+                                    {formatTokenCount(String(item.contextWindow))}
+                                  </span>
+                                ) : null}
+                              </div>
+                            </button>
+                          ))
+                        )}
+                      </div>,
+                      document.body,
+                    )
+                  : null}
 
                 {modelsDevStatus ? (
                   <p

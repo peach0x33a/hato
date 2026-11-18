@@ -1,6 +1,7 @@
 import { Check, ChevronDown, Plus } from "lucide-react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
-import { type ReactNode, useCallback, useMemo, useRef, useState } from "react";
+import { type ReactNode, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { SLOT_COLOR_MAP } from "@/components/console/models/types";
 import { Input, type InputProps } from "@/components/motion/input";
 import {
@@ -11,7 +12,6 @@ import {
   SelectValue,
 } from "@/components/motion/select";
 import { EASE_OUT } from "@/lib/ease";
-import { useDismiss } from "@/lib/hooks/use-dismiss";
 import { cn } from "@/lib/utils";
 
 export interface ConsolePageHeaderProps {
@@ -192,7 +192,7 @@ export function ConsoleSelect({
         >
           <SelectValue placeholder={placeholder} className="text-xs" />
         </SelectTrigger>
-        <SelectContent className="z-50 shadow-sm">
+        <SelectContent className="shadow-sm">
           {options.map((opt) => (
             <SelectItem
               key={opt.value}
@@ -249,10 +249,63 @@ export function ConsoleMultiSelect({
   const [open, setOpen] = useState(false);
   const [customDraft, setCustomDraft] = useState("");
   const rootRef = useRef<HTMLDivElement>(null);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const panelRef = useRef<HTMLDivElement>(null);
+  const [panelPos, setPanelPos] = useState<{
+    left: number;
+    width: number;
+    top?: number;
+    bottom?: number;
+  } | null>(null);
   const reduce = useReducedMotion() ?? false;
 
-  const dismiss = useCallback(() => setOpen(false), []);
-  useDismiss(open, dismiss, rootRef);
+  useEffect(() => {
+    if (!open) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setOpen(false);
+    };
+    const onPointer = (e: PointerEvent) => {
+      const target = e.target as Node;
+      if (!rootRef.current?.contains(target) && !panelRef.current?.contains(target)) {
+        setOpen(false);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    window.addEventListener("pointerdown", onPointer);
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      window.removeEventListener("pointerdown", onPointer);
+    };
+  }, [open]);
+
+  useLayoutEffect(() => {
+    if (!open) {
+      setPanelPos(null);
+      return;
+    }
+    const updatePosition = () => {
+      const trigger = triggerRef.current;
+      if (!trigger) return;
+      const rect = trigger.getBoundingClientRect();
+      const panelHeight = panelRef.current?.offsetHeight ?? 260;
+      const below = window.innerHeight - rect.bottom;
+      const above = rect.top;
+      const openUp = below < panelHeight + 12 && above > below;
+      setPanelPos({
+        left: rect.left,
+        width: Math.max(rect.width, 260),
+        top: openUp ? undefined : rect.bottom + 6,
+        bottom: openUp ? window.innerHeight - rect.top + 6 : undefined,
+      });
+    };
+    updatePosition();
+    window.addEventListener("scroll", updatePosition, true);
+    window.addEventListener("resize", updatePosition);
+    return () => {
+      window.removeEventListener("scroll", updatePosition, true);
+      window.removeEventListener("resize", updatePosition);
+    };
+  }, [open, values.length, options.length]);
 
   const mergedOptions = useMemo(() => {
     const known = new Set(options.map((o) => o.value));
@@ -293,6 +346,7 @@ export function ConsoleMultiSelect({
       ) : null}
 
       <button
+        ref={triggerRef}
         type="button"
         disabled={disabled}
         aria-haspopup="listbox"
@@ -327,84 +381,97 @@ export function ConsoleMultiSelect({
         />
       </button>
 
-      <AnimatePresence>
-        {open && (
-          <motion.div
-            role="listbox"
-            aria-multiselectable="true"
-            initial={reduce ? { opacity: 0 } : { opacity: 0, y: -4 }}
-            animate={{ opacity: 1, y: 0 }}
-            exit={reduce ? { opacity: 0 } : { opacity: 0, y: -4 }}
-            transition={{ duration: 0.16, ease: EASE_OUT }}
-            className="absolute top-full left-0 z-50 mt-1.5 w-full min-w-[260px] overflow-hidden rounded-lg border border-border bg-popover p-1 shadow-sm"
-          >
-            <div className="max-h-60 space-y-0.5 overflow-y-auto">
-              {mergedOptions.map((opt) => {
-                const checked = values.includes(opt.value);
-                const locked = checked && values.length <= minSelected;
-                return (
-                  <button
-                    key={opt.value}
-                    type="button"
-                    role="option"
-                    aria-selected={checked}
-                    disabled={locked}
-                    title={locked ? `至少保留 ${minSelected} 项` : undefined}
-                    onClick={() => toggleValue(opt.value)}
-                    className={cn(
-                      "flex w-full items-center justify-between gap-2 rounded-md px-2.5 py-1.5 text-left text-xs transition-colors outline-none",
-                      checked
-                        ? "bg-muted font-medium text-foreground"
-                        : "text-muted-foreground hover:bg-muted/60 hover:text-foreground",
-                      locked && "cursor-not-allowed opacity-75",
-                    )}
-                  >
-                    <span className="truncate">{opt.label}</span>
-                    <span
-                      className={cn(
-                        "grid size-4 shrink-0 place-items-center rounded border transition-colors",
-                        checked
-                          ? "border-primary bg-primary text-primary-foreground"
-                          : "border-border bg-background",
-                      )}
-                    >
-                      {checked && <Check className="size-3" />}
-                    </span>
-                  </button>
-                );
-              })}
-            </div>
-
-            {allowCustom && (
-              <div className="mt-1.5 flex items-center gap-1.5 border-t border-border/80 pt-1.5">
-                <input
-                  type="text"
-                  value={customDraft}
-                  onChange={(e) => setCustomDraft(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter") {
-                      e.preventDefault();
-                      addCustomValue();
-                    }
+      {typeof document !== "undefined"
+        ? createPortal(
+            <AnimatePresence>
+              {open && (
+                <motion.div
+                  ref={panelRef}
+                  role="listbox"
+                  aria-multiselectable="true"
+                  initial={reduce ? { opacity: 0 } : { opacity: 0, y: -4 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={reduce ? { opacity: 0 } : { opacity: 0, y: -4 }}
+                  transition={{ duration: 0.16, ease: EASE_OUT }}
+                  style={{
+                    left: panelPos?.left ?? -9999,
+                    width: panelPos?.width,
+                    top: panelPos?.top,
+                    bottom: panelPos?.bottom,
+                    visibility: panelPos ? "visible" : "hidden",
                   }}
-                  placeholder={customPlaceholder}
-                  className="h-7 min-w-0 flex-1 rounded-md border border-input bg-background px-2 font-mono text-[11px] text-foreground outline-none focus:border-ring"
-                />
-                <button
-                  type="button"
-                  onClick={addCustomValue}
-                  disabled={!customDraft.trim()}
-                  aria-label="添加自定义范围"
-                  className="inline-flex h-7 items-center gap-1 rounded-md bg-primary px-2 text-[11px] font-medium text-primary-foreground disabled:opacity-40"
+                  className="fixed z-[80] overflow-hidden rounded-lg border border-border bg-popover p-1 shadow-sm"
                 >
-                  <Plus className="size-3" />
-                  添加
-                </button>
-              </div>
-            )}
-          </motion.div>
-        )}
-      </AnimatePresence>
+                  <div className="max-h-60 space-y-0.5 overflow-y-auto">
+                    {mergedOptions.map((opt) => {
+                      const checked = values.includes(opt.value);
+                      const locked = checked && values.length <= minSelected;
+                      return (
+                        <button
+                          key={opt.value}
+                          type="button"
+                          role="option"
+                          aria-selected={checked}
+                          disabled={locked}
+                          title={locked ? `至少保留 ${minSelected} 项` : undefined}
+                          onClick={() => toggleValue(opt.value)}
+                          className={cn(
+                            "flex w-full items-center justify-between gap-2 rounded-md px-2.5 py-1.5 text-left text-xs transition-colors outline-none",
+                            checked
+                              ? "bg-muted font-medium text-foreground"
+                              : "text-muted-foreground hover:bg-muted/60 hover:text-foreground",
+                            locked && "cursor-not-allowed opacity-75",
+                          )}
+                        >
+                          <span className="truncate">{opt.label}</span>
+                          <span
+                            className={cn(
+                              "grid size-4 shrink-0 place-items-center rounded border transition-colors",
+                              checked
+                                ? "border-primary bg-primary text-primary-foreground"
+                                : "border-border bg-background",
+                            )}
+                          >
+                            {checked && <Check className="size-3" />}
+                          </span>
+                        </button>
+                      );
+                    })}
+                  </div>
+
+                  {allowCustom && (
+                    <div className="mt-1.5 flex items-center gap-1.5 border-t border-border/80 pt-1.5">
+                      <input
+                        type="text"
+                        value={customDraft}
+                        onChange={(e) => setCustomDraft(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter") {
+                            e.preventDefault();
+                            addCustomValue();
+                          }
+                        }}
+                        placeholder={customPlaceholder}
+                        className="h-7 min-w-0 flex-1 rounded-md border border-input bg-background px-2 font-mono text-[11px] text-foreground outline-none focus:border-ring"
+                      />
+                      <button
+                        type="button"
+                        onClick={addCustomValue}
+                        disabled={!customDraft.trim()}
+                        aria-label="添加自定义范围"
+                        className="inline-flex h-7 items-center gap-1 rounded-md bg-primary px-2 text-[11px] font-medium text-primary-foreground disabled:opacity-40"
+                      >
+                        <Plus className="size-3" />
+                        添加
+                      </button>
+                    </div>
+                  )}
+                </motion.div>
+              )}
+            </AnimatePresence>,
+            document.body,
+          )
+        : null}
     </div>
   );
 }

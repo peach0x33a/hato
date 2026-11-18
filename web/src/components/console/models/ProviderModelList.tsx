@@ -291,11 +291,17 @@ export function ProviderModelList({
             return (
               <div key={provider.uid} className="flex flex-col">
                 {/* 2-line Provider Header */}
-                <div className="flex flex-col gap-1 bg-zinc-50/70 px-3.5 py-2.5 dark:bg-white/[0.02]">
+                <div
+                  onClick={() => onToggleProviderCollapse(provider.uid)}
+                  className="flex cursor-pointer select-none flex-col gap-1 bg-zinc-50/70 px-3.5 py-2.5 transition-colors hover:bg-zinc-100/80 dark:bg-white/[0.02] dark:hover:bg-white/[0.04]"
+                >
                   <div className="flex items-center justify-between gap-2">
                     <button
                       type="button"
-                      onClick={() => onToggleProviderCollapse(provider.uid)}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onToggleProviderCollapse(provider.uid);
+                      }}
                       aria-expanded={!isCollapsed}
                       className="flex min-w-0 flex-1 items-center gap-1.5 text-left"
                     >
@@ -309,7 +315,10 @@ export function ProviderModelList({
                       </span>
                     </button>
 
-                    <div className="flex shrink-0 items-center gap-1.5">
+                    <div
+                      className="flex shrink-0 items-center gap-1.5"
+                      onClick={(e) => e.stopPropagation()}
+                    >
                       {keyInfo.status !== "not-needed" ? (
                         <button
                           type="button"
@@ -407,7 +416,7 @@ export function ProviderModelList({
                     </div>
                   </div>
 
-                  {/* Line 2: protocol · count · URL */}
+                  {/* Line 2: protocol · count */}
                   <div className="flex min-w-0 items-center gap-1.5 pl-5 text-xs text-zinc-500 dark:text-zinc-400">
                     <span className="shrink-0 whitespace-nowrap font-mono text-[11px] text-zinc-600 dark:text-zinc-300">
                       {provider.protocol}
@@ -416,17 +425,6 @@ export function ProviderModelList({
                     <span className="shrink-0 whitespace-nowrap tabular-nums">
                       {provider.models.length} 个模型
                     </span>
-                    {provider.baseUrl ? (
-                      <>
-                        <span className="shrink-0" aria-hidden="true">·</span>
-                        <span
-                          title={provider.baseUrl}
-                          className="min-w-0 flex-1 truncate font-mono text-[11px] text-zinc-400 dark:text-zinc-500"
-                        >
-                          {provider.baseUrl}
-                        </span>
-                      </>
-                    ) : null}
                   </div>
                 </div>
 
