@@ -78,7 +78,8 @@ curl -fsSL https://raw.githubusercontent.com/peach0x33a/hato/main/scripts/instal
 
 - `--cn` / `--mirror`：临时启用中国镜像源（`npmmirror`）
 - `--dir <path>`：指定安装目录（`curl` 远程安装默认 `~/.local/share/hato`）
-- `--version <tag>`：指定发行版标签（如 `v0.1.0`）
+- `--version <tag>`：指定发行版标签（如 `v0.1.0` 或 `nightly`）
+- `--nightly`：安装最新 Nightly 滚动预览版（等效于 `--version nightly`）
 - `--release-url <base_url>`：自定义发行版下载基础 URL
 - `--with-playwright`：同时安装 Playwright Chromium 内核
 - `--skip-setup`：跳过安装完成后的配置向导

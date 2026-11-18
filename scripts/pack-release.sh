@@ -7,7 +7,11 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
 VERSION="${1:-$(bun -e "console.log(require('./package.json').version)")}"
-TAG="v${VERSION#v}"
+if [[ "$VERSION" =~ ^[0-9] ]]; then
+  TAG="v${VERSION}"
+else
+  TAG="$VERSION"
+fi
 ARCHIVE_NAME="hato-${TAG}.tar.gz"
 RELEASE_DIR="${ROOT_DIR}/release"
 STAGE_DIR="$(mktemp -d)"

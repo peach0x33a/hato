@@ -30,7 +30,8 @@ usage() {
 选项:
   --cn, --mirror            临时使用中国镜像源 (npmmirror) 安装依赖，不修改全局配置
   --dir <path>              指定安装目标目录（curl 安装默认 ~/.local/share/hato）
-  --version <tag>           指定要下载的发行版标签（如 v0.1.0，默认获取 latest）
+  --version <tag>           指定要下载的发行版标签（如 v0.1.0 或 nightly，默认获取 latest）
+  --nightly                 安装最新的 nightly 预览版（等效于 --version nightly）
   --release-url <base_url>  自定义发行版下载基础 URL（可用于镜像加速）
   --with-playwright         同时安装 Playwright Chromium 浏览器内核
   --skip-setup              跳过安装后的交互式配置向导 (setup)
@@ -71,6 +72,10 @@ while [[ $# -gt 0 ]]; do
       fi
       VERSION="$2"
       shift 2
+      ;;
+    --nightly)
+      VERSION="nightly"
+      shift
       ;;
     --release-url)
       if [[ $# -lt 2 ]]; then
@@ -154,7 +159,11 @@ if [[ "$HAS_LOCAL_SOURCE" == "0" ]]; then
       log_warn "未能从 GitHub API 获取最新版本，回退至 ${VERSION}"
     fi
   fi
-  TAG="v${VERSION#v}"
+  if [[ "$VERSION" =~ ^[0-9] ]]; then
+    TAG="v${VERSION}"
+  else
+    TAG="$VERSION"
+  fi
   ARCHIVE_NAME="hato-${TAG}.tar.gz"
   BASE_URL="${RELEASE_BASE_URL:-https://github.com/${REPO_SLUG}/releases/download/${TAG}}"
   DOWNLOAD_URL="${BASE_URL%/}/${ARCHIVE_NAME}"
