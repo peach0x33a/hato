@@ -851,14 +851,6 @@ export function PromptPanel({
             >
               恢复默认顺序
             </button>
-            <button
-              type="button"
-              onClick={handleOpenAddModal}
-              className="inline-flex items-center gap-1 text-xs font-medium text-primary transition-colors hover:text-primary/80"
-            >
-              <Plus className="size-3.5" />
-              <span>新建用户块</span>
-            </button>
           </div>
         </section>
 
