@@ -13,7 +13,8 @@
     "build:web": "npm --prefix web run build",
     "dev:web": "npm --prefix web run dev",
     "typecheck": "tsc --noEmit -p tsconfig.json",
-    "test": "tsx --test tests/**/*.test.ts"
+    "test": "tsx --test tests/**/*.test.ts",
+    "release:pack": "bash scripts/pack-release.sh"
   },
   "engines": {
     "node": ">=22.0.0"
