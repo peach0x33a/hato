@@ -333,10 +333,11 @@ export function ModelsConfigPanel({
     for (const p of providers) {
       const slug = p.name.trim();
       if (!slug) continue;
+      const pLabel = p.displayName?.trim() || slug;
       for (const m of p.models) {
         const mid = m.id.trim();
         if (!mid) continue;
-        map.set(`${slug}/${mid}`, m.displayName.trim() || mid);
+        map.set(`${slug}/${mid}`, `${pLabel}/${m.displayName.trim() || mid}`);
       }
     }
     return map;
@@ -1073,7 +1074,13 @@ export function ModelsConfigPanel({
           </div>
 
           {/* Right: Selected Model Detail Panel */}
-          <div className={mobileDetailOpen ? "block" : "hidden lg:block"}>
+          <div
+            className={
+              mobileDetailOpen
+                ? "block"
+                : "hidden lg:sticky lg:top-[68px] lg:block"
+            }
+          >
             {selectedEntry ? (
               <ModelDetailPanel
                 provider={selectedEntry.provider}

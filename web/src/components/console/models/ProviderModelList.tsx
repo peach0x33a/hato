@@ -416,20 +416,22 @@ export function ProviderModelList({
                   </div>
 
                   {/* Line 2: protocol · count · URL */}
-                  <div className="flex items-center gap-1.5 pl-5 text-xs text-zinc-500 dark:text-zinc-400">
-                    <span className="font-mono text-[11px] text-zinc-600 dark:text-zinc-300">
+                  <div className="flex min-w-0 items-center gap-1.5 pl-5 text-xs text-zinc-500 dark:text-zinc-400">
+                    <span className="shrink-0 whitespace-nowrap font-mono text-[11px] text-zinc-600 dark:text-zinc-300">
                       {provider.protocol}
                     </span>
-                    <span aria-hidden="true">·</span>
-                    <span className="tabular-nums">{provider.models.length} 个模型</span>
+                    <span className="shrink-0" aria-hidden="true">·</span>
+                    <span className="shrink-0 whitespace-nowrap tabular-nums">
+                      {provider.models.length} 个模型
+                    </span>
                     {provider.baseUrl ? (
                       <>
-                        <span aria-hidden="true">·</span>
+                        <span className="shrink-0" aria-hidden="true">·</span>
                         <span
                           title={provider.baseUrl}
-                          className="truncate font-mono text-[11px] text-zinc-400 dark:text-zinc-500"
+                          className="min-w-0 flex-1 truncate font-mono text-[11px] text-zinc-400 dark:text-zinc-500"
                         >
-                          {middleTruncateUrl(provider.baseUrl, 28)}
+                          {middleTruncateUrl(provider.baseUrl, 24)}
                         </span>
                       </>
                     ) : null}

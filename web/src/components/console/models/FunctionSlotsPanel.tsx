@@ -79,25 +79,6 @@ export function FunctionSlotsPanel({
     return { options: list, targetMap: map };
   }, [providers, secretStates, pendingSecrets]);
 
-  // Detect single-point concentration (multiple visible slots pointing to the exact same target)
-  const sharedTargetWarnings = useMemo(() => {
-    const counts = new Map<string, number>();
-    for (const slot of visibleSlots) {
-      const val = (slots[slot.key] ?? (slot.key === "vision" ? slots.persona : ""))?.trim();
-      if (!val) continue;
-      counts.set(val, (counts.get(val) ?? 0) + 1);
-    }
-    const repeated: Array<{ target: string; label: string; count: number }> = [];
-    for (const [target, count] of counts.entries()) {
-      if (count >= 3) {
-        const meta = targetMap.get(target);
-        repeated.push({ target, label: meta?.label ?? target, count });
-      }
-    }
-    repeated.sort((a, b) => b.count - a.count);
-    return repeated;
-  }, [visibleSlots, slots, targetMap]);
-
   return (
     <section
       aria-labelledby="function-slots-heading"
@@ -115,15 +96,6 @@ export function FunctionSlotsPanel({
             {visibleSlots.length} 个运行时槽位
           </span>
         </div>
-
-        {sharedTargetWarnings.length > 0 ? (
-          <div className="inline-flex items-center gap-1.5 rounded-full border border-amber-500/35 bg-amber-500/10 px-2.5 py-1 text-xs font-medium text-amber-700 dark:border-amber-500/30 dark:bg-amber-500/12 dark:text-amber-300">
-            <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
-            <span>
-              {sharedTargetWarnings[0].count} 个槽位共用 {sharedTargetWarnings[0].label}
-            </span>
-          </div>
-        ) : null}
       </div>
 
       {/* Desktop Routing Table */}
