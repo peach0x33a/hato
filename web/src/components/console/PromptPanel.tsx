@@ -1002,13 +1002,58 @@ export function PromptPanel({
                 )}
               </div>
 
-              <textarea
-                readOnly
-                value={liveCombinedPreview}
-                aria-label="最终组合提示词预览"
-                placeholder="（当前无可注入的提示词内容）"
-                className="min-h-[360px] w-full flex-1 resize-none rounded-lg bg-muted/30 p-4 font-mono text-[13px] leading-relaxed text-foreground focus:outline-none lg:min-h-0"
-              />
+              {enabledItems.filter((it) => getItemContent(it).trim().length > 0).length === 0 ? (
+                <div className="flex min-h-[360px] flex-1 items-center justify-center rounded-lg bg-muted/30 p-4 text-xs text-muted-foreground lg:min-h-0">
+                  （当前无可注入的提示词内容）
+                </div>
+              ) : (
+                <div
+                  aria-label="最终组合提示词预览"
+                  className="min-h-[360px] flex-1 space-y-4 overflow-y-auto rounded-lg bg-muted/30 p-4 lg:min-h-0"
+                >
+                  {enabledItems
+                    .map((it, orderIdx) => ({
+                      item: it,
+                      orderIdx,
+                      text: getItemContent(it).trim(),
+                    }))
+                    .filter((entry) => entry.text.length > 0)
+                    .map(({ item, orderIdx, text }) => (
+                      <div key={item.token} className="flex flex-col gap-2">
+                        <div className="flex items-center gap-2">
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setSelectedToken(item.token);
+                              setViewMode("edit");
+                            }}
+                            title="点击跳转到此块编辑"
+                            className="inline-flex shrink-0 items-center gap-1.5 rounded-md border border-border/80 bg-background/90 px-2 py-0.5 text-[11px] transition-colors hover:border-primary/50 hover:text-foreground"
+                          >
+                            <span className="font-mono text-[10px] text-muted-foreground tabular-nums">
+                              #{orderIdx + 1}
+                            </span>
+                            <span
+                              className={`rounded border px-1 py-0.5 text-[10px] leading-none font-medium ${KIND_BADGE[item.kind].className}`}
+                            >
+                              {KIND_BADGE[item.kind].label}
+                            </span>
+                            <span className="font-mono text-[11px] font-medium text-foreground">
+                              {item.name}
+                            </span>
+                            <span className="font-mono text-[10px] text-muted-foreground tabular-nums">
+                              · {text.length} 字
+                            </span>
+                          </button>
+                          <div className="h-px flex-1 border-t border-dashed border-border" />
+                        </div>
+                        <pre className="whitespace-pre-wrap break-words pl-1 font-mono text-[13px] leading-relaxed text-foreground">
+                          {text}
+                        </pre>
+                      </div>
+                    ))}
+                </div>
+              )}
             </div>
           )}
         </section>
