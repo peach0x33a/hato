@@ -157,6 +157,12 @@ const ModelEntrySchema = Type.Object({
     }),
   ),
   thinking_level_map: Type.Optional(Type.Record(Type.String(), Type.Union([Type.String(), Type.Null()]))),
+  models_dev: Type.Optional(
+    Type.Object({
+      enabled: Type.Boolean(),
+      model_ref: Type.String(),
+    }),
+  ),
 });
 
 const ProviderConfigSchema = Type.Object({

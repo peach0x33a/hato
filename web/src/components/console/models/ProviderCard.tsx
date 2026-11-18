@@ -34,6 +34,7 @@ interface ProviderCardProps {
   testOutcomes: Record<string, ModelTestOutcome>;
   onToggleModelExpand: (modelUid: string) => void;
   onTestModel: (modelUid: string) => void;
+  onShowTestDetail?: (modelUid: string) => void;
   onConfigureProvider: () => void;
   onDeleteProvider: () => void;
   onAddModel: () => void;
@@ -62,6 +63,7 @@ export function ProviderCard({
   testOutcomes,
   onToggleModelExpand,
   onTestModel,
+  onShowTestDetail,
   onConfigureProvider,
   onDeleteProvider,
   onAddModel,
@@ -250,6 +252,7 @@ export function ProviderCard({
                       <ModelRow
                         key={model.uid}
                         model={model}
+                        providerLabel={provider.displayName?.trim() || provider.name}
                         providerBaseUrl={provider.baseUrl}
                         boundSlots={boundSlotsByModelId.get(normalizedId) ?? []}
                         isDuplicateId={duplicateModelIds.has(normalizedId)}
@@ -259,6 +262,9 @@ export function ProviderCard({
                         testOutcome={testOutcomes[model.uid]}
                         onToggleExpand={() => onToggleModelExpand(model.uid)}
                         onTest={() => onTestModel(model.uid)}
+                        onShowTestDetail={
+                          onShowTestDetail ? () => onShowTestDetail(model.uid) : undefined
+                        }
                         onUpdate={(patch) => onUpdateModel(model.uid, patch)}
                         onUpdateAdvanced={(patch) =>
                           onUpdateModelAdvanced(model.uid, patch)

@@ -171,7 +171,13 @@ function ConsoleShell() {
     }
   });
   const [health, setHealth] = useState<HealthResponse | null>(null);
-  const [rootWarningDismissed, setRootWarningDismissed] = useState(false);
+  const [rootWarningDismissed, setRootWarningDismissed] = useState(() => {
+    try {
+      return window.localStorage.getItem("hato.rootWarningDismissed") === "1";
+    } catch {
+      return false;
+    }
+  });
   const [healthOffline, setHealthOffline] = useState(false);
   const [pendingTakeover, setPendingTakeover] = useState(false);
   const [configSnap, setConfigSnap] = useState<ConfigSnapshotResponse | null>(null);
@@ -231,11 +237,24 @@ function ConsoleShell() {
   };
 
   const notify = useCallback(
-    (input: { title: string; description?: string; status?: "info" | "success" | "error" }) => {
+    (input: {
+      title: string;
+      description?: string;
+      status?: "info" | "success" | "error";
+      action?: { label: string; onClick: () => void };
+      duration?: number;
+    }) => {
       showToast({
         title: input.title,
         description: input.description,
         status: input.status ?? "info",
+        action: input.action
+          ? {
+              label: input.action.label,
+              onClick: () => input.action?.onClick(),
+            }
+          : undefined,
+        duration: input.duration,
       });
     },
     [showToast],
@@ -463,15 +482,31 @@ function ConsoleShell() {
             <AlertTriangle className="size-3.5 shrink-0 text-amber-600 dark:text-amber-400" />
             <span className="font-medium">使用root用户运行Hato存在未知的风险</span>
           </div>
-          <button
-            type="button"
-            onClick={() => setRootWarningDismissed(true)}
-            title="关闭提示"
-            aria-label="关闭 root 风险提示"
-            className="inline-flex size-6 shrink-0 items-center justify-center rounded-md text-amber-800/80 transition-colors hover:bg-amber-500/20 hover:text-amber-950 dark:text-amber-200/80 dark:hover:text-amber-50"
-          >
-            <X className="size-3.5" />
-          </button>
+          <div className="flex shrink-0 items-center gap-1.5">
+            <button
+              type="button"
+              onClick={() => {
+                try {
+                  window.localStorage.setItem("hato.rootWarningDismissed", "1");
+                } catch {
+                  // Ignore storage restrictions.
+                }
+                setRootWarningDismissed(true);
+              }}
+              className="inline-flex h-6 items-center rounded-md px-2 text-[11px] font-medium text-amber-800/90 transition-colors hover:bg-amber-500/20 hover:text-amber-950 dark:text-amber-200/90 dark:hover:text-amber-50"
+            >
+              不再提示
+            </button>
+            <button
+              type="button"
+              onClick={() => setRootWarningDismissed(true)}
+              title="本次关闭提示"
+              aria-label="关闭 root 风险提示"
+              className="inline-flex size-6 shrink-0 items-center justify-center rounded-md text-amber-800/80 transition-colors hover:bg-amber-500/20 hover:text-amber-950 dark:text-amber-200/80 dark:hover:text-amber-50"
+            >
+              <X className="size-3.5" />
+            </button>
+          </div>
         </div>
       ) : null}
 
@@ -680,6 +715,7 @@ function ConsoleShell() {
               <ModelsConfigPanel
                 initialConfig={configSnap.modelsConfig}
                 secretStates={configSnap.secretStates}
+                hindsightEnabled={configSnap.hatoConfig.memory?.provider === "hindsight"}
                 onToast={notify}
                 onSaved={(next) => {
                   setConfigSnap((prev) => (prev ? { ...prev, modelsConfig: next } : prev));

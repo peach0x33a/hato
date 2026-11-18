@@ -15,6 +15,7 @@ interface FunctionSlotsPanelProps {
   providers: UiProviderConfig[];
   secretStates: SecretState[];
   pendingSecrets: Record<string, string>;
+  hindsightEnabled?: boolean;
   onChangeSlot: (slotKey: SlotKey, value: string) => void;
   onConfigureProvider?: (providerUid: string) => void;
 }
@@ -22,6 +23,7 @@ interface FunctionSlotsPanelProps {
 interface TargetMeta {
   value: string;
   label: string;
+  providerLabel: string;
   provider: UiProviderConfig;
   model: UiModelEntry;
   keyMissing: boolean;
@@ -32,9 +34,18 @@ export function FunctionSlotsPanel({
   providers,
   secretStates,
   pendingSecrets,
+  hindsightEnabled = false,
   onChangeSlot,
   onConfigureProvider,
 }: FunctionSlotsPanelProps) {
+  const visibleSlots = useMemo(
+    () =>
+      hindsightEnabled
+        ? SLOT_DEFINITIONS
+        : SLOT_DEFINITIONS.filter((slot) => slot.key !== "hindsight_llm"),
+    [hindsightEnabled],
+  );
+
   const { options, targetMap } = useMemo(() => {
     const map = new Map<string, TargetMeta>();
     const list: TargetMeta[] = [];
@@ -42,6 +53,7 @@ export function FunctionSlotsPanel({
     for (const provider of providers) {
       const slug = provider.name.trim();
       if (!slug) continue;
+      const providerLabel = provider.displayName?.trim() || slug;
       const keyState = resolveProviderKeyStatus(provider, secretStates, pendingSecrets);
       const keyMissing = keyState.status === "missing";
 
@@ -53,7 +65,8 @@ export function FunctionSlotsPanel({
         const hasDisplayName = Boolean(customDisplayName && customDisplayName !== modelId);
         const item: TargetMeta = {
           value: target,
-          label: hasDisplayName ? customDisplayName : target,
+          label: hasDisplayName ? customDisplayName : modelId,
+          providerLabel,
           provider,
           model,
           keyMissing,
@@ -79,12 +92,12 @@ export function FunctionSlotsPanel({
           功能槽位
         </h2>
         <span className="text-xs text-zinc-500 tabular-nums dark:text-zinc-400">
-          {SLOT_DEFINITIONS.length} 个运行时路由槽位
+          {visibleSlots.length} 个运行时路由槽位
         </span>
       </div>
 
       <div className="grid grid-cols-1 gap-3.5 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5">
-        {SLOT_DEFINITIONS.map((slot) => {
+        {visibleSlots.map((slot) => {
           const currentValue = slots[slot.key] ?? (slot.key === "vision" ? slots.persona : "");
           const matched = targetMap.get(currentValue);
           const isMissing = currentValue.length > 0 && !matched;
@@ -115,6 +128,7 @@ export function FunctionSlotsPanel({
                   ...options.map((opt) => ({
                     value: opt.value,
                     label: opt.label,
+                    hint: opt.providerLabel,
                   })),
                 ]}
                 triggerClassName={`h-10 font-mono bg-zinc-50 dark:bg-[#0b1014] ${

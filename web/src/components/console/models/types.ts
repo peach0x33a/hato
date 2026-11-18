@@ -361,8 +361,8 @@ export function toUiProviders(config: ModelsFileConfig): UiProviderConfig[] {
       supportsVision: Boolean(m.input?.includes("image")),
       supportsThinking: Boolean(m.reasoning),
       modelsDev: {
-        enabled: false,
-        modelRef: "",
+        enabled: Boolean(m.models_dev?.enabled),
+        modelRef: m.models_dev?.model_ref ?? "",
       },
       advanced: {
         contextWindow: m.context_window !== undefined ? String(m.context_window) : "128000",
@@ -494,6 +494,16 @@ export function buildApiModelsConfig(
         return { ok: false, error: headersRes.error, providerUid: prov.uid, modelUid: m.uid };
       }
 
+      const modelRefTrimmed = m.modelsDev.modelRef.trim();
+      if (m.modelsDev.enabled && !modelRefTrimmed) {
+        return {
+          ok: false,
+          error: `模型 "${label}" 已启用 models.dev 映射，但未填写映射 ID`,
+          providerUid: prov.uid,
+          modelUid: m.uid,
+        };
+      }
+
       const apiModel: ModelDefinitionConfig = {
         id: modelId,
         name: m.displayName.trim() || modelId,
@@ -502,6 +512,12 @@ export function buildApiModelsConfig(
         context_window: ctxRes.value,
         max_tokens: maxOutRes.value,
       };
+      if (m.modelsDev.enabled || modelRefTrimmed) {
+        apiModel.models_dev = {
+          enabled: m.modelsDev.enabled,
+          model_ref: modelRefTrimmed,
+        };
+      }
 
       if (m.advanced.apiOverride && m.advanced.apiOverride !== "__inherit__") {
         apiModel.api = m.advanced.apiOverride;
@@ -583,6 +599,7 @@ export function serializeComparableState(
         displayName: m.displayName,
         supportsVision: m.supportsVision,
         supportsThinking: m.supportsThinking,
+        modelsDev: m.modelsDev,
         advanced: m.advanced,
       })),
     })),

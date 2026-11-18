@@ -140,6 +140,7 @@ export function ConsoleFormRow({
 export interface ConsoleSelectOption {
   value: string;
   label: string;
+  hint?: string;
   icon?: ReactNode;
 }
 
@@ -199,7 +200,16 @@ export function ConsoleSelect({
               icon={opt.icon}
               className="text-xs"
             >
-              {opt.label}
+              {opt.hint ? (
+                <span className="inline-flex min-w-0 items-baseline gap-1.5">
+                  <span className="truncate font-medium text-foreground">{opt.label}</span>
+                  <span className="shrink-0 font-mono text-[10px] text-muted-foreground">
+                    {opt.hint}
+                  </span>
+                </span>
+              ) : (
+                opt.label
+              )}
             </SelectItem>
           ))}
         </SelectContent>

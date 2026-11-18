@@ -1,8 +1,10 @@
 import {
+  AlertCircle,
   Bookmark,
   Check,
   ChevronsDownUp,
   ChevronsUpDown,
+  Copy,
   Loader2,
   Plus,
   RotateCcw,
@@ -43,13 +45,26 @@ type DrawerState =
 export interface ModelsConfigPanelProps {
   initialConfig: ModelsFileConfig;
   secretStates?: SecretState[];
+  hindsightEnabled?: boolean;
   onSaved: (next: ModelsFileConfig, changes?: string[]) => void;
   onSecretsUpdated?: (nextStates: SecretState[]) => void;
   onToast: (input: {
     title: string;
     description?: string;
     status?: "info" | "success" | "error";
+    action?: { label: string; onClick: () => void };
+    duration?: number;
   }) => void;
+}
+
+interface TestDetailState {
+  target: string;
+  providerLabel: string;
+  modelLabel: string;
+  ok: boolean;
+  latencyMs: number;
+  replyPreview?: string;
+  error?: string;
 }
 
 function readStoredProviderDraft(): ProviderDraft | null {
@@ -69,6 +84,7 @@ function readStoredProviderDraft(): ProviderDraft | null {
 export function ModelsConfigPanel({
   initialConfig,
   secretStates = [],
+  hindsightEnabled = false,
   onSaved,
   onSecretsUpdated,
   onToast,
@@ -96,6 +112,8 @@ export function ModelsConfigPanel({
   const [newlyAddedModelUid, setNewlyAddedModelUid] = useState<string | null>(null);
   const [testingModelIds, setTestingModelIds] = useState<Set<string>>(() => new Set());
   const [testOutcomes, setTestOutcomes] = useState<Record<string, ModelTestOutcome>>({});
+  const [testDetailModal, setTestDetailModal] = useState<TestDetailState | null>(null);
+  const [copiedDetail, setCopiedDetail] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
   const [savePhase, setSavePhase] = useState<"idle" | "saving" | "saved">("idle");
 
@@ -118,6 +136,7 @@ export function ModelsConfigPanel({
     const byProvider = new Map<string, SlotKey[]>();
 
     for (const def of SLOT_DEFINITIONS) {
+      if (def.key === "hindsight_llm" && !hindsightEnabled) continue;
       const target = slots[def.key]?.trim();
       if (!target) continue;
       const existing = byTarget.get(target) ?? [];
@@ -134,7 +153,7 @@ export function ModelsConfigPanel({
     }
 
     return { byTarget, byProvider };
-  }, [slots]);
+  }, [slots, hindsightEnabled]);
 
   const normalizedSearch = searchQuery.trim().toLowerCase();
   const isSearchActive = normalizedSearch.length > 0;
@@ -523,6 +542,15 @@ export function ModelsConfigPanel({
       });
 
       const outcome = res.result;
+      const detailPayload: TestDetailState = {
+        target: outcome.target || `${slug}/${modelId}`,
+        providerLabel: prov.displayName?.trim() || slug,
+        modelLabel: model.displayName.trim() || modelId,
+        ok: outcome.ok,
+        latencyMs: outcome.latencyMs,
+        replyPreview: outcome.replyPreview,
+        error: outcome.error,
+      };
       setTestOutcomes((prev) => ({
         ...prev,
         [modelUid]: {
@@ -538,16 +566,40 @@ export function ModelsConfigPanel({
           title: `测试成功 · ${outcome.target}`,
           description: `问好回复: "${outcome.replyPreview ?? "hello"}" · 耗时 ${outcome.latencyMs}ms`,
           status: "success",
+          duration: 6000,
+          action: {
+            label: "详情",
+            onClick: () => {
+              setCopiedDetail(false);
+              setTestDetailModal(detailPayload);
+            },
+          },
         });
       } else {
         onToast({
           title: `测试失败 · ${outcome.target}`,
           description: outcome.error || "未知错误",
           status: "error",
+          duration: 8000,
+          action: {
+            label: "详情",
+            onClick: () => {
+              setCopiedDetail(false);
+              setTestDetailModal(detailPayload);
+            },
+          },
         });
       }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
+      const detailPayload: TestDetailState = {
+        target: `${slug}/${modelId}`,
+        providerLabel: prov.displayName?.trim() || slug,
+        modelLabel: model.displayName.trim() || modelId,
+        ok: false,
+        latencyMs: 0,
+        error: msg,
+      };
       setTestOutcomes((prev) => ({
         ...prev,
         [modelUid]: {
@@ -560,6 +612,14 @@ export function ModelsConfigPanel({
         title: `测试失败 · ${slug}/${modelId}`,
         description: msg,
         status: "error",
+        duration: 8000,
+        action: {
+          label: "详情",
+          onClick: () => {
+            setCopiedDetail(false);
+            setTestDetailModal(detailPayload);
+          },
+        },
       });
     } finally {
       setTestingModelIds((prev) => {
@@ -634,6 +694,19 @@ export function ModelsConfigPanel({
       });
     }
   }, [savePhase, slots, providers, pendingSecrets, onSecretsUpdated, onSaved, onToast]);
+
+  // Close test detail modal on Escape
+  useEffect(() => {
+    if (!testDetailModal) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        setTestDetailModal(null);
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [testDetailModal]);
 
   // Cmd/Ctrl + S shortcut when drawer is closed
   useEffect(() => {
@@ -721,6 +794,7 @@ export function ModelsConfigPanel({
           providers={providers}
           secretStates={secretStates}
           pendingSecrets={pendingSecrets}
+          hindsightEnabled={hindsightEnabled}
           onChangeSlot={handleChangeSlot}
           onConfigureProvider={(providerUid) =>
             setDrawerState({ open: true, mode: "edit", providerUid })
@@ -892,6 +966,21 @@ export function ModelsConfigPanel({
                     testOutcomes={testOutcomes}
                     onToggleModelExpand={handleToggleModelExpand}
                     onTestModel={(modelUid) => void handleTestModel(provider.uid, modelUid)}
+                    onShowTestDetail={(modelUid) => {
+                      const targetModel = provider.models.find((m) => m.uid === modelUid);
+                      const outcome = testOutcomes[modelUid];
+                      if (!targetModel || !outcome) return;
+                      setCopiedDetail(false);
+                      setTestDetailModal({
+                        target: `${slug}/${targetModel.id.trim()}`,
+                        providerLabel: provider.displayName?.trim() || slug,
+                        modelLabel: targetModel.displayName.trim() || targetModel.id.trim(),
+                        ok: outcome.ok,
+                        latencyMs: outcome.latencyMs,
+                        replyPreview: outcome.replyPreview,
+                        error: outcome.error,
+                      });
+                    }}
                     onConfigureProvider={() =>
                       setDrawerState({
                         open: true,
@@ -933,6 +1022,112 @@ export function ModelsConfigPanel({
         onCreateProvider={handleCreateProviderFromDrawer}
         onUpdateProviderSettings={handleUpdateProviderSettings}
       />
+
+      {/* Model Test Detail Modal */}
+      {testDetailModal ? (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="test-detail-modal-title"
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4 backdrop-blur-[2px]"
+          onClick={() => setTestDetailModal(null)}
+        >
+          <div
+            className="flex max-h-[85vh] w-full max-w-xl flex-col overflow-hidden rounded-xl border border-zinc-200 bg-white shadow-2xl dark:border-zinc-800 dark:bg-[#0f1418]"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between gap-3 border-b border-zinc-200 px-5 py-3.5 dark:border-zinc-800">
+              <div className="flex min-w-0 items-center gap-2.5">
+                <span
+                  className={`inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-full ${
+                    testDetailModal.ok
+                      ? "bg-emerald-500/15 text-emerald-600 dark:text-emerald-400"
+                      : "bg-rose-500/15 text-rose-600 dark:text-rose-400"
+                  }`}
+                >
+                  {testDetailModal.ok ? (
+                    <Check className="h-3.5 w-3.5" />
+                  ) : (
+                    <AlertCircle className="h-3.5 w-3.5" />
+                  )}
+                </span>
+                <div className="min-w-0">
+                  <h3
+                    id="test-detail-modal-title"
+                    className="truncate text-sm font-semibold text-zinc-900 dark:text-zinc-100"
+                  >
+                    {testDetailModal.ok ? "上游测试回复详情" : "上游测试失败详情"}
+                  </h3>
+                  <div className="flex items-center gap-1.5 truncate text-xs text-zinc-500 dark:text-zinc-400">
+                    <span className="truncate font-medium text-zinc-700 dark:text-zinc-300">
+                      {testDetailModal.modelLabel}
+                    </span>
+                    <span className="font-mono text-[11px] text-zinc-400 dark:text-zinc-500">
+                      {testDetailModal.providerLabel}
+                    </span>
+                    {testDetailModal.latencyMs > 0 ? (
+                      <>
+                        <span aria-hidden="true">·</span>
+                        <span className="font-mono tabular-nums">
+                          {testDetailModal.latencyMs}ms
+                        </span>
+                      </>
+                    ) : null}
+                  </div>
+                </div>
+              </div>
+
+              <button
+                type="button"
+                onClick={() => setTestDetailModal(null)}
+                aria-label="关闭详情"
+                className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-lg text-zinc-400 transition-colors hover:bg-zinc-100 hover:text-zinc-700 dark:hover:bg-zinc-800 dark:hover:text-zinc-200"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+
+            <div className="flex flex-1 flex-col gap-3 overflow-y-auto p-5">
+              <div className="flex items-center justify-between gap-2 text-xs text-zinc-500 dark:text-zinc-400">
+                <span>
+                  目标：<code className="font-mono text-zinc-700 dark:text-zinc-300">{testDetailModal.target}</code>
+                </span>
+                <button
+                  type="button"
+                  onClick={() => {
+                    const text = testDetailModal.ok
+                      ? (testDetailModal.replyPreview ?? "")
+                      : (testDetailModal.error ?? "");
+                    void navigator.clipboard?.writeText(text).then(() => {
+                      setCopiedDetail(true);
+                      window.setTimeout(() => setCopiedDetail(false), 1800);
+                    });
+                  }}
+                  className="inline-flex items-center gap-1 rounded-md border border-zinc-200 px-2 py-1 text-[11px] font-medium text-zinc-600 transition-colors hover:bg-zinc-100 dark:border-zinc-800 dark:text-zinc-300 dark:hover:bg-zinc-800"
+                >
+                  {copiedDetail ? (
+                    <>
+                      <Check className="h-3 w-3 text-emerald-500" />
+                      <span>已复制</span>
+                    </>
+                  ) : (
+                    <>
+                      <Copy className="h-3 w-3" />
+                      <span>复制内容</span>
+                    </>
+                  )}
+                </button>
+              </div>
+
+              <pre className="max-h-[50vh] overflow-auto rounded-lg border border-zinc-200 bg-zinc-50 p-3.5 font-mono text-xs leading-relaxed whitespace-pre-wrap break-words text-zinc-800 dark:border-zinc-800 dark:bg-[#090d10] dark:text-zinc-200">
+                {testDetailModal.ok
+                  ? (testDetailModal.replyPreview || "(empty text response)")
+                  : (testDetailModal.error || "未知错误")}
+              </pre>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }

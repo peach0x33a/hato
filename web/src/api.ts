@@ -227,6 +227,7 @@ export interface HatoConfig {
     };
   };
   memory: {
+    provider?: "none" | "memoryecho" | "hindsight";
     hindsight: {
       base_url: string;
       embedding_dimensions: number;
@@ -364,6 +365,38 @@ export interface ModelDefinitionConfig {
   };
   thinking_level_map?: Record<string, string | null>;
   compat?: Record<string, unknown>;
+  models_dev?: {
+    enabled: boolean;
+    model_ref: string;
+  };
+}
+
+export interface ModelsDevMappedMetadata {
+  ref: string;
+  providerId: string;
+  providerName: string;
+  modelId: string;
+  name: string;
+  reasoning: boolean;
+  input: Array<"text" | "image">;
+  context_window?: number;
+  max_tokens?: number;
+  cost?: {
+    input?: number;
+    output?: number;
+    cache_read?: number;
+    cache_write?: number;
+  };
+}
+
+export interface ModelsDevSearchItem {
+  ref: string;
+  name: string;
+  providerName: string;
+  reasoning: boolean;
+  supportsVision: boolean;
+  contextWindow?: number;
+  maxTokens?: number;
 }
 
 export interface ProviderConfig {
@@ -510,6 +543,8 @@ export interface ProbeItemResult {
   message: string;
   skipped?: boolean;
   testedAtMs?: number;
+  modelCount?: number;
+  providerCount?: number;
 }
 
 export interface ProbeResponse {
@@ -519,6 +554,7 @@ export interface ProbeResponse {
     qq?: ProbeItemResult;
     tavily?: ProbeItemResult;
     memory?: ProbeItemResult;
+    models_dev?: ProbeItemResult;
   };
 }
 
@@ -771,7 +807,7 @@ export const api = {
     requestJson<SaveConfigResponse>("/api/config/reload", {
       method: "POST",
     }),
-  probe: (target: "all" | "telegram" | "qq" | "tavily" | "memory") =>
+  probe: (target: "all" | "telegram" | "qq" | "tavily" | "memory" | "models_dev") =>
     requestJson<ProbeResponse>("/api/config/probe", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -810,6 +846,19 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(input),
     }),
+  lookupModelsDev: (ref: string, refresh = false) => {
+    const q = new URLSearchParams({ ref });
+    if (refresh) q.set("refresh", "1");
+    return requestJson<{ ok: boolean; metadata: ModelsDevMappedMetadata }>(
+      `/api/models-dev/lookup?${q.toString()}`,
+    );
+  },
+  searchModelsDev: (q: string, limit = 15) => {
+    const params = new URLSearchParams({ q, limit: String(limit) });
+    return requestJson<{ ok: boolean; items: ModelsDevSearchItem[] }>(
+      `/api/models-dev/search?${params.toString()}`,
+    );
+  },
   getStatics: (params: { limit?: number; slot?: string; since?: string; sessionId?: string | null }) => {
     const q = new URLSearchParams();
     if (params.limit) q.set("limit", String(params.limit));

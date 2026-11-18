@@ -18,6 +18,7 @@ import {
   type HatoConfig,
 } from "../config/app.js";
 import type { ModelRegistry } from "../config/models.js";
+import { ModelsDevRegistry } from "../config/models-dev.js";
 import type { ScopedProxyRouter } from "../config/proxy.js";
 import { getOptionalSecret, reloadSecretEnv } from "../config/secrets.js";
 import { mergeEnvFile, readEnvMap, writeHatoConfig, writeModelsConfig } from "../config/store.js";
@@ -81,6 +82,7 @@ export interface WebConsoleServerDeps {
   getActorLock: () => ActorLock;
   getSlashDeps: (canonicalUserId: string) => SlashCommandDeps;
   reloadAll: () => Promise<WebConsoleReloadResult>;
+  modelsDevRegistry?: ModelsDevRegistry;
   probeExternalClis?: (config: HatoConfig) => Promise<ExternalCliProbeEntry[]>;
   getGatewayStatus?: () => {
     telegram: { enabled: boolean; running: boolean; online: boolean; username?: string };
@@ -115,6 +117,7 @@ export class WebConsoleServer {
   private readonly startedAtMs = Date.now();
   private readonly envPath: string;
   private readonly staticDir: string;
+  private readonly modelsDevRegistry: ModelsDevRegistry;
   private readonly tgProfileCache = new Map<
     string,
     { expiresAt: number; profile: TelegramUserProfileResult }
@@ -127,6 +130,9 @@ export class WebConsoleServer {
   constructor(private readonly deps: WebConsoleServerDeps) {
     this.envPath = deps.envPath ?? ".env";
     this.staticDir = resolve(deps.staticDir ?? "web/dist");
+    this.modelsDevRegistry =
+      deps.modelsDevRegistry ??
+      new ModelsDevRegistry({ getProxyRouter: deps.getProxyRouter });
   }
 
   getAddress(): { host: string; port: number } | null {
@@ -270,6 +276,14 @@ export class WebConsoleServer {
         }
         if (pathname === "/api/config/models/test" && method === "POST") {
           await this.handleTestModel(req, res);
+          return;
+        }
+        if (pathname === "/api/models-dev/lookup" && method === "GET") {
+          await this.handleModelsDevLookup(parsedUrl, res);
+          return;
+        }
+        if (pathname === "/api/models-dev/search" && method === "GET") {
+          await this.handleModelsDevSearch(parsedUrl, res);
           return;
         }
         if (pathname === "/api/config/prompt" && method === "PUT") {
@@ -961,6 +975,42 @@ export class WebConsoleServer {
     });
   }
 
+  private async handleModelsDevLookup(parsedUrl: URL, res: ServerResponse): Promise<void> {
+    const ref = parsedUrl.searchParams.get("ref")?.trim() ?? "";
+    if (!ref) {
+      sendJson(res, 400, { ok: false, error: "请提供 models.dev 映射 ID (ref)" });
+      return;
+    }
+    const refresh = parsedUrl.searchParams.get("refresh") === "1";
+    try {
+      const metadata = await this.modelsDevRegistry.lookup(ref, refresh);
+      if (!metadata) {
+        sendJson(res, 404, {
+          ok: false,
+          error: `未在 models.dev 找到 "${ref}"，请检查格式（如 openai/gpt-4o）或尝试搜索`,
+        });
+        return;
+      }
+      sendJson(res, 200, { ok: true, metadata });
+    } catch (err) {
+      const message = summarizeError(err);
+      const status = message.includes("无效的 models.dev 映射 ID") ? 400 : 502;
+      sendJson(res, status, { ok: false, error: message });
+    }
+  }
+
+  private async handleModelsDevSearch(parsedUrl: URL, res: ServerResponse): Promise<void> {
+    const q = parsedUrl.searchParams.get("q") ?? "";
+    const rawLimit = Number(parsedUrl.searchParams.get("limit") ?? "15");
+    const limit = Number.isFinite(rawLimit) ? rawLimit : 15;
+    try {
+      const items = await this.modelsDevRegistry.search(q, limit);
+      sendJson(res, 200, { ok: true, items });
+    } catch (err) {
+      sendJson(res, 502, { ok: false, error: summarizeError(err) });
+    }
+  }
+
   private async handleSavePrompt(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const payload = (await readJsonBody(req)) as { promptText?: unknown };
     if (typeof payload.promptText !== "string") {
@@ -1315,6 +1365,18 @@ export class WebConsoleServer {
             ? `Hindsight 服务连接正常 (${memRes.baseUrl})`
             : `MemoryEcho 连接正常${typeof memRes.vaultCount === "number" ? `（${memRes.vaultCount} 个 Vault）` : ""}`
           : memRes.error ?? "记忆服务连接失败",
+      };
+    }
+
+    if (target === "all" || target === "models_dev") {
+      const mdRes = await this.modelsDevRegistry.probe();
+      results.models_dev = {
+        ok: mdRes.ok,
+        latencyMs: mdRes.latencyMs,
+        ...(mdRes.ok ? { modelCount: mdRes.modelCount, providerCount: mdRes.providerCount } : {}),
+        message: mdRes.ok
+          ? `models.dev 可达（${mdRes.modelCount} 个模型 / ${mdRes.providerCount} 个供应商）`
+          : mdRes.error ?? "models.dev 连接失败",
       };
     }
 

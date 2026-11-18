@@ -14,7 +14,7 @@ export interface SecretsAndProbePanelProps {
 
 const PROBE_STORAGE_KEY = "hato_service_probe_results_v1";
 
-type ProbeTargetKey = "telegram" | "qq" | "tavily" | "memory";
+type ProbeTargetKey = "telegram" | "qq" | "tavily" | "memory" | "models_dev";
 
 const PROBE_TARGETS: ReadonlyArray<{
   key: ProbeTargetKey;
@@ -40,6 +40,11 @@ const PROBE_TARGETS: ReadonlyArray<{
     key: "memory",
     title: "记忆服务",
     description: "检查当前记忆后端（MemoryEcho / Hindsight）连通性与鉴权状态",
+  },
+  {
+    key: "models_dev",
+    title: "models.dev 元数据",
+    description: "检查 models.dev 目录可达性、当前模型数量与访问延迟",
   },
 ];
 
