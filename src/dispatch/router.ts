@@ -261,7 +261,7 @@ export class NeutralRouter {
     const ttftMs =
       firstDeltaPerf !== null ? Math.max(0, Math.round(firstDeltaPerf - callStart)) : latencyMs;
     const decodeMs =
-      firstDeltaPerf !== null ? Math.max(1, nowPerf - firstDeltaPerf) : Math.max(1, latencyMs - ttftMs);
+      firstDeltaPerf !== null ? Math.max(1, nowPerf - firstDeltaPerf) : undefined;
 
     console.log(
       formatLlmTelemetryLog({

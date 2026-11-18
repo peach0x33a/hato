@@ -17,6 +17,36 @@ function splitTags(raw: string): string[] {
     .filter(Boolean);
 }
 
+function StickerImage({
+  src,
+  alt,
+  className,
+}: {
+  src: string;
+  alt: string;
+  className?: string;
+}) {
+  const [failed, setFailed] = useState(false);
+
+  useEffect(() => {
+    setFailed(false);
+  }, [src]);
+
+  if (failed) {
+    return <Smile className="size-6 text-muted-foreground/50" aria-label={alt} />;
+  }
+
+  return (
+    <img
+      src={src}
+      alt={alt}
+      className={className}
+      loading="lazy"
+      onError={() => setFailed(true)}
+    />
+  );
+}
+
 export function StickersPanel({ onToast }: StickersPanelProps) {
   const [stickers, setStickers] = useState<StickerRecord[]>([]);
   const [loading, setLoading] = useState(true);
@@ -51,6 +81,17 @@ export function StickersPanel({ onToast }: StickersPanelProps) {
     void loadStickers();
   }, [loadStickers]);
 
+  useEffect(() => {
+    if (!editing) return;
+    const onEsc = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        setEditing(null);
+      }
+    };
+    window.addEventListener("keydown", onEsc);
+    return () => window.removeEventListener("keydown", onEsc);
+  }, [editing]);
+
   const openEditor = (item: StickerRecord) => {
     setEditing(item);
     setEditCaption(item.caption);
@@ -84,6 +125,7 @@ export function StickersPanel({ onToast }: StickersPanelProps) {
   };
 
   const handleDelete = async (item: StickerRecord) => {
+    if (!window.confirm(`确定要删除表情包「${item.caption || item.id}」吗？`)) return;
     try {
       await api.deleteSticker(item.id);
       setStickers((prev) => prev.filter((s) => s.id !== item.id));
@@ -102,13 +144,11 @@ export function StickersPanel({ onToast }: StickersPanelProps) {
     <div className="mx-auto flex w-full max-w-6xl flex-col gap-5 px-4 py-6 sm:px-6">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
-          <h2 className="flex items-center gap-2 text-lg font-semibold tracking-tight">
+          <h2 className="flex items-center gap-2 text-base font-semibold tracking-tight">
             <Smile className="size-4 text-primary" />
             表情包库
           </h2>
-          <p className="mt-0.5 text-xs text-muted-foreground">
-            共 {stickers.length} 张 · 支持浏览、手动微调情绪/语境标签与删除（入库请在聊天中发送图片或贴纸包链接）
-          </p>
+          <p className="mt-0.5 text-xs text-muted-foreground">共 {stickers.length} 张</p>
         </div>
 
         <div className="flex items-center gap-2">
@@ -145,7 +185,14 @@ export function StickersPanel({ onToast }: StickersPanelProps) {
         </div>
       </div>
 
-      {stickers.length === 0 && !loading ? (
+      {loading && stickers.length === 0 ? (
+        <Card>
+          <CardContent className="flex flex-col items-center justify-center gap-2 py-14 text-center">
+            <RefreshCw className="size-6 animate-spin text-muted-foreground" />
+            <div className="text-xs text-muted-foreground">正在加载表情包库…</div>
+          </CardContent>
+        </Card>
+      ) : stickers.length === 0 ? (
         <Card>
           <CardContent className="flex flex-col items-center justify-center gap-2 py-14 text-center">
             <Smile className="size-8 text-muted-foreground/50" />
@@ -161,11 +208,10 @@ export function StickersPanel({ onToast }: StickersPanelProps) {
             <Card key={item.id} className="overflow-hidden">
               <CardContent className="flex gap-3 p-3.5">
                 <div className="flex size-20 shrink-0 items-center justify-center overflow-hidden rounded-lg border border-border/70 bg-muted/30">
-                  <img
+                  <StickerImage
                     src={api.stickerImageUrl(item.id)}
                     alt={item.caption || item.id}
                     className="max-h-full max-w-full object-contain"
-                    loading="lazy"
                   />
                 </div>
                 <div className="flex min-w-0 flex-1 flex-col gap-1.5">
@@ -265,44 +311,54 @@ export function StickersPanel({ onToast }: StickersPanelProps) {
             </div>
 
             <div className="flex items-center gap-3">
-              <img
-                src={api.stickerImageUrl(editing.id)}
-                alt={editing.id}
-                className="size-16 rounded-lg border border-border/70 object-contain"
-              />
+              <div className="flex size-16 shrink-0 items-center justify-center overflow-hidden rounded-lg border border-border/70 bg-muted/30">
+                <StickerImage
+                  src={api.stickerImageUrl(editing.id)}
+                  alt={editing.id}
+                  className="max-h-full max-w-full object-contain"
+                />
+              </div>
               <div className="text-xs text-muted-foreground">
                 <div className="font-mono">{editing.id}</div>
                 {editing.setName ? <div>贴纸包：{editing.setName}</div> : null}
               </div>
             </div>
 
-            <div className="flex flex-col gap-3 text-xs">
-              <label className="flex flex-col gap-1">
-                <span className="font-medium">画面描述与文字</span>
-                <ConsoleInput value={editCaption} onChange={setEditCaption} />
-              </label>
-              <label className="flex flex-col gap-1">
-                <span className="font-medium">情绪标签（逗号或空格分隔）</span>
-                <ConsoleInput value={editEmotions} onChange={setEditEmotions} />
-              </label>
-              <label className="flex flex-col gap-1">
-                <span className="font-medium">适用语境（逗号或空格分隔）</span>
-                <ConsoleInput value={editScenes} onChange={setEditScenes} />
-              </label>
-              <label className="flex flex-col gap-1">
-                <span className="font-medium">画风 / 角色</span>
-                <ConsoleInput value={editStyle} onChange={setEditStyle} />
-              </label>
-            </div>
+            <form
+              className="flex flex-col gap-4"
+              onSubmit={(e) => {
+                e.preventDefault();
+                void handleSaveEdit();
+              }}
+            >
+              <div className="flex flex-col gap-3 text-xs">
+                <label className="flex flex-col gap-1">
+                  <span className="font-medium">画面描述与文字</span>
+                  <ConsoleInput value={editCaption} onChange={setEditCaption} />
+                </label>
+                <label className="flex flex-col gap-1">
+                  <span className="font-medium">情绪标签（逗号或空格分隔）</span>
+                  <ConsoleInput value={editEmotions} onChange={setEditEmotions} />
+                </label>
+                <label className="flex flex-col gap-1">
+                  <span className="font-medium">适用语境（逗号或空格分隔）</span>
+                  <ConsoleInput value={editScenes} onChange={setEditScenes} />
+                </label>
+                <label className="flex flex-col gap-1">
+                  <span className="font-medium">画风 / 角色</span>
+                  <ConsoleInput value={editStyle} onChange={setEditStyle} />
+                </label>
+              </div>
 
-            <div className="flex justify-end gap-2">
-              <Button type="button" variant="outline" size="sm" onClick={() => setEditing(null)}>
-                取消
-              </Button>
-              <Button type="button" size="sm" disabled={saving} onClick={() => void handleSaveEdit()}>
-                {saving ? "保存中…" : "保存"}
-              </Button>
-            </div>
+              <div className="flex justify-end gap-2">
+                <Button type="button" variant="outline" size="sm" onClick={() => setEditing(null)}>
+                  取消
+                </Button>
+                <Button type="submit" size="sm" disabled={saving}>
+                  {saving ? "保存中…" : "保存"}
+                </Button>
+              </div>
+            </form>
           </div>
         </div>
       ) : null}

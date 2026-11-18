@@ -29,6 +29,59 @@ interface TargetMeta {
   keyMissing: boolean;
 }
 
+function SlotStatusBadge({
+  isMissing,
+  matched,
+  visionUnsupported,
+  onConfigureProvider,
+}: {
+  isMissing: boolean;
+  matched?: TargetMeta;
+  visionUnsupported: boolean;
+  onConfigureProvider?: (providerUid: string) => void;
+}) {
+  if (isMissing) {
+    return (
+      <span className="inline-flex items-center gap-1 rounded-full border border-rose-500/35 bg-rose-500/10 px-2 py-0.5 text-[11px] font-medium text-rose-600 dark:text-rose-300">
+        <AlertTriangle className="h-3 w-3 shrink-0" />
+        <span>模型已移除</span>
+      </span>
+    );
+  }
+  if (matched?.keyMissing) {
+    return (
+      <button
+        type="button"
+        onClick={() => onConfigureProvider?.(matched.provider.uid)}
+        className="inline-flex items-center gap-1 rounded-full border border-amber-500/40 bg-amber-500/10 px-2 py-0.5 text-[11px] font-medium text-amber-700 transition-colors hover:bg-amber-500/20 dark:text-amber-300"
+      >
+        <KeyRound className="h-3 w-3 shrink-0" />
+        <span>缺少密钥</span>
+      </button>
+    );
+  }
+  if (visionUnsupported) {
+    return (
+      <span
+        title="当前所选模型未开启「识图」能力"
+        className="inline-flex items-center gap-1 rounded-full border border-amber-500/40 bg-amber-500/10 px-2 py-0.5 text-[11px] font-medium text-amber-700 dark:text-amber-300"
+      >
+        <AlertTriangle className="h-3 w-3 shrink-0" />
+        <span>未标识图</span>
+      </span>
+    );
+  }
+  if (matched) {
+    return (
+      <span className="inline-flex items-center gap-1.5 rounded-full border border-emerald-500/30 bg-emerald-500/10 px-2 py-0.5 text-[11px] font-medium text-emerald-700 dark:text-emerald-300">
+        <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" />
+        <span>正常</span>
+      </span>
+    );
+  }
+  return <span className="text-zinc-400 dark:text-zinc-500">未指定</span>;
+}
+
 export function FunctionSlotsPanel({
   slots,
   providers,
@@ -219,36 +272,12 @@ export function FunctionSlotsPanel({
                   </td>
 
                   <td className="px-5 py-2.5 text-right whitespace-nowrap">
-                    {isMissing ? (
-                      <span className="inline-flex items-center gap-1 rounded-full border border-rose-500/35 bg-rose-500/10 px-2 py-0.5 text-[11px] font-medium text-rose-600 dark:text-rose-300">
-                        <AlertTriangle className="h-3 w-3 shrink-0" />
-                        <span>模型已移除</span>
-                      </span>
-                    ) : matched?.keyMissing ? (
-                      <button
-                        type="button"
-                        onClick={() => onConfigureProvider?.(matched.provider.uid)}
-                        className="inline-flex items-center gap-1 rounded-full border border-amber-500/40 bg-amber-500/10 px-2 py-0.5 text-[11px] font-medium text-amber-700 transition-colors hover:bg-amber-500/20 dark:text-amber-300"
-                      >
-                        <KeyRound className="h-3 w-3 shrink-0" />
-                        <span>缺少密钥</span>
-                      </button>
-                    ) : visionUnsupported ? (
-                      <span
-                        title="当前所选模型未开启「识图」能力"
-                        className="inline-flex items-center gap-1 rounded-full border border-amber-500/40 bg-amber-500/10 px-2 py-0.5 text-[11px] font-medium text-amber-700 dark:text-amber-300"
-                      >
-                        <AlertTriangle className="h-3 w-3 shrink-0" />
-                        <span>未标识图</span>
-                      </span>
-                    ) : matched ? (
-                      <span className="inline-flex items-center gap-1.5 rounded-full border border-emerald-500/30 bg-emerald-500/10 px-2 py-0.5 text-[11px] font-medium text-emerald-700 dark:text-emerald-300">
-                        <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" />
-                        <span>正常</span>
-                      </span>
-                    ) : (
-                      <span className="text-zinc-400 dark:text-zinc-500">未指定</span>
-                    )}
+                    <SlotStatusBadge
+                      isMissing={isMissing}
+                      matched={matched}
+                      visionUnsupported={visionUnsupported}
+                      onConfigureProvider={onConfigureProvider}
+                    />
                   </td>
                 </tr>
               );
@@ -264,10 +293,12 @@ export function FunctionSlotsPanel({
           const effectiveValue = rawValue || (slot.key === "vision" ? slots.persona : "");
           const matched = targetMap.get(effectiveValue);
           const isMissing = effectiveValue.length > 0 && !matched;
+          const visionUnsupported =
+            slot.key === "vision" && Boolean(matched && !matched.model.supportsVision);
 
           return (
             <div key={slot.key} className="flex flex-col gap-2 px-4 py-3">
-              <div className="flex items-center justify-between gap-2">
+              <div className="flex flex-wrap items-center justify-between gap-2">
                 <div className="flex items-center gap-2">
                   <span
                     className={`inline-flex items-center rounded-md border px-2 py-0.5 font-mono text-[11px] font-medium ${slot.pillClass}`}
@@ -278,11 +309,19 @@ export function FunctionSlotsPanel({
                     {slot.label}
                   </span>
                 </div>
-                {matched ? (
-                  <span className="font-mono text-[11px] text-zinc-500 dark:text-zinc-400">
-                    {matched.providerLabel}
-                  </span>
-                ) : null}
+                <div className="flex items-center gap-2">
+                  {matched ? (
+                    <span className="font-mono text-[11px] text-zinc-500 dark:text-zinc-400">
+                      {matched.providerLabel}
+                    </span>
+                  ) : null}
+                  <SlotStatusBadge
+                    isMissing={isMissing}
+                    matched={matched}
+                    visionUnsupported={visionUnsupported}
+                    onConfigureProvider={onConfigureProvider}
+                  />
+                </div>
               </div>
 
               <ConsoleSelect

@@ -34,7 +34,7 @@ import {
 } from "lucide-react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import { useTheme } from "next-themes";
-import { type ReactNode, useCallback, useEffect, useMemo, useState } from "react";
+import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   api,
   type ExternalCliPermissionPreset,
@@ -46,6 +46,7 @@ import {
 } from "@/api";
 import {
   ConsoleInput,
+  type ConsoleInputProps,
   ConsoleMultiSelect,
   ConsoleSelect,
 } from "@/components/console/ConsolePrimitives";
@@ -501,6 +502,67 @@ export interface SettingsPanelProps {
   }) => void;
 }
 
+let nextProxyIdCounter = 0;
+function makeProxyId(): string {
+  nextProxyIdCounter += 1;
+  return `proxy-${nextProxyIdCounter}`;
+}
+
+function NumericConsoleInput({
+  value,
+  fallback,
+  min,
+  onCommit,
+  onBlur,
+  onFocus,
+  ...props
+}: Omit<ConsoleInputProps, "value" | "onChange" | "type"> & {
+  value: number;
+  fallback: number;
+  min?: number;
+  onCommit: (next: number) => void;
+}) {
+  const [text, setText] = useState(() => String(value));
+  const focusedRef = useRef(false);
+
+  useEffect(() => {
+    if (!focusedRef.current) {
+      setText(String(value));
+    }
+  }, [value]);
+
+  return (
+    <ConsoleInput
+      {...props}
+      type="number"
+      value={text}
+      onFocus={(e) => {
+        focusedRef.current = true;
+        onFocus?.(e);
+      }}
+      onChange={(v) => {
+        setText(v);
+        const trimmed = v.trim();
+        if (trimmed === "") return;
+        const parsed = Number(trimmed);
+        if (!Number.isFinite(parsed)) return;
+        if (min !== undefined && parsed < min) return;
+        onCommit(parsed);
+      }}
+      onBlur={(e) => {
+        focusedRef.current = false;
+        const trimmed = text.trim();
+        const parsed = trimmed === "" ? NaN : Number(trimmed);
+        const committed =
+          !Number.isFinite(parsed) || (min !== undefined && parsed < min) ? fallback : parsed;
+        setText(String(committed));
+        onCommit(committed);
+        onBlur?.(e);
+      }}
+    />
+  );
+}
+
 function envRecordToRows(
   env?: Record<string, string>,
 ): Array<{ id: string; key: string; value: string }> {
@@ -528,7 +590,10 @@ export function SettingsPanel({
   const [searchQuery, setSearchQuery] = useState("");
   const [draft, setDraft] = useState<HatoConfig>(() => structuredClone(initialConfig));
   const [saveState, setSaveState] = useState<ButtonState>("idle");
-  const [lastProxyUrls, setLastProxyUrls] = useState<Record<number, string>>({});
+  const [lastProxyUrls, setLastProxyUrls] = useState<Record<string, string>>({});
+  const [proxyIds, setProxyIds] = useState<string[]>(() =>
+    (initialConfig.network?.proxies ?? []).map(() => makeProxyId()),
+  );
   const [cliProbes, setCliProbes] = useState<ExternalCliProbeEntry[]>([]);
   const [probingClis, setProbingClis] = useState(false);
   const [loadingModelsByBackend, setLoadingModelsByBackend] = useState<Record<string, boolean>>({});
@@ -620,6 +685,8 @@ export function SettingsPanel({
   useEffect(() => {
     setDraft(structuredClone(initialConfig));
     setEnvRows(envRecordToRows(initialConfig.worker.external_cli.env));
+    setLastProxyUrls({});
+    setProxyIds((initialConfig.network?.proxies ?? []).map(() => makeProxyId()));
   }, [initialConfig]);
 
   useEffect(() => {
@@ -705,6 +772,7 @@ export function SettingsPanel({
   };
 
   const addProxyRule = () => {
+    setProxyIds((prev) => [...prev, makeProxyId()]);
     setProxies([
       ...proxies,
       {
@@ -717,6 +785,17 @@ export function SettingsPanel({
 
   const updateProxyRule = (index: number, patch: Partial<ProxyRuleConfig>) => {
     setProxies(proxies.map((r, i) => (i === index ? { ...r, ...patch } : r)));
+  };
+
+  const removeProxyRule = (index: number, ruleId: string) => {
+    setProxyIds((prev) => prev.filter((_, i) => i !== index));
+    setLastProxyUrls((prev) => {
+      if (!(ruleId in prev)) return prev;
+      const next = { ...prev };
+      delete next[ruleId];
+      return next;
+    });
+    setProxies(proxies.filter((_, i) => i !== index));
   };
 
   const browserCfg = draft.web?.browser ?? {
@@ -787,6 +866,9 @@ export function SettingsPanel({
 
   const handleReset = () => {
     setDraft(structuredClone(initialConfig));
+    setEnvRows(envRecordToRows(initialConfig.worker.external_cli.env));
+    setLastProxyUrls({});
+    setProxyIds((initialConfig.network?.proxies ?? []).map(() => makeProxyId()));
     onToast({ title: "已还原未保存更改", status: "info" });
   };
 
@@ -1040,6 +1122,35 @@ export function SettingsPanel({
     return () => window.removeEventListener("keydown", onEsc);
   }, [diagBackend]);
 
+  useEffect(() => {
+    if (!vmConfirmOpen) return;
+    const onEsc = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        setVmConfirmOpen(false);
+      }
+    };
+    window.addEventListener("keydown", onEsc);
+    return () => window.removeEventListener("keydown", onEsc);
+  }, [vmConfirmOpen]);
+
+  useEffect(() => {
+    if (!isDirty) return;
+    const onBeforeUnload = (e: BeforeUnloadEvent) => {
+      e.preventDefault();
+      e.returnValue = "";
+    };
+    window.addEventListener("beforeunload", onBeforeUnload);
+    return () => window.removeEventListener("beforeunload", onBeforeUnload);
+  }, [isDirty]);
+
+  const handleBack = () => {
+    if (!onBack) return;
+    if (isDirty && !window.confirm("有未保存的设置更改，确定要放弃并返回吗？")) {
+      return;
+    }
+    onBack();
+  };
+
   const handleCopyDiagnostics = async () => {
     if (!diagProbe) return;
     const text = formatDiagnosticsReport(diagProbe);
@@ -1079,7 +1190,7 @@ export function SettingsPanel({
   const activeNavMeta =
     SETTINGS_NAV_ITEMS.find((item) => item.id === activeSection) ?? SETTINGS_NAV_ITEMS[0];
 
-  const renderSectionBody = (sectionId: SettingsSectionId) => {
+  const renderSectionBody = (sectionId: SettingsSectionId, embedded = false) => {
     switch (sectionId) {
       case "general":
         return (
@@ -1260,11 +1371,12 @@ export function SettingsPanel({
               </SettingsRow>
               <SettingsRow title="服务端口" description="修改端口需重启服务生效">
                 <div className="w-full sm:w-32">
-                  <ConsoleInput
+                  <NumericConsoleInput
                     size="sm"
-                    type="number"
-                    value={String(consoleCfg.port)}
-                    onChange={(v) => setConsoleCfg({ port: Number(v) || 3820 })}
+                    value={consoleCfg.port}
+                    fallback={3820}
+                    min={1}
+                    onCommit={(port) => setConsoleCfg({ port })}
                   />
                 </div>
               </SettingsRow>
@@ -1475,16 +1587,17 @@ export function SettingsPanel({
             <SettingsCardGroup title="断线重连策略" description="各消息网关共用的重试与退避配置">
               <SettingsRow title="最大重试次数" description="连接或发送异常后的最大自动重试次数">
                 <div className="w-full sm:w-32">
-                  <ConsoleInput
+                  <NumericConsoleInput
                     size="sm"
-                    type="number"
-                    value={String(retryCfg.max_retries)}
-                    onChange={(v) =>
+                    value={retryCfg.max_retries}
+                    fallback={0}
+                    min={0}
+                    onCommit={(max_retries) =>
                       setDraft((p) => ({
                         ...p,
                         gateway: {
                           ...p.gateway,
-                          retry: { ...retryCfg, max_retries: Number(v) || 0 },
+                          retry: { ...retryCfg, max_retries },
                         },
                       }))
                     }
@@ -1493,16 +1606,17 @@ export function SettingsPanel({
               </SettingsRow>
               <SettingsRow title="初始重试间隔（毫秒）" description="首次重试前的等待时长">
                 <div className="w-full sm:w-32">
-                  <ConsoleInput
+                  <NumericConsoleInput
                     size="sm"
-                    type="number"
-                    value={String(retryCfg.initial_delay_ms)}
-                    onChange={(v) =>
+                    value={retryCfg.initial_delay_ms}
+                    fallback={0}
+                    min={0}
+                    onCommit={(initial_delay_ms) =>
                       setDraft((p) => ({
                         ...p,
                         gateway: {
                           ...p.gateway,
-                          retry: { ...retryCfg, initial_delay_ms: Number(v) || 0 },
+                          retry: { ...retryCfg, initial_delay_ms },
                         },
                       }))
                     }
@@ -1511,16 +1625,17 @@ export function SettingsPanel({
               </SettingsRow>
               <SettingsRow title="最大重试间隔（毫秒）" description="指数退避等待间隔上限">
                 <div className="w-full sm:w-32">
-                  <ConsoleInput
+                  <NumericConsoleInput
                     size="sm"
-                    type="number"
-                    value={String(retryCfg.max_delay_ms)}
-                    onChange={(v) =>
+                    value={retryCfg.max_delay_ms}
+                    fallback={0}
+                    min={0}
+                    onCommit={(max_delay_ms) =>
                       setDraft((p) => ({
                         ...p,
                         gateway: {
                           ...p.gateway,
-                          retry: { ...retryCfg, max_delay_ms: Number(v) || 0 },
+                          retry: { ...retryCfg, max_delay_ms },
                         },
                       }))
                     }
@@ -2002,6 +2117,7 @@ export function SettingsPanel({
                 </div>
               ) : (
                 proxies.map((rule, idx) => {
+                  const ruleId = proxyIds[idx] ?? `proxy-fallback-${idx}`;
                   const isDirect = rule.url.trim().toLowerCase() === "direct";
                   const scopeArr = Array.isArray(rule.scope)
                     ? rule.scope
@@ -2010,7 +2126,7 @@ export function SettingsPanel({
                       : ["all"];
 
                   return (
-                    <div key={`proxy-rule-${idx}`} className="flex flex-col gap-3 px-4 py-4">
+                    <div key={ruleId} className="flex flex-col gap-3 px-4 py-4">
                       <div className="flex items-start justify-between gap-3">
                         <div className="grid flex-1 gap-3 sm:grid-cols-2">
                           <ConsoleInput
@@ -2035,7 +2151,7 @@ export function SettingsPanel({
                           variant="ghost"
                           size="icon"
                           aria-label="删除代理规则"
-                          onClick={() => setProxies(proxies.filter((_, i) => i !== idx))}
+                          onClick={() => removeProxyRule(idx, ruleId)}
                           className="mt-5 shrink-0 text-muted-foreground hover:text-destructive"
                         >
                           <Trash2 className="size-4" />
@@ -2054,13 +2170,13 @@ export function SettingsPanel({
                                 if (!isDirect && rule.url.trim()) {
                                   setLastProxyUrls((prev) => ({
                                     ...prev,
-                                    [idx]: rule.url.trim(),
+                                    [ruleId]: rule.url.trim(),
                                   }));
                                 }
                                 updateProxyRule(idx, { url: "direct" });
                               } else {
                                 updateProxyRule(idx, {
-                                  url: lastProxyUrls[idx] || "http://127.0.0.1:7890",
+                                  url: lastProxyUrls[ruleId] || "http://127.0.0.1:7890",
                                 });
                               }
                             }}
@@ -2152,21 +2268,23 @@ export function SettingsPanel({
               </SettingsRow>
               <SettingsRow title="单次最大操作步数" description="限制单轮任务连续点击与跳转上限">
                 <div className="w-full sm:w-32">
-                  <ConsoleInput
+                  <NumericConsoleInput
                     size="sm"
-                    type="number"
-                    value={String(browserCfg.max_steps ?? 15)}
-                    onChange={(v) => setBrowserCfg({ max_steps: Number(v) || 15 })}
+                    value={browserCfg.max_steps ?? 15}
+                    fallback={15}
+                    min={1}
+                    onCommit={(max_steps) => setBrowserCfg({ max_steps })}
                   />
                 </div>
               </SettingsRow>
               <SettingsRow title="空闲自动关闭（分钟）" description="无操作后自动释放浏览器进程，设为 0 则不关闭">
                 <div className="w-full sm:w-32">
-                  <ConsoleInput
+                  <NumericConsoleInput
                     size="sm"
-                    type="number"
-                    value={String(browserCfg.idle_timeout_minutes ?? 5)}
-                    onChange={(v) => setBrowserCfg({ idle_timeout_minutes: Number(v) || 0 })}
+                    value={browserCfg.idle_timeout_minutes ?? 5}
+                    fallback={5}
+                    min={0}
+                    onCommit={(idle_timeout_minutes) => setBrowserCfg({ idle_timeout_minutes })}
                   />
                 </div>
               </SettingsRow>
@@ -2208,11 +2326,12 @@ export function SettingsPanel({
               </SettingsRow>
               <SettingsRow title="最大返回条数" description="单次检索最多引用的结果数量">
                 <div className="w-full sm:w-32">
-                  <ConsoleInput
+                  <NumericConsoleInput
                     size="sm"
-                    type="number"
-                    value={String(searchCfg.max_results ?? 5)}
-                    onChange={(v) => setSearchCfg({ max_results: Number(v) || 5 })}
+                    value={searchCfg.max_results ?? 5}
+                    fallback={5}
+                    min={1}
+                    onCommit={(max_results) => setSearchCfg({ max_results })}
                   />
                 </div>
               </SettingsRow>
@@ -2223,12 +2342,45 @@ export function SettingsPanel({
       case "secrets":
         return (
           <SecretsAndProbePanel
+            embedded={embedded}
             secretStates={secretStates}
             onToast={onToast}
             onSecretsUpdated={onSecretsUpdated}
           />
         );
     }
+  };
+
+  const renderSaveActions = (showSaveWhenClean: boolean) => {
+    if (!isDirty && !showSaveWhenClean) return null;
+    return (
+      <div className="flex items-center gap-2">
+        {isDirty && (
+          <Button
+            type="button"
+            size="sm"
+            variant="outline"
+            disabled={saveState === "loading"}
+            onClick={handleReset}
+          >
+            <RotateCcw className="size-3.5" />
+            还原更改
+          </Button>
+        )}
+        <StatefulButton
+          type="button"
+          size="sm"
+          state={saveState}
+          loadingText="保存中…"
+          successText="已保存"
+          errorText="保存失败"
+          icon={<Save className="size-3.5" />}
+          onClick={() => void handleSave()}
+        >
+          保存设置
+        </StatefulButton>
+      </div>
+    );
   };
 
   return (
@@ -2244,7 +2396,7 @@ export function SettingsPanel({
           {onBack ? (
             <button
               type="button"
-              onClick={onBack}
+              onClick={handleBack}
               className="flex h-7 w-fit items-center gap-1.5 rounded-md px-1.5 text-xs font-medium text-muted-foreground transition-colors hover:bg-muted/70 hover:text-foreground"
             >
               <ArrowLeft className="size-3.5" />
@@ -2353,39 +2505,14 @@ export function SettingsPanel({
             <>
               <div className="flex flex-wrap items-center justify-between gap-3">
                 <div>
-                  <h2 className="text-2xl font-semibold tracking-tight text-foreground">
+                  <h2 className="text-base font-semibold tracking-tight text-foreground">
                     搜索结果
                   </h2>
                   <p className="mt-1 text-xs text-muted-foreground">
                     匹配「{searchQuery.trim()}」的设置分组（{matchingNavItems.length}）
                   </p>
                 </div>
-                {isDirty && (
-                  <div className="flex items-center gap-2">
-                    <Button
-                      type="button"
-                      size="sm"
-                      variant="outline"
-                      disabled={saveState === "loading"}
-                      onClick={handleReset}
-                    >
-                      <RotateCcw className="size-3.5" />
-                      还原更改
-                    </Button>
-                    <StatefulButton
-                      type="button"
-                      size="sm"
-                      state={saveState}
-                      loadingText="保存中…"
-                      successText="已保存"
-                      errorText="保存失败"
-                      icon={<Save className="size-3.5" />}
-                      onClick={() => void handleSave()}
-                    >
-                      保存设置
-                    </StatefulButton>
-                  </div>
-                )}
+                {renderSaveActions(false)}
               </div>
 
               {matchingNavItems.length === 0 ? (
@@ -2413,16 +2540,7 @@ export function SettingsPanel({
                           <ArrowUpRight className="size-3.5" />
                         </button>
                       </div>
-                      {item.id === "secrets" ? (
-                        <SecretsAndProbePanel
-                          embedded
-                          secretStates={secretStates}
-                          onToast={onToast}
-                          onSecretsUpdated={onSecretsUpdated}
-                        />
-                      ) : (
-                        renderSectionBody(item.id)
-                      )}
+                      {renderSectionBody(item.id, true)}
                     </div>
                   ))}
                 </div>
@@ -2441,45 +2559,16 @@ export function SettingsPanel({
                 {activeSection !== "secrets" && (
                   <div className="flex flex-wrap items-center justify-between gap-3">
                     <div className="flex flex-wrap items-center gap-2.5">
-                      <h2 className="text-2xl font-semibold tracking-tight text-foreground">
+                      <h2 className="text-base font-semibold tracking-tight text-foreground">
                         {activeNavMeta.label}
                       </h2>
-                      {isDirty ? (
+                      {isDirty && (
                         <AnimatedBadge status="warning" size="sm">
                           有未保存更改
                         </AnimatedBadge>
-                      ) : (
-                        <span className="hidden text-xs text-muted-foreground sm:inline">
-                          ⌘/Ctrl+S 快速保存
-                        </span>
                       )}
                     </div>
-                    <div className="flex items-center gap-2">
-                      {isDirty && (
-                        <Button
-                          type="button"
-                          size="sm"
-                          variant="outline"
-                          disabled={saveState === "loading"}
-                          onClick={handleReset}
-                        >
-                          <RotateCcw className="size-3.5" />
-                          还原更改
-                        </Button>
-                      )}
-                      <StatefulButton
-                        type="button"
-                        size="sm"
-                        state={saveState}
-                        loadingText="保存中…"
-                        successText="已保存"
-                        errorText="保存失败"
-                        icon={<Save className="size-3.5" />}
-                        onClick={() => void handleSave()}
-                      >
-                        保存设置
-                      </StatefulButton>
-                    </div>
+                    {renderSaveActions(true)}
                   </div>
                 )}
 

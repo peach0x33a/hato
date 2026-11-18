@@ -77,6 +77,54 @@ test("computeTurnMetrics and summarizeTurnTraces compute cache hit ratio, TTFT, 
   assert.equal(summary.warmCacheHitRate, 0.9);
   assert.equal(summary.avgTtftMs, 500);
   assert.equal(summary.avgDecodeTps, 30);
+
+  // Guard against buffered/non-streaming <50ms decode windows producing 1000-6000+ tok/s
+  const buffered = computeTurnMetrics({
+    inputTokens: 500,
+    outputTokens: 30,
+    cacheReadTokens: 0,
+    cacheWriteTokens: 0,
+    latencyMs: 1000,
+    ttftMs: 995,
+    decodeMs: 5,
+  });
+  assert.equal(buffered.decodeTps, 30);
+  assert.equal(buffered.e2eTps, 30);
+
+  const singleToken = computeTurnMetrics({
+    inputTokens: 100,
+    outputTokens: 1,
+    cacheReadTokens: 0,
+    cacheWriteTokens: 0,
+    latencyMs: 500,
+    ttftMs: 499,
+    decodeMs: 1,
+  });
+  assert.equal(singleToken.decodeTps, 2);
+
+  // Historical rows with bogus tps from <50ms decode windows fall back to e2e TPS in summary
+  const sanitizedSummary = summarizeTurnTraces([
+    {
+      id: "t-bogus",
+      canonicalUserId: "owner",
+      slot: "router",
+      provider: "claudeflare",
+      modelId: "deepseek-flash",
+      api: "openai-completions",
+      inputTokens: 500,
+      outputTokens: 20,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+      cacheHitRate: 0,
+      ttftMs: 800,
+      tps: 6107.2,
+      latencyMs: 800,
+      userPreview: "route",
+      toolCallsJson: "[]",
+      createdAt: now,
+    },
+  ]);
+  assert.equal(sanitizedSummary.avgDecodeTps, 25);
 });
 
 test("openDatabase migrates legacy turn_traces columns and backfills cache_hit_rate without losing data", () => {

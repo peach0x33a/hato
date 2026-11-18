@@ -217,12 +217,19 @@ export function computeTurnMetrics(input: RawTurnUsage): ComputedTurnMetrics {
 
   let decodeTps: number | null = null;
   if (output > 0) {
-    const decodeWindowMs =
+    // Guard against <50ms decode windows caused by buffered/coalesced SSE chunks or
+    // non-streaming responses where firstDeltaPerf == endPerf.
+    const MIN_STREAMING_DECODE_MS = 50;
+    const rawDecodeWindowMs =
       typeof input.decodeMs === "number" && input.decodeMs > 0
         ? input.decodeMs
         : typeof input.ttftMs === "number" && input.latencyMs > input.ttftMs
           ? input.latencyMs - input.ttftMs
-          : input.latencyMs;
+          : null;
+    const decodeWindowMs =
+      output >= 2 && rawDecodeWindowMs !== null && rawDecodeWindowMs >= MIN_STREAMING_DECODE_MS
+        ? rawDecodeWindowMs
+        : input.latencyMs;
     if (decodeWindowMs > 0) {
       decodeTps = Number((output / (decodeWindowMs / 1000)).toFixed(2));
     }
@@ -274,11 +281,19 @@ export function summarizeTurnTraces(rows: readonly TurnTraceStatRow[]): TurnStat
     if (typeof row.ttftMs === "number" && row.ttftMs >= 0) {
       ttfts.push(row.ttftMs);
     }
-    if (typeof row.tps === "number" && row.tps > 0) {
-      decodeTpsList.push(row.tps);
+    const rowE2eTps =
+      row.latencyMs > 0 && row.outputTokens > 0
+        ? row.outputTokens / (row.latencyMs / 1000)
+        : null;
+    if (rowE2eTps !== null) {
+      e2eTpsList.push(rowE2eTps);
     }
-    if (row.latencyMs > 0 && row.outputTokens > 0) {
-      e2eTpsList.push(row.outputTokens / (row.latencyMs / 1000));
+    const hasBogusDecodeWindow =
+      typeof row.ttftMs === "number" && row.latencyMs > 0 && row.latencyMs - row.ttftMs < 50;
+    if (typeof row.tps === "number" && row.tps > 0 && !hasBogusDecodeWindow) {
+      decodeTpsList.push(row.tps);
+    } else if (rowE2eTps !== null && hasBogusDecodeWindow) {
+      decodeTpsList.push(rowE2eTps);
     }
   }
 
@@ -516,7 +531,7 @@ export interface LlmTelemetryLogInput {
   cacheWrite1hTokens?: number;
   costTotal?: number;
   ttftMs: number;
-  decodeMs: number;
+  decodeMs?: number;
   latencyMs: number;
   toolCalls?: readonly string[];
   timeZone?: string;

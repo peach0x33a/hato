@@ -91,6 +91,27 @@ interface TestDetailState {
   error?: string;
 }
 
+function buildTestDetailState(
+  prov: UiProviderConfig,
+  model: UiModelEntry,
+  outcome: Pick<ModelTestOutcome, "ok" | "latencyMs" | "replyPreview" | "error"> & {
+    target?: string;
+  },
+): TestDetailState {
+  const slug = prov.name.trim();
+  const modelId = model.id.trim();
+  return {
+    target: outcome.target || `${slug}/${modelId}`,
+    providerLabel: prov.displayName?.trim() || slug,
+    modelLabel: model.displayName.trim() || modelId,
+    ok: outcome.ok,
+    isEmptyWarn: outcome.ok ? isTestOutcomeEmptyWarning(outcome) : undefined,
+    latencyMs: outcome.latencyMs,
+    replyPreview: outcome.replyPreview,
+    error: outcome.error,
+  };
+}
+
 function readStoredProviderDraft(): ProviderDraft | null {
   try {
     const raw = window.localStorage.getItem(PROVIDER_DRAFT_STORAGE_KEY);
@@ -269,6 +290,7 @@ export function ModelsConfigPanel({
         baseProv.protocol !== p.protocol ||
         baseProv.baseUrl !== p.baseUrl ||
         baseProv.apiKeyEnv !== p.apiKeyEnv ||
+        baseProv.cacheTtlMinutes !== p.cacheTtlMinutes ||
         baseProv.customHeaders !== p.customHeaders
       ) {
         items.push(`更新供应商设置：${p.displayName?.trim() || p.name}`);
@@ -799,16 +821,10 @@ export function ModelsConfigPanel({
         testedAt: Date.now(),
       };
       const emptyWarn = isTestOutcomeEmptyWarning(nextOutcome);
-      const detailPayload: TestDetailState = {
-        target: outcome.target || `${slug}/${modelId}`,
-        providerLabel: prov.displayName?.trim() || slug,
-        modelLabel: model.displayName.trim() || modelId,
-        ok: outcome.ok,
-        isEmptyWarn: emptyWarn,
-        latencyMs: outcome.latencyMs,
-        replyPreview: outcome.replyPreview,
-        error: outcome.error,
-      };
+      const detailPayload = buildTestDetailState(prov, model, {
+        ...nextOutcome,
+        target: outcome.target,
+      });
       setTestOutcomes((prev) => ({
         ...prev,
         [modelUid]: nextOutcome,
@@ -859,14 +875,11 @@ export function ModelsConfigPanel({
       }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      const detailPayload: TestDetailState = {
-        target: `${slug}/${modelId}`,
-        providerLabel: prov.displayName?.trim() || slug,
-        modelLabel: model.displayName.trim() || modelId,
+      const detailPayload = buildTestDetailState(prov, model, {
         ok: false,
         latencyMs: 0,
         error: msg,
-      };
+      });
       setTestOutcomes((prev) => ({
         ...prev,
         [modelUid]: {
@@ -1001,9 +1014,6 @@ export function ModelsConfigPanel({
             <h1 className="text-base font-semibold tracking-tight text-balance text-foreground">
               模型与供应商
             </h1>
-            <span className="hidden text-xs text-muted-foreground sm:inline">
-              配置与运行时路由映射 · ⌘/Ctrl+S 保存
-            </span>
           </div>
 
           <div className="flex shrink-0 items-center gap-3">
@@ -1078,7 +1088,7 @@ export function ModelsConfigPanel({
             className={
               mobileDetailOpen
                 ? "block"
-                : "hidden lg:sticky lg:top-[68px] lg:block"
+                : "hidden lg:sticky lg:top-[68px] lg:block lg:max-h-[calc(100vh-88px)] lg:overflow-y-auto"
             }
           >
             {selectedEntry ? (
@@ -1116,21 +1126,14 @@ export function ModelsConfigPanel({
                 onShowTestDetail={() => {
                   const outcome = testOutcomes[selectedEntry.model.uid];
                   if (!outcome) return;
-                  const slug = selectedEntry.provider.name.trim();
-                  const mid = selectedEntry.model.id.trim();
                   setCopiedDetail(false);
-                  setTestDetailModal({
-                    target: `${slug}/${mid}`,
-                    providerLabel:
-                      selectedEntry.provider.displayName?.trim() || slug,
-                    modelLabel:
-                      selectedEntry.model.displayName.trim() || mid,
-                    ok: outcome.ok,
-                    isEmptyWarn: isTestOutcomeEmptyWarning(outcome),
-                    latencyMs: outcome.latencyMs,
-                    replyPreview: outcome.replyPreview,
-                    error: outcome.error,
-                  });
+                  setTestDetailModal(
+                    buildTestDetailState(
+                      selectedEntry.provider,
+                      selectedEntry.model,
+                      outcome,
+                    ),
+                  );
                 }}
                 onDuplicate={() =>
                   handleDuplicateModel(
@@ -1368,17 +1371,17 @@ export function ModelsConfigPanel({
                         ? "上游测试空响应警告"
                         : "上游测试回复详情"}
                   </h3>
-                  <div className="flex items-center gap-1.5 truncate text-xs text-zinc-500 dark:text-zinc-400">
-                    <span className="truncate font-medium text-zinc-700 dark:text-zinc-300">
+                  <div className="flex min-w-0 items-center gap-1.5 text-xs text-zinc-500 dark:text-zinc-400">
+                    <span className="min-w-0 truncate font-medium text-zinc-700 dark:text-zinc-300">
                       {testDetailModal.modelLabel}
                     </span>
-                    <span className="font-mono text-[11px] text-zinc-400 dark:text-zinc-500">
+                    <span className="shrink-0 font-mono text-[11px] text-zinc-400 dark:text-zinc-500">
                       {testDetailModal.providerLabel}
                     </span>
                     {testDetailModal.latencyMs > 0 ? (
                       <>
-                        <span aria-hidden="true">·</span>
-                        <span className="font-mono tabular-nums">
+                        <span className="shrink-0" aria-hidden="true">·</span>
+                        <span className="shrink-0 font-mono tabular-nums">
                           {testDetailModal.latencyMs}ms
                         </span>
                       </>
@@ -1411,10 +1414,15 @@ export function ModelsConfigPanel({
                     const text = testDetailModal.ok
                       ? (testDetailModal.replyPreview ?? "")
                       : (testDetailModal.error ?? "");
-                    void navigator.clipboard?.writeText(text).then(() => {
-                      setCopiedDetail(true);
-                      window.setTimeout(() => setCopiedDetail(false), 1800);
-                    });
+                    void navigator.clipboard
+                      ?.writeText(text)
+                      .then(() => {
+                        setCopiedDetail(true);
+                        window.setTimeout(() => setCopiedDetail(false), 1800);
+                      })
+                      .catch(() => {
+                        onToast({ title: "复制失败，请手动复制", status: "error" });
+                      });
                   }}
                   className="inline-flex items-center gap-1 rounded-md border border-zinc-200 px-2 py-1 text-[11px] font-medium text-zinc-600 transition-colors hover:bg-zinc-100 dark:border-zinc-800 dark:text-zinc-300 dark:hover:bg-zinc-800"
                 >

@@ -119,11 +119,21 @@ export function RemoteBrowserPanel({
   const [windowWidth, setWindowWidth] = useState<number | null>(null);
 
   const areaRef = useRef<HTMLDivElement | null>(null);
+  const titlebarRef = useRef<HTMLDivElement | null>(null);
+  const navbarRef = useRef<HTMLDivElement | null>(null);
+  const imeBarRef = useRef<HTMLDivElement | null>(null);
   const stageRef = useRef<HTMLDivElement | null>(null);
   const imgRef = useRef<HTMLImageElement | null>(null);
   const isPointerDownRef = useRef(false);
   const lastMoveSentAtRef = useRef(0);
   const composingRef = useRef(false);
+
+  const measureChromeHeight = () => {
+    const titleH = titlebarRef.current?.getBoundingClientRect().height ?? 0;
+    const navH = navbarRef.current?.getBoundingClientRect().height ?? 0;
+    const imeH = imeBarRef.current?.getBoundingClientRect().height ?? 0;
+    return Math.ceil(titleH + navH + imeH) + 2;
+  };
 
   useEffect(() => {
     const unsubscribe = api.subscribeBrowserStream(
@@ -168,7 +178,7 @@ export function RemoteBrowserPanel({
     const recalc = () => {
       const rect = container.getBoundingClientRect();
       const availW = Math.max(280, Math.floor(rect.width));
-      const chromeHeight = showImeBar ? 136 : 88;
+      const chromeHeight = measureChromeHeight();
       const availContentH = Math.max(220, Math.floor(rect.height) - chromeHeight);
       const maxWidthByHeight = Math.floor(availContentH * ratio);
       setWindowWidth(Math.min(availW, Math.max(280, maxWidthByHeight)));
@@ -177,6 +187,9 @@ export function RemoteBrowserPanel({
     recalc();
     const observer = new ResizeObserver(recalc);
     observer.observe(container);
+    if (titlebarRef.current) observer.observe(titlebarRef.current);
+    if (navbarRef.current) observer.observe(navbarRef.current);
+    if (imeBarRef.current) observer.observe(imeBarRef.current);
     return () => observer.disconnect();
   }, [status.open, status.viewport.width, status.viewport.height, showImeBar, isFullscreen]);
 
@@ -218,7 +231,7 @@ export function RemoteBrowserPanel({
     const next = !isFullscreen;
     setIsFullscreen(next);
     if (next) {
-      const chromeHeight = showImeBar ? 136 : 88;
+      const chromeHeight = measureChromeHeight();
       const targetW = Math.max(1280, Math.min(1920, Math.floor(window.innerWidth - 28)));
       const targetH = Math.max(
         720,
@@ -229,6 +242,18 @@ export function RemoteBrowserPanel({
       await runAction({ action: "resize", width: 1280, height: 800 });
     }
   };
+
+  useEffect(() => {
+    if (!isFullscreen) return;
+    const onKeyDown = (e: globalThis.KeyboardEvent) => {
+      if (e.key === "Escape" && !e.defaultPrevented) {
+        setIsFullscreen(false);
+        void runAction({ action: "resize", width: 1280, height: 800 });
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [isFullscreen]);
 
   const toViewportCoords = (e: { clientX: number; clientY: number }) => {
     const target = imgRef.current ?? stageRef.current;
@@ -475,7 +500,10 @@ export function RemoteBrowserPanel({
             }`}
           >
             {/* Unified Titlebar: Traffic Lights + Tabs + Status + Takeover Controls */}
-            <div className="flex min-h-10 shrink-0 flex-wrap items-center gap-2 border-b border-border bg-muted/30 px-2.5 py-1 select-none">
+            <div
+              ref={titlebarRef}
+              className="flex min-h-10 shrink-0 flex-wrap items-center gap-2 border-b border-border bg-muted/30 px-2.5 py-1 select-none"
+            >
               <div className="group flex shrink-0 items-center gap-2 pr-1">
                 <button
                   type="button"
@@ -487,10 +515,6 @@ export function RemoteBrowserPanel({
                 >
                   <X className="size-2 stroke-[2.5]" />
                 </button>
-                <span
-                  aria-hidden="true"
-                  className="size-3 rounded-full bg-[#FEBC2E]/85"
-                />
                 <button
                   type="button"
                   title={isFullscreen ? "还原浏览器窗口" : "最大化浏览器"}
@@ -529,8 +553,9 @@ export function RemoteBrowserPanel({
                     <button
                       type="button"
                       aria-label="关闭标签页"
+                      disabled={working}
                       onClick={() => void runAction({ action: "close_tab", index: tab.index })}
-                      className="grid size-4 shrink-0 place-items-center rounded-full opacity-60 hover:bg-muted hover:opacity-100"
+                      className="grid size-4 shrink-0 place-items-center rounded-full opacity-60 hover:bg-muted hover:opacity-100 disabled:pointer-events-none disabled:opacity-30"
                     >
                       <X className="size-2.5" />
                     </button>
@@ -588,7 +613,10 @@ export function RemoteBrowserPanel({
             </div>
 
             {/* Row 2: Simplified Navigation Bar */}
-            <div className="flex min-h-10 shrink-0 items-center gap-1.5 border-b border-border bg-background px-2.5 py-1">
+            <div
+              ref={navbarRef}
+              className="flex min-h-10 shrink-0 items-center gap-1.5 border-b border-border bg-background px-2.5 py-1"
+            >
               <button
                 type="button"
                 disabled={working}
@@ -668,7 +696,7 @@ export function RemoteBrowserPanel({
               }}
               onCompositionEnd={(e) => {
                 composingRef.current = false;
-                const text = (e as unknown as { data?: string }).data;
+                const text = e.data;
                 if (text && status.open && controlling) {
                   void api
                     .browserInput({ kind: "keyboard", action: "insertText", text })
@@ -697,7 +725,10 @@ export function RemoteBrowserPanel({
 
             {/* Optional Compact IME Bar flushed inside the bottom of the browser viewport */}
             {showImeBar && (
-              <div className="flex min-h-12 shrink-0 flex-wrap items-center gap-2 border-t border-border bg-background px-3 py-1.5">
+              <div
+                ref={imeBarRef}
+                className="flex min-h-12 shrink-0 flex-wrap items-center gap-2 border-t border-border bg-background px-3 py-1.5"
+              >
                 <div className="min-w-[180px] flex-1">
                   <ConsoleInput
                     size="sm"

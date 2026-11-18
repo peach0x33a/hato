@@ -112,13 +112,19 @@ export function ModelDetailPanel({
     message: string;
   } | null>(null);
   const [suggestions, setSuggestions] = useState<ModelsDevSearchItem[]>([]);
+  const [searchingModelsDev, setSearchingModelsDev] = useState(false);
+  const [modelsDevSearchError, setModelsDevSearchError] = useState<string | null>(null);
   const [showSuggestions, setShowSuggestions] = useState(false);
+  const [modelRefDirty, setModelRefDirty] = useState(false);
   const suggestionsBoxRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     setMoreOpen(false);
     setModelsDevStatus(null);
     setShowSuggestions(false);
+    setSearchingModelsDev(false);
+    setModelsDevSearchError(null);
+    setModelRefDirty(false);
     const hasAdv =
       Boolean(model.modelsDev?.enabled) ||
       (model.advanced.apiOverride !== "__inherit__" && Boolean(model.advanced.apiOverride)) ||
@@ -160,15 +166,28 @@ export function ModelDetailPanel({
     const q = modelsDev.modelRef.trim();
     if (!q) {
       setSuggestions([]);
+      setSearchingModelsDev(false);
+      setModelsDevSearchError(null);
       return;
     }
     let cancelled = false;
+    setSearchingModelsDev(true);
+    setModelsDevSearchError(null);
     const timer = window.setTimeout(async () => {
       try {
         const res = await api.searchModelsDev(q, 12);
-        if (!cancelled) setSuggestions(res.items);
-      } catch {
-        if (!cancelled) setSuggestions([]);
+        if (!cancelled) {
+          setSuggestions(res.items);
+          setSearchingModelsDev(false);
+        }
+      } catch (err) {
+        if (!cancelled) {
+          setSuggestions([]);
+          setSearchingModelsDev(false);
+          setModelsDevSearchError(
+            err instanceof Error ? err.message : "搜索 models.dev 失败",
+          );
+        }
       }
     }, 220);
     return () => {
@@ -249,6 +268,7 @@ export function ModelDetailPanel({
           ...(meta.cost ? { cost: meta.cost } : {}),
         },
       });
+      setModelRefDirty(false);
       setModelsDevStatus({
         ok: true,
         message: `已同步: ${meta.name}`,
@@ -267,6 +287,7 @@ export function ModelDetailPanel({
     if (!next) {
       handleUpdateModelsDev({ enabled: false });
       setModelsDevStatus(null);
+      setModelRefDirty(false);
       return;
     }
     const candidateRef = modelsDev.modelRef.trim();
@@ -488,7 +509,7 @@ export function ModelDetailPanel({
             htmlFor={`detail-maxout-${model.uid}`}
             className="text-xs font-medium text-zinc-600 dark:text-zinc-400"
           >
-            最大输出 · 不能超过上下文窗口
+            最大输出
           </label>
           <input
             id={`detail-maxout-${model.uid}`}
@@ -517,7 +538,7 @@ export function ModelDetailPanel({
       {/* Capabilities (unchecked keeps icon, dimmed dashed gray) */}
       <div className="flex flex-col gap-2">
         <span className="text-xs font-medium text-zinc-600 dark:text-zinc-400">
-          模型能力 · 灰色表示该模型不支持
+          模型能力
         </span>
         <div className="flex flex-wrap gap-2.5">
           <label
@@ -564,14 +585,9 @@ export function ModelDetailPanel({
 
       {/* Slot Assignment (bidirectional sync with routing table) */}
       <div className="flex flex-col gap-2">
-        <div className="flex flex-wrap items-center justify-between gap-2">
-          <span className="text-xs font-medium text-zinc-600 dark:text-zinc-400">
-            用于哪些槽位
-          </span>
-          <span className="text-[11px] text-zinc-400 dark:text-zinc-500">
-            勾选将直接把该槽位切换到当前模型；必选槽位需在目标模型中改绑
-          </span>
-        </div>
+        <span className="text-xs font-medium text-zinc-600 dark:text-zinc-400">
+          用于哪些槽位
+        </span>
 
         <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3">
           {visibleSlots.map((slot) => {
@@ -657,7 +673,7 @@ export function ModelDetailPanel({
           <span className="truncate text-xs text-zinc-500 dark:text-zinc-400">
             {overrideSummaryParts.length > 0
               ? `已启用：${overrideSummaryParts.join(" · ")}`
-              : "覆盖协议 · Base URL · 自定义请求头 · models.dev（无覆盖）"}
+              : "无覆盖"}
           </span>
         </button>
 
@@ -778,6 +794,9 @@ export function ModelDetailPanel({
                     onChange={(e) => {
                       handleUpdateModelsDev({ modelRef: e.target.value });
                       setModelsDevStatus(null);
+                      if (modelsDev.enabled) {
+                        setModelRefDirty(true);
+                      }
                       setShowSuggestions(true);
                     }}
                     onKeyDown={(e) => {
@@ -813,37 +832,52 @@ export function ModelDetailPanel({
                   </button>
                 </div>
 
-                {showSuggestions && suggestions.length > 0 ? (
+                {showSuggestions && modelsDev.modelRef.trim().length > 0 ? (
                   <div className="absolute top-full right-0 left-0 z-30 mt-1 max-h-56 overflow-y-auto rounded-lg border border-zinc-200 bg-white py-1 shadow-lg dark:border-zinc-800 dark:bg-[#0d1216]">
-                    {suggestions.map((item) => (
-                      <button
-                        key={item.ref}
-                        type="button"
-                        onMouseDown={(e) => {
-                          e.preventDefault();
-                          void syncFromModelsDev(item.ref, {
-                            enableOnSuccess: true,
-                          });
-                        }}
-                        className="flex w-full items-center justify-between gap-2 px-3 py-1.5 text-left text-xs transition hover:bg-zinc-100 dark:hover:bg-zinc-800/70"
-                      >
-                        <div className="min-w-0 flex-1">
-                          <div className="truncate font-mono text-[11px] text-zinc-900 dark:text-zinc-100">
-                            {item.ref}
+                    {searchingModelsDev ? (
+                      <div className="flex items-center gap-2 px-3 py-2 text-xs text-zinc-500 dark:text-zinc-400">
+                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                        <span>搜索 models.dev 中…</span>
+                      </div>
+                    ) : modelsDevSearchError ? (
+                      <div className="px-3 py-2 text-xs text-rose-600 dark:text-rose-400">
+                        {modelsDevSearchError}
+                      </div>
+                    ) : suggestions.length === 0 ? (
+                      <div className="px-3 py-2 text-xs text-zinc-500 dark:text-zinc-400">
+                        未找到匹配的 models.dev 模型
+                      </div>
+                    ) : (
+                      suggestions.map((item) => (
+                        <button
+                          key={item.ref}
+                          type="button"
+                          onMouseDown={(e) => {
+                            e.preventDefault();
+                            void syncFromModelsDev(item.ref, {
+                              enableOnSuccess: true,
+                            });
+                          }}
+                          className="flex w-full items-center justify-between gap-2 px-3 py-1.5 text-left text-xs transition hover:bg-zinc-100 dark:hover:bg-zinc-800/70"
+                        >
+                          <div className="min-w-0 flex-1">
+                            <div className="truncate font-mono text-[11px] text-zinc-900 dark:text-zinc-100">
+                              {item.ref}
+                            </div>
+                            <div className="truncate text-[11px] text-zinc-500 dark:text-zinc-400">
+                              {item.name} · {item.providerName}
+                            </div>
                           </div>
-                          <div className="truncate text-[11px] text-zinc-500 dark:text-zinc-400">
-                            {item.name} · {item.providerName}
+                          <div className="flex shrink-0 items-center gap-1.5 text-[10px] text-zinc-500 dark:text-zinc-400">
+                            {item.contextWindow ? (
+                              <span className="font-mono">
+                                {formatTokenCount(String(item.contextWindow))}
+                              </span>
+                            ) : null}
                           </div>
-                        </div>
-                        <div className="flex shrink-0 items-center gap-1.5 text-[10px] text-zinc-500 dark:text-zinc-400">
-                          {item.contextWindow ? (
-                            <span className="font-mono">
-                              {formatTokenCount(String(item.contextWindow))}
-                            </span>
-                          ) : null}
-                        </div>
-                      </button>
-                    ))}
+                        </button>
+                      ))
+                    )}
                   </div>
                 ) : null}
 
@@ -856,6 +890,11 @@ export function ModelDetailPanel({
                     }`}
                   >
                     {modelsDevStatus.message}
+                  </p>
+                ) : modelsDev.enabled && modelRefDirty ? (
+                  <p className="inline-flex items-center gap-1 text-xs text-amber-600 dark:text-amber-400">
+                    <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
+                    <span>映射 ID 已修改，点击「同步」以更新只读规格</span>
                   </p>
                 ) : null}
               </div>

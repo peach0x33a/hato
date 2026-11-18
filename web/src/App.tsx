@@ -7,6 +7,7 @@ import {
   FileText,
   History,
   LayoutDashboard,
+  Loader2,
   Lock,
   MessageSquare,
   PanelLeft,
@@ -17,7 +18,7 @@ import {
 } from "lucide-react";
 import { AnimatePresence, LayoutGroup, MotionConfig, motion, useReducedMotion } from "motion/react";
 import { ThemeProvider } from "next-themes";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   api,
   type ChatSessionRecord,
@@ -67,7 +68,7 @@ const NAV_ITEMS: Array<{
   { id: "stickers", label: "表情包库", icon: Smile },
   { id: "browser", label: "远程浏览器", icon: Compass },
   { id: "models", label: "模型与供应商", icon: Cpu },
-  { id: "prompt", label: "提示词与层级管理", icon: FileText },
+  { id: "prompt", label: "提示词", icon: FileText },
 ];
 
 const VALID_TABS = new Set<ConsoleTab>([
@@ -181,12 +182,15 @@ function ConsoleShell() {
   const [healthOffline, setHealthOffline] = useState(false);
   const [pendingTakeover, setPendingTakeover] = useState(false);
   const [configSnap, setConfigSnap] = useState<ConfigSnapshotResponse | null>(null);
+  const [configError, setConfigError] = useState<string | null>(null);
   const [sessions, setSessions] = useState<ChatSessionRecord[]>([]);
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
   const [authNeeded, setAuthNeeded] = useState(false);
   const [tokenInput, setTokenInput] = useState(getStoredToken);
   const [reloadState, setReloadState] = useState<ButtonState>("idle");
+  const reloadTimerRef = useRef<number | null>(null);
   const [modelsDirty, setModelsDirty] = useState(false);
+  const [promptDirty, setPromptDirty] = useState(false);
   const { toasts, showToast, dismissToast } = useAnimatedToastStack({ limit: 4 });
   const reduceMotion = useReducedMotion();
   const isSettings = activeTab === "settings";
@@ -271,6 +275,7 @@ function ConsoleShell() {
   }, []);
 
   const loadHealthAndConfig = useCallback(async () => {
+    setConfigError(null);
     try {
       const h = await api.getHealth();
       setHealth(h);
@@ -295,6 +300,7 @@ function ConsoleShell() {
         setAuthNeeded(true);
       } else {
         setHealthOffline(true);
+        setConfigError(msg);
         notify({ title: "无法连接 Hato 服务", description: msg, status: "error" });
       }
     }
@@ -317,19 +323,56 @@ function ConsoleShell() {
     return () => window.clearInterval(timer);
   }, [loadHealthAndConfig]);
 
+  useEffect(() => {
+    return () => {
+      if (reloadTimerRef.current !== null) {
+        window.clearTimeout(reloadTimerRef.current);
+      }
+    };
+  }, []);
+
+  const navigateToTab = useCallback(
+    (
+      nextTab: ConsoleTab,
+      opts?: { sessionId?: string | null; settingsSection?: SettingsSectionId },
+    ) => {
+      if (activeTab === "models" && nextTab !== "models" && modelsDirty) {
+        if (!window.confirm("「模型与供应商」存在未保存的更改，确定要离开吗？")) return;
+      }
+      if (activeTab === "prompt" && nextTab !== "prompt" && promptDirty) {
+        if (!window.confirm("「提示词」存在未保存的更改，确定要离开吗？")) return;
+      }
+      if (opts?.settingsSection) {
+        setSettingsSection(opts.settingsSection);
+      }
+      if (opts && "sessionId" in opts) {
+        setSelectedSessionId(opts.sessionId ?? null);
+      } else if (nextTab === "chat") {
+        setSelectedSessionId(null);
+      }
+      setActiveTab(nextTab);
+    },
+    [activeTab, modelsDirty, promptDirty],
+  );
+
   const handleGlobalReload = async () => {
+    if (reloadTimerRef.current !== null) {
+      window.clearTimeout(reloadTimerRef.current);
+      reloadTimerRef.current = null;
+    }
     setReloadState("loading");
     try {
       const res = await api.reloadConfig();
       setReloadState("success");
       const snap = await api.getConfig();
       setConfigSnap(snap);
+      setConfigError(null);
       notify({
         title: "配置已重新加载",
         description: res.changes?.length ? res.changes.join("；") : "配置内容无变化",
         status: "success",
       });
-      setTimeout(() => setReloadState("idle"), 1500);
+      reloadTimerRef.current = window.setTimeout(() => setReloadState("idle"), 1500);
     } catch (err) {
       setReloadState("error");
       notify({
@@ -337,7 +380,7 @@ function ConsoleShell() {
         description: err instanceof Error ? err.message : String(err),
         status: "error",
       });
-      setTimeout(() => setReloadState("idle"), 2000);
+      reloadTimerRef.current = window.setTimeout(() => setReloadState("idle"), 2000);
     }
   };
 
@@ -433,7 +476,7 @@ function ConsoleShell() {
             {pendingTakeover && (
               <button
                 type="button"
-                onClick={() => setActiveTab("browser")}
+                onClick={() => navigateToTab("browser")}
                 className="cursor-pointer"
               >
                 <AnimatedBadge status="warning" size="sm" pulse>
@@ -450,7 +493,7 @@ function ConsoleShell() {
             variant="ghost"
             size="sm"
             className="h-7 px-2.5 text-xs text-muted-foreground hover:text-foreground"
-            onClick={() => setActiveTab("browser")}
+            onClick={() => navigateToTab("browser")}
           >
             <Compass className="size-3.5" />
             <span className="hidden sm:inline">远程浏览器</span>
@@ -547,18 +590,7 @@ function ConsoleShell() {
                   title={item.label}
                   aria-label={item.label}
                   onClick={() => {
-                    if (
-                      activeTab === "models" &&
-                      item.id !== "models" &&
-                      modelsDirty &&
-                      !window.confirm("「模型与供应商」存在未保存的更改，确定要离开吗？")
-                    ) {
-                      return;
-                    }
-                    setActiveTab(item.id);
-                    if (item.id === "chat") {
-                      setSelectedSessionId(null);
-                    }
+                    navigateToTab(item.id, item.id === "chat" ? { sessionId: null } : undefined);
                   }}
                   className={`relative flex h-8 shrink-0 items-center overflow-hidden rounded-md transition-colors ${
                     sidebarCollapsed ? "justify-center px-2.5 lg:px-0" : "px-2.5 text-left"
@@ -604,10 +636,7 @@ function ConsoleShell() {
               <div className="min-h-0 flex-1 space-y-0.5 overflow-y-auto pr-0.5">
                 <button
                   type="button"
-                  onClick={() => {
-                    setSelectedSessionId(null);
-                    setActiveTab("chat");
-                  }}
+                  onClick={() => navigateToTab("chat", { sessionId: null })}
                     className={`flex w-full items-center justify-between rounded-md px-2 py-1.5 text-left text-xs transition-colors ${
                       workspaceTab === "chat" && selectedSessionId === null
                         ? "bg-muted font-medium text-foreground"
@@ -618,35 +647,41 @@ function ConsoleShell() {
                     <span className="size-1.5 shrink-0 rounded-full bg-emerald-500" />
                   </button>
 
-                  {sessions.map((sess) => {
-                    const isSel = workspaceTab === "chat" && selectedSessionId === sess.id;
-                  const shortDate = new Date(sess.endedAt).toLocaleDateString("zh-CN", {
-                    month: "2-digit",
-                    day: "2-digit",
-                  });
-                  return (
-                    <button
-                      key={sess.id}
-                      type="button"
-                      title={`${sess.title} (只读 · ${sess.messageCount} 条消息)`}
-                      onClick={() => {
-                        setSelectedSessionId(sess.id);
-                        setActiveTab("chat");
-                      }}
-                      className={`flex w-full flex-col gap-0.5 rounded-md px-2 py-1.5 text-left transition-colors ${
-                        isSel
-                          ? "bg-muted text-foreground"
-                          : "text-muted-foreground hover:bg-muted/60 hover:text-foreground"
-                      }`}
-                    >
-                      <span className="truncate text-[11px] font-medium">{sess.title}</span>
-                      <div className="flex items-center justify-between font-mono text-[10px] text-muted-foreground/80">
-                        <span>{shortDate}</span>
-                        <span>{sess.messageCount}条 · 只读</span>
-                      </div>
-                    </button>
-                  );
-                })}
+                  {sessions.length === 0 ? (
+                    <p className="px-2 py-2 text-[11px] text-muted-foreground/75">
+                      暂无历史会话记录
+                    </p>
+                  ) : (
+                    sessions.map((sess) => {
+                      const isSel = workspaceTab === "chat" && selectedSessionId === sess.id;
+                      const endedDate = new Date(sess.endedAt);
+                      const shortDate = Number.isNaN(endedDate.getTime())
+                        ? "--"
+                        : endedDate.toLocaleDateString("zh-CN", {
+                            month: "2-digit",
+                            day: "2-digit",
+                          });
+                      return (
+                        <button
+                          key={sess.id}
+                          type="button"
+                          title={`${sess.title} (只读 · ${sess.messageCount} 条消息)`}
+                          onClick={() => navigateToTab("chat", { sessionId: sess.id })}
+                          className={`flex w-full flex-col gap-0.5 rounded-md px-2 py-1.5 text-left transition-colors ${
+                            isSel
+                              ? "bg-muted text-foreground"
+                              : "text-muted-foreground hover:bg-muted/60 hover:text-foreground"
+                          }`}
+                        >
+                          <span className="truncate text-[11px] font-medium">{sess.title}</span>
+                          <div className="flex items-center justify-between font-mono text-[10px] text-muted-foreground/80">
+                            <span>{shortDate}</span>
+                            <span>{sess.messageCount}条 · 只读</span>
+                          </div>
+                        </button>
+                      );
+                    })
+                  )}
               </div>
             </div>
           )}
@@ -657,7 +692,7 @@ function ConsoleShell() {
               type="button"
               title="设置"
               aria-label="设置"
-              onClick={() => setActiveTab("settings")}
+              onClick={() => navigateToTab("settings")}
               className={`flex h-8 shrink-0 items-center rounded-md text-muted-foreground transition-colors hover:bg-muted/60 hover:text-foreground lg:w-full ${
                 sidebarCollapsed ? "justify-center px-2.5 lg:px-0" : "gap-2.5 px-2.5 text-left"
               }`}
@@ -677,11 +712,10 @@ function ConsoleShell() {
           >
             {workspaceTab === "overview" && (
               <OverviewPanel
-                onNavigateTab={(tab) => setActiveTab(tab)}
-                onNavigateSettings={(section) => {
-                  setSettingsSection(section);
-                  setActiveTab("settings");
-                }}
+                onNavigateTab={(tab) => navigateToTab(tab)}
+                onNavigateSettings={(section) =>
+                  navigateToTab("settings", { settingsSection: section })
+                }
                 onToast={notify}
               />
             )}
@@ -692,7 +726,7 @@ function ConsoleShell() {
                   onToast={notify}
                   pendingTakeover={pendingTakeover}
                   onPendingTakeoverChange={setPendingTakeover}
-                  onOpenBrowserPanel={() => setActiveTab("browser")}
+                  onOpenBrowserPanel={() => navigateToTab("browser")}
                   onAuthError={() => setAuthNeeded(true)}
                   selectedSessionId={selectedSessionId}
                   onSelectSession={setSelectedSessionId}
@@ -709,7 +743,7 @@ function ConsoleShell() {
                   onToast={notify}
                   onPendingTakeoverChange={setPendingTakeover}
                   onGoToChatAndResume={() => {
-                    setActiveTab("chat");
+                    navigateToTab("chat");
                     notify({
                       title: "已解除挂起状态",
                       description: "回到对话后可点击继续任务，或发送下一步指令。",
@@ -720,50 +754,65 @@ function ConsoleShell() {
               </div>
             )}
 
-            {workspaceTab === "models" && configSnap && (
-              <ModelsConfigPanel
-                initialConfig={configSnap.modelsConfig}
-                secretStates={configSnap.secretStates}
-                hindsightEnabled={configSnap.hatoConfig.memory?.provider === "hindsight"}
-                onDirtyChange={setModelsDirty}
-                onToast={notify}
-                onSaved={(next) => {
-                  setConfigSnap((prev) => (prev ? { ...prev, modelsConfig: next } : prev));
-                }}
-                onSecretsUpdated={(nextStates) => {
-                  setConfigSnap((prev) =>
-                    prev ? { ...prev, secretStates: nextStates } : prev,
-                  );
-                }}
-              />
-            )}
+            {workspaceTab === "models" &&
+              (configSnap ? (
+                <ModelsConfigPanel
+                  initialConfig={configSnap.modelsConfig}
+                  secretStates={configSnap.secretStates}
+                  hindsightEnabled={configSnap.hatoConfig.memory?.provider === "hindsight"}
+                  onDirtyChange={setModelsDirty}
+                  onToast={notify}
+                  onSaved={(next) => {
+                    setConfigSnap((prev) => (prev ? { ...prev, modelsConfig: next } : prev));
+                  }}
+                  onSecretsUpdated={(nextStates) => {
+                    setConfigSnap((prev) =>
+                      prev ? { ...prev, secretStates: nextStates } : prev,
+                    );
+                  }}
+                />
+              ) : (
+                <ConfigFallbackState
+                  label="正在加载模型配置…"
+                  error={configError ?? (healthOffline ? "无法连接 Hato 服务" : null)}
+                  onRetry={() => void loadHealthAndConfig()}
+                />
+              ))}
 
-            {workspaceTab === "prompt" && configSnap && (
-              <PromptPanel
-                promptPath={configSnap.promptPath}
-                initialPrompt={configSnap.promptText}
-                promptLayers={configSnap.promptLayers}
-                onToast={notify}
-                onSaved={(nextPrompt) => {
-                  setConfigSnap((prev) =>
-                    prev ? { ...prev, promptText: nextPrompt } : prev,
-                  );
-                }}
-                onLayersSynced={(next) => {
-                  setConfigSnap((prev) =>
-                    prev
-                      ? {
-                          ...prev,
-                          hatoConfig: next.hatoConfig ?? prev.hatoConfig,
-                          promptPath: next.promptPath ?? prev.promptPath,
-                          promptText: next.promptText ?? prev.promptText,
-                          promptLayers: next.promptLayers ?? prev.promptLayers,
-                        }
-                      : prev,
-                  );
-                }}
-              />
-            )}
+            {workspaceTab === "prompt" &&
+              (configSnap ? (
+                <PromptPanel
+                  promptPath={configSnap.promptPath}
+                  initialPrompt={configSnap.promptText}
+                  promptLayers={configSnap.promptLayers}
+                  onDirtyChange={setPromptDirty}
+                  onToast={notify}
+                  onSaved={(nextPrompt) => {
+                    setConfigSnap((prev) =>
+                      prev ? { ...prev, promptText: nextPrompt } : prev,
+                    );
+                  }}
+                  onLayersSynced={(next) => {
+                    setConfigSnap((prev) =>
+                      prev
+                        ? {
+                            ...prev,
+                            hatoConfig: next.hatoConfig ?? prev.hatoConfig,
+                            promptPath: next.promptPath ?? prev.promptPath,
+                            promptText: next.promptText ?? prev.promptText,
+                            promptLayers: next.promptLayers ?? prev.promptLayers,
+                          }
+                        : prev,
+                    );
+                  }}
+                />
+              ) : (
+                <ConfigFallbackState
+                  label="正在加载提示词配置…"
+                  error={configError ?? (healthOffline ? "无法连接 Hato 服务" : null)}
+                  onRetry={() => void loadHealthAndConfig()}
+                />
+              ))}
           </main>
         </motion.div>
 
@@ -795,9 +844,11 @@ function ConsoleShell() {
                   }}
                 />
               ) : (
-                <div className="flex h-full w-full items-center justify-center text-xs text-muted-foreground">
-                  正在加载设置…
-                </div>
+                <ConfigFallbackState
+                  label="正在加载设置…"
+                  error={configError ?? (healthOffline ? "无法连接 Hato 服务" : null)}
+                  onRetry={() => void loadHealthAndConfig()}
+                />
               )}
             </motion.div>
           )}
@@ -805,6 +856,38 @@ function ConsoleShell() {
       </div>
 
       <AnimatedToastStack toasts={toasts} onDismiss={dismissToast} fixed />
+    </div>
+  );
+}
+
+function ConfigFallbackState({
+  label,
+  error,
+  onRetry,
+}: {
+  label: string;
+  error: string | null;
+  onRetry: () => void;
+}) {
+  if (error) {
+    return (
+      <div className="flex h-full w-full flex-col items-center justify-center gap-3 px-6 text-center">
+        <div className="flex items-center gap-2 text-sm font-medium text-destructive">
+          <AlertTriangle className="size-4 shrink-0" />
+          <span>配置加载失败</span>
+        </div>
+        <p className="max-w-md text-xs text-muted-foreground">{error}</p>
+        <Button type="button" variant="outline" size="sm" onClick={onRetry}>
+          <RefreshCw className="size-3.5" />
+          重试
+        </Button>
+      </div>
+    );
+  }
+  return (
+    <div className="flex h-full w-full items-center justify-center gap-2 text-xs text-muted-foreground">
+      <Loader2 className="size-3.5 animate-spin" />
+      <span>{label}</span>
     </div>
   );
 }

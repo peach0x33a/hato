@@ -4,13 +4,14 @@ import {
   Compass,
   Database,
   ImagePlus,
+  Loader2,
   RefreshCw,
   Terminal,
   Trash2,
   User,
   X,
 } from "lucide-react";
-import { type ChangeEvent, type ClipboardEvent, useEffect, useMemo, useRef, useState } from "react";
+import { type ChangeEvent, type ClipboardEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   api,
   type ChatSessionRecord,
@@ -36,6 +37,7 @@ import {
 } from "@/components/agents/message";
 import { PromptInput } from "@/components/agents/prompt-input";
 import { ApiBadge, SlotBadge } from "@/components/console/ConsolePrimitives";
+import { useDismiss } from "@/lib/hooks/use-dismiss";
 import { MarkdownContent } from "@/components/console/MarkdownContent";
 import { StaticsPanel } from "@/components/console/StaticsPanel";
 import { TrajectoryPanel } from "@/components/console/TrajectoryPanel";
@@ -92,6 +94,31 @@ function mapStoredToUi(records: StoredMessageRecord[]): UiChatItem[] {
           : [],
     createdAt: rec.createdAt,
   }));
+}
+
+function mergeStoredWithLocalImages(next: UiChatItem[], prev: UiChatItem[]): UiChatItem[] {
+  const withImages = prev.filter((item) => item.images && item.images.length > 0);
+  if (withImages.length === 0) return next;
+
+  const used = new Set<string>();
+  return next.map((item) => {
+    if (item.images && item.images.length > 0) return item;
+    const itemText = item.bubbles.join("\n");
+    const match =
+      withImages.find((p) => !used.has(p.id) && p.id === item.id) ??
+      withImages.find(
+        (p) => !used.has(p.id) && p.role === item.role && p.bubbles.join("\n") === itemText,
+      ) ??
+      withImages.find(
+        (p) =>
+          !used.has(p.id) &&
+          p.role === item.role &&
+          Math.abs(p.createdAt - item.createdAt) < 120_000,
+      );
+    if (!match) return item;
+    used.add(match.id);
+    return { ...item, images: match.images };
+  });
 }
 
 const ACTIVE_TICKET_STATUSES = new Set([
@@ -163,6 +190,13 @@ export function ChatPanel({
   const prevActiveCountRef = useRef(0);
   const abortRef = useRef<AbortController | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const traceRef = useRef<HTMLDivElement | null>(null);
+  const memoryRef = useRef<HTMLDivElement | null>(null);
+
+  const dismissTrace = useCallback(() => setHoverTraceOpen(false), []);
+  const dismissMemory = useCallback(() => setHoverMemoryOpen(false), []);
+  useDismiss(hoverTraceOpen, dismissTrace, traceRef);
+  useDismiss(hoverMemoryOpen, dismissMemory, memoryRef);
 
   const loadLatestTrace = async () => {
     setTraceLoading(true);
@@ -214,7 +248,7 @@ export function ChatPanel({
 
       if (nextActive.length > 0 || hadActive) {
         const h = await api.getChatHistory(null);
-        setItems(mapStoredToUi(h.messages));
+        setItems((prev) => mergeStoredWithLocalImages(mapStoredToUi(h.messages), prev));
         setSlots(h.slots);
         setSummaryText(h.summaryText || "");
         onPendingTakeoverChange(h.pendingTakeover);
@@ -488,6 +522,14 @@ export function ChatPanel({
         controller.signal,
       );
     } catch (err) {
+      setItems((prev) =>
+        prev.filter(
+          (m) =>
+            m.id !== assistantMsgId ||
+            m.bubbles.length > 0 ||
+            (m.images && m.images.length > 0),
+        ),
+      );
       if (!controller.signal.aborted) {
         const msg = err instanceof Error ? err.message : String(err);
         onToast({ title: "发送失败", description: msg, status: "error" });
@@ -547,23 +589,21 @@ export function ChatPanel({
               </Button>
             ) : (
               <>
-                {/* Hover Popover: 查看 Trace */}
-                <div
-                  className="relative"
-                  onMouseEnter={() => {
-                    setHoverTraceOpen(true);
-                    void loadLatestTrace();
-                  }}
-                  onMouseLeave={() => setHoverTraceOpen(false)}
-                >
+                {/* Click-toggled Popover: 查看 Trace */}
+                <div ref={traceRef} className="relative">
                   <Button
                     type="button"
                     variant="ghost"
                     size="sm"
+                    aria-expanded={hoverTraceOpen}
                     className="h-7 px-2 text-xs"
                     onClick={() => {
-                      setHoverTraceOpen(false);
-                      setSubTab("trajectory");
+                      setHoverMemoryOpen(false);
+                      setHoverTraceOpen((prev) => {
+                        const next = !prev;
+                        if (next) void loadLatestTrace();
+                        return next;
+                      });
                     }}
                   >
                     <Activity className="size-3.5" />
@@ -627,19 +667,19 @@ export function ChatPanel({
                   )}
                 </div>
 
-                {/* Hover Popover + Click Trigger: 压缩记忆 */}
-                <div
-                  className="relative"
-                  onMouseEnter={() => setHoverMemoryOpen(true)}
-                  onMouseLeave={() => setHoverMemoryOpen(false)}
-                >
+                {/* Click-toggled Popover: 压缩记忆 */}
+                <div ref={memoryRef} className="relative">
                   <Button
                     type="button"
                     variant="ghost"
                     size="sm"
+                    aria-expanded={hoverMemoryOpen}
                     className="h-7 px-2 text-xs"
                     disabled={streaming || slashBusy}
-                    onClick={() => void runSlashCommand("/compact")}
+                    onClick={() => {
+                      setHoverTraceOpen(false);
+                      setHoverMemoryOpen((prev) => !prev);
+                    }}
                   >
                     <Database className="size-3.5" />
                     压缩记忆
@@ -648,8 +688,20 @@ export function ChatPanel({
                   {hoverMemoryOpen && (
                     <div className="absolute top-full right-0 z-50 mt-1 w-[min(20rem,calc(100vw-2rem))] rounded-lg border border-border bg-popover p-3 text-xs shadow-md">
                       <div className="mb-1.5 flex items-center justify-between border-b border-border/70 pb-1.5">
-                        <span className="font-medium text-foreground">工作记忆摘要预览</span>
-                        <span className="text-[10px] text-muted-foreground">点击按钮触发压缩</span>
+                        <span className="font-medium text-foreground">工作记忆摘要</span>
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="outline"
+                          className="h-6 px-2 text-[11px]"
+                          disabled={streaming || slashBusy}
+                          onClick={() => {
+                            setHoverMemoryOpen(false);
+                            void runSlashCommand("/compact");
+                          }}
+                        >
+                          立即压缩
+                        </Button>
                       </div>
                       {summaryText.trim() ? (
                         <p className="max-h-40 overflow-y-auto whitespace-pre-wrap break-words text-[11px] leading-relaxed text-foreground">
@@ -657,7 +709,7 @@ export function ChatPanel({
                         </p>
                       ) : (
                         <p className="text-[11px] text-muted-foreground">
-                          当前暂无滚动摘要；当对话消息达到阈值后会自动或手动整理到此区域。
+                          暂无工作记忆摘要
                         </p>
                       )}
                     </div>
@@ -806,6 +858,13 @@ export function ChatPanel({
           className="min-h-0 flex-1 overflow-hidden bg-background"
           contentClassName="mx-auto flex w-full max-w-3xl flex-col gap-5 px-3 py-4 sm:px-6"
         >
+          {historyState === "loading" && items.length === 0 && (
+            <div className="flex items-center justify-center gap-2 py-12 text-xs text-muted-foreground">
+              <Loader2 className="size-4 animate-spin" />
+              <span>正在加载对话记录…</span>
+            </div>
+          )}
+
           {historyState === "error" && (
             <Alert variant="destructive" open>
               <AlertIcon />
@@ -1044,7 +1103,6 @@ export function ChatPanel({
         {subTab === "stats" && (
           <StaticsPanel
             onToast={onToast}
-            embedded
             sessionEpoch={sessionEpoch}
             sessionId={selectedSessionId}
           />

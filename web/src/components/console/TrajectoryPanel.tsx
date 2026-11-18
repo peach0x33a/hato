@@ -10,9 +10,10 @@ import {
   Wrench,
   X,
 } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, type TraceStepRecord, type TurnTraceRecord } from "@/api";
 import { ApiBadge, ConsoleSelect, SlotBadge } from "@/components/console/ConsolePrimitives";
+import { SLOT_DEFINITIONS } from "@/components/console/models/types";
 import {
   Alert,
   AlertAction,
@@ -49,11 +50,10 @@ const MODE_OPTIONS: Array<{ id: TimelineMode; label: string; icon: typeof Clock 
 
 const DEFAULT_SLOT_OPTIONS = [
   { value: "__all__", label: "全部调用" },
-  { value: "persona", label: "persona · 主对话" },
-  { value: "worker", label: "worker · 后台执行" },
-  { value: "curator", label: "curator · 记忆压缩" },
-  { value: "router", label: "router · 路由" },
-  { value: "hindsight_llm", label: "hindsight_llm · 反思" },
+  ...SLOT_DEFINITIONS.map((slot) => ({
+    value: slot.key,
+    label: `${slot.key} · ${slot.label}`,
+  })),
 ];
 
 function parseJsonArray(raw: string | null | undefined): string[] {
@@ -206,8 +206,10 @@ export function TrajectoryPanel({ onToast, sessionEpoch = 0, sessionId = null }:
   const [viewState, setViewState] = useState<"loading" | "error" | "ready">("loading");
   const [errorMessage, setErrorMessage] = useState("");
   const [traces, setTraces] = useState<TurnTraceRecord[]>([]);
+  const requestSeqRef = useRef(0);
 
-  const loadTraces = async () => {
+  const loadTraces = useCallback(async () => {
+    const reqId = ++requestSeqRef.current;
     setViewState("loading");
     setErrorMessage("");
     try {
@@ -216,6 +218,7 @@ export function TrajectoryPanel({ onToast, sessionEpoch = 0, sessionId = null }:
         slot: slot === "__all__" ? undefined : slot,
         sessionId,
       });
+      if (reqId !== requestSeqRef.current) return;
       const chronological = [...res.traces].reverse();
       setTraces(chronological);
       setSelectedTraceId((prev) =>
@@ -225,16 +228,17 @@ export function TrajectoryPanel({ onToast, sessionEpoch = 0, sessionId = null }:
       );
       setViewState("ready");
     } catch (err) {
+      if (reqId !== requestSeqRef.current) return;
       const msg = err instanceof Error ? err.message : String(err);
       setErrorMessage(msg);
       setViewState("error");
       onToast({ title: "轨迹加载失败", description: msg, status: "error" });
     }
-  };
+  }, [slot, sessionId, onToast]);
 
   useEffect(() => {
     void loadTraces();
-  }, [slot, sessionEpoch, sessionId]);
+  }, [loadTraces, sessionEpoch]);
 
   const slotOptions = useMemo(() => {
     const known = new Set(DEFAULT_SLOT_OPTIONS.map((o) => o.value));
@@ -470,6 +474,12 @@ export function TrajectoryPanel({ onToast, sessionEpoch = 0, sessionId = null }:
     ];
   }, [activeStep]);
 
+  useEffect(() => {
+    if (activeStep?.kind === "tool" && inspectorTab === "snapshot") {
+      setInspectorTab("overview");
+    }
+  }, [activeStep?.kind, inspectorTab]);
+
   return (
     <div className="flex h-full min-h-0 min-w-0 max-w-full flex-1 flex-col overflow-hidden bg-background">
       {/* 1. Flat Sticky Toolbar */}
@@ -680,7 +690,14 @@ export function TrajectoryPanel({ onToast, sessionEpoch = 0, sessionId = null }:
         <div className="flex min-h-0 min-w-0 max-w-full flex-1 flex-col overflow-hidden md:flex-row">
           {/* Left: High-Density Event Ledger */}
           <div className="min-h-0 min-w-0 flex-1 overflow-y-auto divide-y divide-border/50">
-            {ledgerEvents.map((ev) => {
+            {ledgerEvents.length === 0 ? (
+              <div className="flex h-full min-h-32 items-center justify-center px-4 text-center text-xs text-muted-foreground">
+                {!showInputs && !showRecall && !showTools && !showModels
+                  ? "已关闭所有事件类型过滤，请在上方开启至少一项。"
+                  : "当前筛选条件下暂无事件记录。"}
+              </div>
+            ) : (
+              ledgerEvents.map((ev) => {
               const badge = getKindBadge(ev.kind, ev.slot);
               const isSelected =
                 selectedEventKey === ev.key ||
@@ -753,7 +770,7 @@ export function TrajectoryPanel({ onToast, sessionEpoch = 0, sessionId = null }:
                   </span>
                 </button>
               );
-            })}
+            }))}
           </div>
 
           {/* Right/Bottom: Responsive Flat Inspector Drawer */}
@@ -850,7 +867,7 @@ export function TrajectoryPanel({ onToast, sessionEpoch = 0, sessionId = null }:
                       {selectedTrace.slot === "curator" &&
                       /^curator_messages:\s*\d+$/.test(selectedTrace.timeCardText.trim()) ? (
                         <p className="text-[11px] text-muted-foreground">
-                          注：该条为旧版提炼记录（仅保存了日志条数）；新产生的记忆提炼会在此显示完整待提炼对话日志。
+                          旧版提炼记录（仅保存了日志条数）。
                         </p>
                       ) : null}
                     </div>
@@ -1069,7 +1086,7 @@ export function TrajectoryPanel({ onToast, sessionEpoch = 0, sessionId = null }:
                         </div>
                       ) : (
                         <div className="border-l-2 border-dashed border-border pl-2.5 py-1 text-[11px] text-muted-foreground">
-                          旧版轨迹记录未保存原始输出正文（仅新产生的调用会完整记录每步模型输出）。
+                          暂无原始输出正文。
                         </div>
                       )}
                     </div>

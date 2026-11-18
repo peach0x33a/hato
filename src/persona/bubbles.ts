@@ -94,3 +94,19 @@ function stripDelimiterArtifacts(text: string, delimiterPattern: string): string
 function escapeRegExp(literal: string): string {
   return literal.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
+
+/**
+ * Join outbound bubbles for DB persistence while preserving explicit bubble
+ * boundaries (`delimiter`) so WebUI history reconstructs the exact same bubbles.
+ */
+export function joinPersistedBubbles(
+  bubbles: string[],
+  options: Pick<BubbleSplitOptions, "enabled" | "delimiter">,
+): string {
+  if (bubbles.length === 0) return "";
+  if (!options.enabled || bubbles.length === 1) {
+    return bubbles.join("\n\n");
+  }
+  const token = options.delimiter.trim() || "---";
+  return bubbles.join(`\n\n${token}\n\n`);
+}

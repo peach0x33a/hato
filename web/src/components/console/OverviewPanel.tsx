@@ -1,5 +1,6 @@
 import {
   Activity,
+  AlertTriangle,
   Bot,
   Check,
   Copy,
@@ -15,11 +16,11 @@ import {
   Wifi,
 } from "lucide-react";
 import { AnimatePresence, LayoutGroup, motion } from "motion/react";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { api, type OverviewResponse, type ProbeItemResult, type ProbeResponse } from "@/api";
 import { AnimatedBadge } from "@/components/motion/animated-badge";
 import { Button } from "@/components/motion/button";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/motion/card";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/motion/card";
 import { SPRING_LAYOUT } from "@/lib/ease";
 
 const PROBE_STORAGE_KEY = "hato_service_probe_results_v1";
@@ -135,17 +136,6 @@ function GatewayStatusCard({
       }}
       className="relative overflow-hidden rounded-2xl border border-border/80 bg-card/75 p-5 shadow-sm transition-colors hover:border-blue-500/40 hover:shadow-md"
     >
-      {/* Animated decorative wave + glow backdrop on right edge */}
-      <motion.div
-        aria-hidden="true"
-        initial={false}
-        animate={{
-          opacity: enabled ? 1 : 0,
-          scale: enabled ? 1 : 0.85,
-        }}
-        transition={{ duration: 0.35, ease: "easeOut" }}
-        className="pointer-events-none absolute -right-10 -top-10 size-52 rounded-full bg-blue-500/15 blur-2xl"
-      />
       <motion.svg
         aria-hidden="true"
         viewBox="0 0 180 180"
@@ -303,6 +293,7 @@ export function OverviewPanel({
   const [overview, setOverview] = useState<OverviewResponse | null>(null);
   const [liveUptimeSec, setLiveUptimeSec] = useState<number>(0);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   const [probeResults, setProbeResults] = useState<ProbeResponse["results"]>(() =>
     loadSavedProbeResults(),
@@ -313,6 +304,7 @@ export function OverviewPanel({
   const [pairingOpen, setPairingOpen] = useState(false);
   const [pairingLoading, setPairingLoading] = useState(false);
   const [copiedPairing, setCopiedPairing] = useState(false);
+  const copiedTimerRef = useRef<number | null>(null);
 
   const loadOverview = useCallback(
     async (quiet = false) => {
@@ -321,11 +313,14 @@ export function OverviewPanel({
         const data = await api.getOverview();
         setOverview(data);
         setLiveUptimeSec(data.uptimeSec);
+        setLoadError(null);
       } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        setLoadError(msg);
         if (!quiet) {
           onToast({
             title: "获取系统概览失败",
-            description: err instanceof Error ? err.message : String(err),
+            description: msg,
             status: "error",
           });
         }
@@ -348,6 +343,9 @@ export function OverviewPanel({
     return () => {
       window.clearInterval(pollTimer);
       window.clearInterval(tickTimer);
+      if (copiedTimerRef.current !== null) {
+        window.clearTimeout(copiedTimerRef.current);
+      }
     };
   }, [loadOverview]);
 
@@ -420,7 +418,10 @@ export function OverviewPanel({
     try {
       await navigator.clipboard.writeText(pairingInfo.command);
       setCopiedPairing(true);
-      setTimeout(() => setCopiedPairing(false), 1500);
+      if (copiedTimerRef.current !== null) {
+        window.clearTimeout(copiedTimerRef.current);
+      }
+      copiedTimerRef.current = window.setTimeout(() => setCopiedPairing(false), 1500);
     } catch {
       onToast({ title: "复制失败，请手动复制指令", status: "error" });
     }
@@ -435,16 +436,35 @@ export function OverviewPanel({
     );
   }
 
+  if (!overview && loadError) {
+    return (
+      <div className="flex h-full flex-col items-center justify-center gap-3 p-8 text-center">
+        <div className="flex items-center gap-2 text-sm font-medium text-destructive">
+          <AlertTriangle className="size-4 shrink-0" />
+          <span>获取系统概览失败</span>
+        </div>
+        <p className="max-w-md text-xs text-muted-foreground">{loadError}</p>
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          disabled={refreshing}
+          onClick={() => void loadOverview(false)}
+        >
+          <RefreshCw className={`size-3.5 ${refreshing ? "animate-spin" : ""}`} />
+          重试
+        </Button>
+      </div>
+    );
+  }
+
   return (
     <LayoutGroup>
       <div className="mx-auto flex w-full max-w-5xl flex-col gap-6 p-5 sm:p-7">
       {/* Top header */}
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
-          <h2 className="text-xl font-semibold tracking-tight text-foreground">系统概览</h2>
-          <p className="mt-0.5 text-xs text-muted-foreground">
-            实时查看消息网关在线状态、收发统计、后台工单与推理运行概况
-          </p>
+          <h2 className="text-base font-semibold tracking-tight text-foreground">系统概览</h2>
         </div>
         <div className="flex items-center gap-2">
           {overview ? (
@@ -609,9 +629,6 @@ export function OverviewPanel({
                   前往对话
                 </Button>
               </div>
-              <CardDescription className="text-xs">
-                各通道累计消息吞吐与当前热区上下文规模
-              </CardDescription>
             </CardHeader>
             <CardContent className="grid grid-cols-3 gap-3">
               <div className="rounded-xl border border-border/60 bg-muted/30 p-3">
@@ -678,9 +695,6 @@ export function OverviewPanel({
                   模型配置
                 </Button>
               </div>
-              <CardDescription className="text-xs">
-                后台 Worker 工单执行情况与近期模型调用指标
-              </CardDescription>
             </CardHeader>
             <CardContent className="flex flex-col gap-3">
               <div className="grid grid-cols-3 gap-3">
@@ -711,30 +725,30 @@ export function OverviewPanel({
 
               <div className="flex flex-col gap-2 rounded-xl border border-border/60 bg-muted/20 p-3 text-xs">
                 <div className="flex items-center justify-between gap-2">
-                  <span className="flex items-center gap-1.5 text-muted-foreground">
+                  <span className="flex shrink-0 items-center gap-1.5 text-muted-foreground">
                     <Bot className="size-3.5" />
                     主对话模型
                   </span>
-                  <span className="truncate font-mono text-foreground">
+                  <span className="min-w-0 truncate font-mono text-foreground">
                     {overview?.runtime.personaModel || "--"}
                   </span>
                 </div>
                 <div className="flex items-center justify-between gap-2">
-                  <span className="flex items-center gap-1.5 text-muted-foreground">
+                  <span className="flex shrink-0 items-center gap-1.5 text-muted-foreground">
                     <Wifi className="size-3.5" />
                     Worker 后端
                   </span>
-                  <span className="font-mono text-foreground">
+                  <span className="min-w-0 truncate font-mono text-foreground">
                     {overview?.runtime.workerBackend || "--"} (
                     {overview?.runtime.workerRoutingMode || "smart"})
                   </span>
                 </div>
                 <div className="flex items-center justify-between gap-2">
-                  <span className="flex items-center gap-1.5 text-muted-foreground">
+                  <span className="flex shrink-0 items-center gap-1.5 text-muted-foreground">
                     <Database className="size-3.5" />
                     记忆后端
                   </span>
-                  <span className="font-mono text-foreground">
+                  <span className="min-w-0 truncate font-mono text-foreground">
                     {overview?.runtime.memoryProvider || "none"}
                   </span>
                 </div>

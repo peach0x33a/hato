@@ -1,7 +1,8 @@
 import { ChevronDown, ChevronRight, RefreshCw } from "lucide-react";
-import { Fragment, useEffect, useMemo, useState } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, type StaticsSummary, type TurnTraceRecord } from "@/api";
 import { ApiBadge, ConsoleSelect, SlotBadge } from "@/components/console/ConsolePrimitives";
+import { SLOT_DEFINITIONS } from "@/components/console/models/types";
 import {
   Alert,
   AlertAction,
@@ -15,11 +16,10 @@ import { Button } from "@/components/motion/button";
 
 const DEFAULT_SLOT_OPTIONS = [
   { value: "__all__", label: "全部调用" },
-  { value: "persona", label: "persona · 主对话" },
-  { value: "worker", label: "worker · 浏览器" },
-  { value: "curator", label: "curator · 记忆压缩" },
-  { value: "router", label: "router · 路由" },
-  { value: "hindsight_llm", label: "hindsight_llm · 反思" },
+  ...SLOT_DEFINITIONS.map((slot) => ({
+    value: slot.key,
+    label: `${slot.key} · ${slot.label}`,
+  })),
 ];
 
 const SINCE_FILTER_OPTIONS = [
@@ -37,7 +37,6 @@ const LIMIT_FILTER_OPTIONS = [
 
 export interface StaticsPanelProps {
   onToast: (input: { title: string; description?: string; status?: "info" | "success" | "error" }) => void;
-  embedded?: boolean;
   sessionEpoch?: number;
   sessionId?: string | null;
 }
@@ -57,14 +56,23 @@ export function StaticsPanel({ onToast, sessionEpoch = 0, sessionId = null }: St
   const [since, setSince] = useState("24h");
   const [limit, setLimit] = useState("60");
   const [expandedRowId, setExpandedRowId] = useState<string | null>(null);
+  const [autoRefresh, setAutoRefresh] = useState(true);
   const [viewState, setViewState] = useState<"loading" | "error" | "ready">("loading");
+  const [isRefreshing, setIsRefreshing] = useState(false);
   const [errorMessage, setErrorMessage] = useState("");
   const [summary, setSummary] = useState<StaticsSummary | null>(null);
   const [traces, setTraces] = useState<TurnTraceRecord[]>([]);
+  const requestSeqRef = useRef(0);
 
-  const loadStatics = async () => {
-    setViewState("loading");
-    setErrorMessage("");
+  const loadStatics = useCallback(async (opts?: { silent?: boolean }) => {
+    const reqId = ++requestSeqRef.current;
+    const silent = opts?.silent ?? false;
+    if (silent) {
+      setIsRefreshing(true);
+    } else {
+      setViewState("loading");
+      setErrorMessage("");
+    }
     try {
       const res = await api.getStatics({
         limit: Number(limit) || 60,
@@ -72,20 +80,36 @@ export function StaticsPanel({ onToast, sessionEpoch = 0, sessionId = null }: St
         since: sessionId || since === "all" ? undefined : since,
         sessionId,
       });
+      if (reqId !== requestSeqRef.current) return;
       setSummary(res.summary);
       setTraces(res.traces);
       setViewState("ready");
     } catch (err) {
+      if (reqId !== requestSeqRef.current) return;
       const msg = err instanceof Error ? err.message : String(err);
-      setErrorMessage(msg);
-      setViewState("error");
-      onToast({ title: "统计读取失败", description: msg, status: "error" });
+      if (!silent) {
+        setErrorMessage(msg);
+        setViewState("error");
+        onToast({ title: "统计读取失败", description: msg, status: "error" });
+      }
+    } finally {
+      if (reqId === requestSeqRef.current) {
+        setIsRefreshing(false);
+      }
     }
-  };
+  }, [limit, slot, since, sessionId, onToast]);
 
   useEffect(() => {
     void loadStatics();
-  }, [slot, since, limit, sessionEpoch, sessionId]);
+  }, [loadStatics, sessionEpoch]);
+
+  useEffect(() => {
+    if (!autoRefresh) return;
+    const timer = window.setInterval(() => {
+      void loadStatics({ silent: true });
+    }, 10_000);
+    return () => window.clearInterval(timer);
+  }, [autoRefresh, loadStatics]);
 
   const slotOptions = useMemo(() => {
     const known = new Set(DEFAULT_SLOT_OPTIONS.map((o) => o.value));
@@ -188,6 +212,7 @@ export function StaticsPanel({ onToast, sessionEpoch = 0, sessionId = null }: St
             className="w-32"
             value={since}
             options={SINCE_FILTER_OPTIONS}
+            disabled={Boolean(sessionId)}
             onValueChange={setSince}
           />
           <ConsoleSelect
@@ -198,17 +223,29 @@ export function StaticsPanel({ onToast, sessionEpoch = 0, sessionId = null }: St
             onValueChange={setLimit}
           />
         </div>
-        <Button
-          type="button"
-          variant="ghost"
-          size="sm"
-          className="h-7 px-2 text-xs"
-          disabled={viewState === "loading"}
-          onClick={() => void loadStatics()}
-        >
-          <RefreshCw className={`size-3.5 ${viewState === "loading" ? "animate-spin" : ""}`} />
-          刷新统计
-        </Button>
+        <div className="flex items-center gap-1.5">
+          <Button
+            type="button"
+            variant={autoRefresh ? "secondary" : "ghost"}
+            size="sm"
+            aria-pressed={autoRefresh}
+            className="h-7 px-2 text-xs"
+            onClick={() => setAutoRefresh((v) => !v)}
+          >
+            自动刷新
+          </Button>
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            className="h-7 px-2 text-xs"
+            disabled={viewState === "loading" || isRefreshing}
+            onClick={() => void loadStatics()}
+          >
+            <RefreshCw className={`size-3.5 ${viewState === "loading" || isRefreshing ? "animate-spin" : ""}`} />
+            刷新统计
+          </Button>
+        </div>
       </div>
 
       <div className="min-h-0 flex-1 overflow-y-auto divide-y divide-border">
@@ -322,16 +359,16 @@ export function StaticsPanel({ onToast, sessionEpoch = 0, sessionId = null }: St
                   return (
                     <div
                       key={item.key}
-                      className="flex flex-wrap items-center justify-between gap-2 py-1.5 text-xs"
+                      className="flex items-center justify-between gap-2 py-1.5 text-xs"
                     >
-                      <div className="flex min-w-0 items-center gap-1.5">
-                        <SlotBadge slot={item.slot} className="h-4 px-1 text-[10px]" />
+                      <div className="flex flex-1 min-w-0 items-center gap-1.5">
+                        <SlotBadge slot={item.slot} className="h-4 shrink-0 px-1 text-[10px]" />
                         <span className="truncate font-mono text-[11px] font-medium text-foreground">
                           {item.target}
                         </span>
-                        <ApiBadge api={item.api} className="h-4 px-1 text-[10px]" />
+                        <ApiBadge api={item.api} className="h-4 shrink-0 px-1 text-[10px]" />
                       </div>
-                      <div className="flex items-center gap-2.5 font-mono text-[11px] tabular-nums text-muted-foreground">
+                      <div className="flex shrink-0 items-center gap-2.5 font-mono text-[11px] tabular-nums text-muted-foreground">
                         <span>{item.count} 次</span>
                         <span>命中 {hit.toFixed(1)}%</span>
                         <span>出 {item.outputTokens.toLocaleString()}</span>
@@ -382,19 +419,20 @@ export function StaticsPanel({ onToast, sessionEpoch = 0, sessionId = null }: St
             <span className="text-xs font-medium text-foreground">
               最近调用明细（共 {traces.length} 条）
             </span>
-            <span className="text-[11px] text-muted-foreground">
-              点击行可展开上下文快照
-            </span>
           </div>
 
-          {viewState === "ready" && traces.length === 0 ? (
+          {viewState === "loading" && traces.length === 0 ? (
+            <div className="py-10 text-center text-xs text-muted-foreground">
+              正在加载统计数据…
+            </div>
+          ) : viewState === "ready" && traces.length === 0 ? (
             <div className="py-10 text-center text-xs text-muted-foreground">
               筛选条件下暂无调用记录。
             </div>
           ) : (
-            <div className="overflow-x-auto">
+            <div className="overflow-x-clip">
               <table className="w-full border-collapse text-left text-xs">
-                <thead className="sticky top-0 bg-muted/25 text-[11px] text-muted-foreground">
+                <thead className="sticky top-0 z-10 bg-background text-[11px] text-muted-foreground">
                   <tr className="border-b border-border">
                     <th className="w-6 py-2 pl-3" />
                     <th className="py-2 pr-2 font-medium">时间</th>
@@ -466,7 +504,16 @@ export function StaticsPanel({ onToast, sessionEpoch = 0, sessionId = null }: St
                           </td>
                           <td className="whitespace-nowrap py-2 pr-2 font-mono text-[11px] tabular-nums text-muted-foreground">
                             {tr.ttftMs !== null ? `${tr.ttftMs}ms` : "--"} / {tr.latencyMs}ms
-                            {tr.tps !== null ? ` · ${tr.tps.toFixed(0)}/s` : ""}
+                            {(() => {
+                              const hasBogusDecode =
+                                tr.ttftMs !== null && tr.latencyMs > 0 && tr.latencyMs - tr.ttftMs < 50;
+                              const displayTps = hasBogusDecode
+                                ? tr.outputTokens > 0 && tr.latencyMs > 0
+                                  ? tr.outputTokens / (tr.latencyMs / 1000)
+                                  : null
+                                : tr.tps;
+                              return displayTps !== null ? ` · ${displayTps.toFixed(0)}/s` : "";
+                            })()}
                           </td>
                           <td className="py-2 pr-3">
                             {tools.length === 0 ? (

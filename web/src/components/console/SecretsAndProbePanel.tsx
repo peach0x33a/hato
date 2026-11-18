@@ -1,5 +1,5 @@
 import { Activity, Eye, EyeOff, KeyRound, Pencil, Plus, Save, X } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { api, type ProbeResponse, type SecretState } from "@/api";
 import { ConsoleInput } from "@/components/console/ConsolePrimitives";
 import { AnimatedBadge } from "@/components/motion/animated-badge";
@@ -82,16 +82,41 @@ export function SecretsAndProbePanel({
   const [customVal, setCustomVal] = useState("");
   const [showCustomVal, setShowCustomVal] = useState(false);
 
-  const [saveState, setSaveState] = useState<ButtonState>("idle");
+  const ADD_FORM_SAVE_KEY = "__add__";
+  const [saveStates, setSaveStates] = useState<Record<string, ButtonState>>({});
+  const timersRef = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
   const [probingTarget, setProbingTarget] = useState<"all" | ProbeTargetKey | null>(null);
   const [probeResult, setProbeResult] = useState<ProbeResponse["results"] | null>(() =>
     loadSavedProbeResults(),
   );
 
+  useEffect(() => {
+    const timers = timersRef.current;
+    return () => {
+      for (const timer of Object.values(timers)) {
+        clearTimeout(timer);
+      }
+    };
+  }, []);
+
   const configuredCount = secretStates.filter((s) => s.configured).length;
   const probing = probingTarget !== null;
 
-  const commitSecretUpdate = async (key: string, value: string) => {
+  const setTargetSaveState = (targetId: string, state: ButtonState) => {
+    setSaveStates((prev) => ({ ...prev, [targetId]: state }));
+  };
+
+  const scheduleResetSaveState = (targetId: string, delayMs: number) => {
+    if (timersRef.current[targetId]) {
+      clearTimeout(timersRef.current[targetId]);
+    }
+    timersRef.current[targetId] = setTimeout(() => {
+      delete timersRef.current[targetId];
+      setTargetSaveState(targetId, "idle");
+    }, delayMs);
+  };
+
+  const commitSecretUpdate = async (key: string, value: string, targetId: string) => {
     const cleanKey = key.trim();
     const cleanVal = value.trim();
     if (!cleanKey || !cleanVal) {
@@ -99,10 +124,10 @@ export function SecretsAndProbePanel({
       return;
     }
 
-    setSaveState("loading");
+    setTargetSaveState(targetId, "loading");
     try {
       const res = await api.saveSecrets({ [cleanKey]: cleanVal });
-      setSaveState("success");
+      setTargetSaveState(targetId, "success");
       setEditingKey(null);
       setEditValue("");
       setShowEditValue(false);
@@ -116,15 +141,15 @@ export function SecretsAndProbePanel({
         description: res.changes?.length ? res.changes.join("；") : undefined,
         status: "success",
       });
-      setTimeout(() => setSaveState("idle"), 1500);
+      scheduleResetSaveState(targetId, 1500);
     } catch (err) {
-      setSaveState("error");
+      setTargetSaveState(targetId, "error");
       onToast({
         title: "保存密钥失败",
         description: err instanceof Error ? err.message : String(err),
         status: "error",
       });
-      setTimeout(() => setSaveState("idle"), 1800);
+      scheduleResetSaveState(targetId, 1800);
     }
   };
 
@@ -155,12 +180,52 @@ export function SecretsAndProbePanel({
     }
   };
 
+  const renderVisibilityToggle = (shown: boolean, onToggle: () => void) => (
+    <button
+      type="button"
+      aria-label={shown ? "隐藏密钥" : "显示密钥"}
+      onClick={onToggle}
+      className="!size-8 text-muted-foreground transition-colors hover:text-foreground"
+    >
+      {shown ? <EyeOff className="size-3.5" /> : <Eye className="size-3.5" />}
+    </button>
+  );
+
+  const renderAddSecretButton = () => (
+    <Button
+      type="button"
+      size="sm"
+      variant="outline"
+      onClick={() => {
+        setEditingKey(null);
+        setShowEditValue(false);
+        setAddingCustom((v) => !v);
+      }}
+    >
+      <Plus className="size-3.5" />
+      新增密钥
+    </Button>
+  );
+
+  const renderProbeAllButton = (variant?: "outline") => (
+    <Button
+      type="button"
+      size="sm"
+      variant={variant}
+      disabled={probing}
+      onClick={() => void runProbe("all")}
+    >
+      <Activity className={`size-3.5 ${probingTarget === "all" ? "animate-pulse" : ""}`} />
+      {probingTarget === "all" ? "全链路检测中…" : "检测全部链路"}
+    </Button>
+  );
+
   return (
     <div className="flex flex-col gap-7">
       {!embedded ? (
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div className="flex flex-wrap items-center gap-2.5">
-            <h2 className="text-2xl font-semibold tracking-tight text-foreground">密钥与自检</h2>
+            <h2 className="text-base font-semibold tracking-tight text-foreground">密钥与自检</h2>
             <AnimatedBadge
               status={
                 configuredCount === secretStates.length && secretStates.length > 0
@@ -173,28 +238,8 @@ export function SecretsAndProbePanel({
             </AnimatedBadge>
           </div>
           <div className="flex flex-wrap items-center gap-2">
-            <Button
-              type="button"
-              size="sm"
-              variant="outline"
-              onClick={() => {
-                setEditingKey(null);
-                setShowEditValue(false);
-                setAddingCustom((v) => !v);
-              }}
-            >
-              <Plus className="size-3.5" />
-              新增密钥
-            </Button>
-            <Button
-              type="button"
-              size="sm"
-              disabled={probing}
-              onClick={() => void runProbe("all")}
-            >
-              <Activity className={`size-3.5 ${probingTarget === "all" ? "animate-pulse" : ""}`} />
-              {probingTarget === "all" ? "全链路检测中…" : "检测全部链路"}
-            </Button>
+            {renderAddSecretButton()}
+            {renderProbeAllButton()}
           </div>
         </div>
       ) : null}
@@ -206,25 +251,8 @@ export function SecretsAndProbePanel({
             <h3 id="credentials-heading" className="text-xs font-medium text-muted-foreground">
               已注册凭据
             </h3>
-            <p className="mt-0.5 text-[11px] text-muted-foreground/80">
-              更新后立即生效，页面仅显示脱敏掩码。
-            </p>
           </div>
-          {embedded ? (
-            <Button
-              type="button"
-              size="sm"
-              variant="outline"
-              onClick={() => {
-                setEditingKey(null);
-                setShowEditValue(false);
-                setAddingCustom((v) => !v);
-              }}
-            >
-              <Plus className="size-3.5" />
-              新增密钥
-            </Button>
-          ) : null}
+          {embedded ? renderAddSecretButton() : null}
         </div>
 
         <div className="divide-y divide-border/70 rounded-xl border border-border/80 bg-card/60">
@@ -239,7 +267,7 @@ export function SecretsAndProbePanel({
               }}
               onSubmit={(e) => {
                 e.preventDefault();
-                void commitSecretUpdate(customKey, customVal);
+                void commitSecretUpdate(customKey, customVal, ADD_FORM_SAVE_KEY);
               }}
             >
               <div className="flex items-center justify-between gap-2">
@@ -264,16 +292,9 @@ export function SecretsAndProbePanel({
                   value={customVal}
                   onChange={setCustomVal}
                   placeholder="输入密钥值"
-                  rightIcon={
-                    <button
-                      type="button"
-                      aria-label={showCustomVal ? "隐藏密钥" : "显示密钥"}
-                      onClick={() => setShowCustomVal((v) => !v)}
-                      className="!size-8 text-muted-foreground transition-colors hover:text-foreground"
-                    >
-                      {showCustomVal ? <EyeOff className="size-3.5" /> : <Eye className="size-3.5" />}
-                    </button>
-                  }
+                  rightIcon={renderVisibilityToggle(showCustomVal, () =>
+                    setShowCustomVal((v) => !v),
+                  )}
                 />
               </div>
               <div className="flex items-center justify-end gap-2">
@@ -291,7 +312,7 @@ export function SecretsAndProbePanel({
                 <StatefulButton
                   type="submit"
                   size="sm"
-                  state={saveState}
+                  state={saveStates[ADD_FORM_SAVE_KEY] ?? "idle"}
                   loadingText="保存中…"
                   successText="已保存"
                   icon={<Save className="size-3.5" />}
@@ -336,7 +357,7 @@ export function SecretsAndProbePanel({
                       }}
                       onSubmit={(e) => {
                         e.preventDefault();
-                        void commitSecretUpdate(item.key, editValue);
+                        void commitSecretUpdate(item.key, editValue, item.key);
                       }}
                     >
                       <div className="flex-1">
@@ -347,26 +368,15 @@ export function SecretsAndProbePanel({
                           onChange={setEditValue}
                           placeholder="输入新密钥值"
                           autoFocus
-                          rightIcon={
-                            <button
-                              type="button"
-                              aria-label={showEditValue ? "隐藏密钥" : "显示密钥"}
-                              onClick={() => setShowEditValue((v) => !v)}
-                              className="!size-8 text-muted-foreground transition-colors hover:text-foreground"
-                            >
-                              {showEditValue ? (
-                                <EyeOff className="size-3.5" />
-                              ) : (
-                                <Eye className="size-3.5" />
-                              )}
-                            </button>
-                          }
+                          rightIcon={renderVisibilityToggle(showEditValue, () =>
+                            setShowEditValue((v) => !v),
+                          )}
                         />
                       </div>
                       <StatefulButton
                         type="submit"
                         size="sm"
-                        state={saveState}
+                        state={saveStates[item.key] ?? "idle"}
                         loadingText="保存…"
                         successText="已保存"
                       >
@@ -418,18 +428,7 @@ export function SecretsAndProbePanel({
               服务连通性检测
             </h3>
           </div>
-          {embedded ? (
-            <Button
-              type="button"
-              size="sm"
-              variant="outline"
-              disabled={probing}
-              onClick={() => void runProbe("all")}
-            >
-              <Activity className={`size-3.5 ${probingTarget === "all" ? "animate-pulse" : ""}`} />
-              {probingTarget === "all" ? "全链路检测中…" : "检测全部链路"}
-            </Button>
-          ) : null}
+          {embedded ? renderProbeAllButton("outline") : null}
         </div>
 
         <div className="divide-y divide-border/70 rounded-xl border border-border/80 bg-card/60">
@@ -461,7 +460,7 @@ export function SecretsAndProbePanel({
                       </AnimatedBadge>
                     )}
                   </div>
-                  <p className="mt-0.5 text-xs text-muted-foreground">
+                  <p className="mt-0.5 break-words text-xs text-muted-foreground">
                     {r ? r.message : description}
                   </p>
                 </div>

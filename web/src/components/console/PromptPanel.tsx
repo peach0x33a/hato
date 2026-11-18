@@ -14,7 +14,7 @@ import {
   Trash2,
   X,
 } from "lucide-react";
-import { type FormEvent, useCallback, useEffect, useMemo, useState } from "react";
+import { type FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   api,
   type HatoConfig,
@@ -29,6 +29,7 @@ export interface PromptPanelProps {
   promptPath: string;
   initialPrompt: string;
   promptLayers?: PromptLayersSnapshot;
+  onDirtyChange?: (dirty: boolean) => void;
   onSaved: (nextPrompt: string, changes?: string[]) => void;
   onLayersSynced?: (next: {
     hatoConfig?: HatoConfig;
@@ -224,6 +225,7 @@ export function PromptPanel({
   promptPath,
   initialPrompt,
   promptLayers,
+  onDirtyChange,
   onSaved,
   onLayersSynced,
   onToast,
@@ -252,6 +254,7 @@ export function PromptPanel({
   });
   const [viewMode, setViewMode] = useState<"edit" | "preview">("edit");
   const [savePhase, setSavePhase] = useState<"idle" | "saving" | "saved">("idle");
+  const saveTimerRef = useRef<number | null>(null);
   const [draggingToken, setDraggingToken] = useState<string | null>(null);
   const [dragOverToken, setDragOverToken] = useState<string | null>(null);
   const [confirmDeleteBlock, setConfirmDeleteBlock] = useState<string | null>(null);
@@ -266,6 +269,14 @@ export function PromptPanel({
   const [creatingBlock, setCreatingBlock] = useState(false);
 
   // Sync incoming snapshots from backend
+  useEffect(() => {
+    return () => {
+      if (saveTimerRef.current !== null) {
+        window.clearTimeout(saveTimerRef.current);
+      }
+    };
+  }, []);
+
   useEffect(() => {
     const expanded = expandLayersToItems(promptLayers, promptPath);
     setItems(expanded);
@@ -340,6 +351,20 @@ export function PromptPanel({
   }, [items, baselineItems]);
 
   const anyDirty = soulDirty || dirtyBlockNames.length > 0 || orderOrEnableDirty;
+
+  useEffect(() => {
+    onDirtyChange?.(anyDirty);
+  }, [anyDirty, onDirtyChange]);
+
+  useEffect(() => {
+    if (!anyDirty) return;
+    const handleBeforeUnload = (e: BeforeUnloadEvent) => {
+      e.preventDefault();
+      e.returnValue = "";
+    };
+    window.addEventListener("beforeunload", handleBeforeUnload);
+    return () => window.removeEventListener("beforeunload", handleBeforeUnload);
+  }, [anyDirty]);
 
   const liveCombinedPreview = useMemo(() => {
     const parts: string[] = [];
@@ -483,7 +508,10 @@ export function PromptPanel({
           allChanges.length > 0 ? allChanges.join("；") : "当前已是最新状态",
         status: "success",
       });
-      window.setTimeout(() => setSavePhase("idle"), 1600);
+      if (saveTimerRef.current !== null) {
+        window.clearTimeout(saveTimerRef.current);
+      }
+      saveTimerRef.current = window.setTimeout(() => setSavePhase("idle"), 1600);
     } catch (err) {
       setSavePhase("idle");
       onToast({
@@ -610,11 +638,11 @@ export function PromptPanel({
   return (
     <div className="flex min-h-full flex-col lg:h-full lg:min-h-0">
       {/* Sticky Page Header */}
-      <div className="sticky top-0 z-20 shrink-0 border-b border-border bg-background/95 px-6 py-3.5 backdrop-blur-sm">
+      <div className="sticky top-0 z-30 shrink-0 border-b border-border bg-background px-6 py-3.5">
         <div className="mx-auto flex max-w-[1280px] flex-wrap items-center justify-between gap-4">
           <div className="flex min-w-0 items-center gap-3">
             <h1 className="text-base font-semibold tracking-tight text-foreground">
-              提示词与层级管理
+              提示词
             </h1>
             {anyDirty ? (
               <AnimatedBadge status="warning" size="sm">
@@ -690,13 +718,15 @@ export function PromptPanel({
             <h2 className="text-xs font-semibold tracking-wide text-foreground">
               提示词编排顺序
             </h2>
-            <p className="mt-0.5 text-[11px] text-muted-foreground">
-              拖拽或上下微调注入顺序，右侧开关控制启停
-            </p>
           </div>
 
           <div className="flex-1 divide-y divide-border/60 lg:min-h-0 lg:overflow-y-auto">
-            {items.map((item, idx) => {
+            {items.length === 0 ? (
+              <div className="flex h-32 items-center justify-center px-4 text-xs text-muted-foreground">
+                暂无提示词层级
+              </div>
+            ) : (
+              items.map((item, idx) => {
               const badge = KIND_BADGE[item.kind];
               const isSelected = selectedItem?.token === item.token;
               const charLen = getItemContent(item).trim().length;
@@ -798,28 +828,16 @@ export function PromptPanel({
                       <ArrowDown className="size-3.5" />
                     </button>
 
-                    <button
-                      type="button"
-                      role="switch"
-                      aria-checked={item.enabled}
-                      aria-label={`${item.enabled ? "禁用" : "启用"} ${item.name}`}
-                      onClick={() => toggleItemEnabled(item.token)}
-                      className={`relative ml-1 inline-flex h-5 w-9 shrink-0 cursor-pointer items-center rounded-full border transition-colors duration-150 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring ${
-                        item.enabled
-                          ? "border-primary bg-primary"
-                          : "border-border bg-muted"
-                      }`}
-                    >
-                      <span
-                        className={`pointer-events-none inline-block size-3.5 rounded-full bg-background shadow-xs transition-transform duration-150 ${
-                          item.enabled ? "translate-x-[17px]" : "translate-x-0.5"
-                        }`}
-                      />
-                    </button>
+                    <Switch
+                      className="ml-1"
+                      checked={item.enabled}
+                      onCheckedChange={() => toggleItemEnabled(item.token)}
+                      ariaLabel={`${item.enabled ? "禁用" : "启用"} ${item.name}`}
+                    />
                   </div>
                 </div>
               );
-            })}
+            }))}
           </div>
 
           <div className="mt-auto flex shrink-0 items-center justify-between gap-2 border-t border-border px-5 py-3">
@@ -912,59 +930,59 @@ export function PromptPanel({
             ) : null}
           </div>
 
-          {viewMode === "edit" && selectedItem ? (
-            <div className="flex min-h-0 flex-1 flex-col gap-3 px-6 py-4">
-              <div className="flex shrink-0 flex-wrap items-center justify-between gap-2">
-                <div className="flex min-w-0 items-center gap-2">
-                  <span
-                    className={`shrink-0 rounded border px-1.5 py-0.5 text-[10px] font-medium ${KIND_BADGE[selectedItem.kind].className}`}
-                  >
-                    {KIND_BADGE[selectedItem.kind].label}
-                  </span>
-                  <span className="truncate font-mono text-xs text-muted-foreground">
-                    {selectedItem.path}
-                  </span>
+          {viewMode === "edit" ? (
+            selectedItem ? (
+              <div className="flex min-h-0 flex-1 flex-col gap-3 px-6 py-4">
+                <div className="flex shrink-0 flex-wrap items-center justify-between gap-2">
+                  <div className="flex min-w-0 items-center gap-2">
+                    <span
+                      className={`shrink-0 rounded border px-1.5 py-0.5 text-[10px] font-medium ${KIND_BADGE[selectedItem.kind].className}`}
+                    >
+                      {KIND_BADGE[selectedItem.kind].label}
+                    </span>
+                    <span className="truncate font-mono text-xs text-muted-foreground">
+                      {selectedItem.path}
+                    </span>
+                  </div>
                 </div>
 
-                {!selectedItem.enabled ? (
-                  <span className="rounded-md bg-muted px-2 py-0.5 text-[11px] font-medium text-muted-foreground">
-                    当前已禁用（不会注入对话上下文）
-                  </span>
-                ) : null}
-              </div>
-
-              {selectedItem.kind === "system" ? (
-                <textarea
-                  readOnly
-                  value={selectedContent}
-                  aria-label="系统提示词只读查看"
-                  className="min-h-[360px] w-full flex-1 resize-none rounded-lg bg-muted/30 p-4 font-mono text-[13px] leading-relaxed text-muted-foreground focus:outline-none lg:min-h-0"
-                />
-              ) : (
-                <textarea
-                  value={selectedContent}
-                  onChange={(e) => {
-                    const nextVal = e.target.value;
-                    if (selectedItem.kind === "soul") {
-                      setSoulDraft(nextVal);
-                    } else {
-                      setBlockDrafts((prev) => ({
-                        ...prev,
-                        [selectedItem.name]: nextVal,
-                      }));
+                {selectedItem.kind === "system" ? (
+                  <textarea
+                    readOnly
+                    value={selectedContent}
+                    aria-label="系统提示词只读查看"
+                    className="min-h-[360px] w-full flex-1 resize-none rounded-lg bg-muted/30 p-4 font-mono text-[13px] leading-relaxed text-muted-foreground focus:outline-none lg:min-h-0"
+                  />
+                ) : (
+                  <textarea
+                    value={selectedContent}
+                    onChange={(e) => {
+                      const nextVal = e.target.value;
+                      if (selectedItem.kind === "soul") {
+                        setSoulDraft(nextVal);
+                      } else {
+                        setBlockDrafts((prev) => ({
+                          ...prev,
+                          [selectedItem.name]: nextVal,
+                        }));
+                      }
+                    }}
+                    spellCheck={false}
+                    placeholder={
+                      selectedItem.kind === "user"
+                        ? "输入注入到模型系统上下文中的用户自定义提示词内容…"
+                        : "输入人设定义（soul.md）…"
                     }
-                  }}
-                  spellCheck={false}
-                  placeholder={
-                    selectedItem.kind === "user"
-                      ? "输入注入到模型系统上下文中的用户自定义提示词内容…"
-                      : "输入人设定义（soul.md）…"
-                  }
-                  aria-label={`编辑 ${selectedItem.name}`}
-                  className="min-h-[360px] w-full flex-1 resize-none rounded-lg bg-muted/25 p-4 font-mono text-[13px] leading-relaxed text-foreground transition-colors placeholder:text-muted-foreground/60 focus:bg-muted/35 focus:ring-1 focus:ring-ring/40 focus:outline-none lg:min-h-0"
-                />
-              )}
-            </div>
+                    aria-label={`编辑 ${selectedItem.name}`}
+                    className="min-h-[360px] w-full flex-1 resize-none rounded-lg bg-muted/25 p-4 font-mono text-[13px] leading-relaxed text-foreground transition-colors placeholder:text-muted-foreground/60 focus:bg-muted/35 focus:ring-1 focus:ring-ring/40 focus:outline-none lg:min-h-0"
+                  />
+                )}
+              </div>
+            ) : (
+              <div className="flex min-h-0 flex-1 items-center justify-center px-6 py-4 text-xs text-muted-foreground">
+                暂无可编辑的提示词层级
+              </div>
+            )
           ) : (
             <div className="flex min-h-0 flex-1 flex-col gap-3 px-6 py-4">
               <div className="flex shrink-0 flex-wrap items-center gap-1.5 text-xs">
@@ -1082,13 +1100,8 @@ export function PromptPanel({
               </div>
 
               <div className="flex items-center justify-between gap-3 border-t border-border pt-3">
-                <div>
-                  <div className="text-xs font-medium text-foreground">
-                    创建后立即启用并加入编排
-                  </div>
-                  <div className="text-[11px] text-muted-foreground">
-                    关闭则先保存为禁用状态
-                  </div>
+                <div className="text-xs font-medium text-foreground">
+                  创建后立即启用并加入编排
                 </div>
                 <Switch
                   ariaLabel="创建后立即启用并加入编排"

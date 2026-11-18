@@ -697,7 +697,7 @@ export class WebConsoleServer {
         m.role === "assistant"
           ? splitIntoBubbles(m.content, {
               enabled: bubbleCfg.enabled,
-              maxPerTurn: Math.max(bubbleCfg.max_per_turn * 2, 6),
+              maxPerTurn: bubbleCfg.max_per_turn,
               delimiter: bubbleCfg.delimiter,
             })
           : m.content

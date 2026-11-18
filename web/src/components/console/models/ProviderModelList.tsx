@@ -30,14 +30,6 @@ import {
 
 export type ListFilterMode = "all" | "unused" | "issues";
 
-function middleTruncateUrl(url: string, maxLen = 36): string {
-  const trimmed = url.trim();
-  if (trimmed.length <= maxLen) return trimmed;
-  const head = Math.ceil((maxLen - 1) * 0.6);
-  const tail = maxLen - 1 - head;
-  return `${trimmed.slice(0, head)}…${trimmed.slice(-tail)}`;
-}
-
 function HighlightMatch({ text, query }: { text: string; query: string }) {
   const q = query.trim();
   if (!q) return <>{text}</>;
@@ -181,7 +173,7 @@ export function ProviderModelList({
     .filter((entry) => entry.showProvider);
 
   return (
-    <div className="flex flex-col overflow-hidden rounded-xl border border-zinc-200 bg-white dark:border-zinc-800/90 dark:bg-[#0f1418]">
+    <div className="flex flex-col rounded-xl border border-zinc-200 bg-white dark:border-zinc-800/90 dark:bg-[#0f1418]">
       {/* Search + Add Provider + Quick Filters */}
       <div className="flex flex-col gap-2.5 border-b border-zinc-200/80 p-3 dark:border-zinc-800/80">
         <div className="flex items-center gap-2">
@@ -431,7 +423,7 @@ export function ProviderModelList({
                           title={provider.baseUrl}
                           className="min-w-0 flex-1 truncate font-mono text-[11px] text-zinc-400 dark:text-zinc-500"
                         >
-                          {middleTruncateUrl(provider.baseUrl, 24)}
+                          {provider.baseUrl}
                         </span>
                       </>
                     ) : null}
@@ -523,8 +515,8 @@ export function ProviderModelList({
                                 ) : null}
                               </div>
 
-                              <div className="flex items-center gap-1.5 truncate font-mono text-xs text-zinc-500 dark:text-zinc-400">
-                                <span className="truncate">
+                              <div className="flex min-w-0 items-center gap-1.5 font-mono text-xs text-zinc-500 dark:text-zinc-400">
+                                <span className="min-w-0 truncate">
                                   <HighlightMatch
                                     text={mid || "未设 ID"}
                                     query={searchQuery}
@@ -532,18 +524,18 @@ export function ProviderModelList({
                                 </span>
                                 {ctxText ? (
                                   <>
-                                    <span aria-hidden="true">·</span>
+                                    <span className="shrink-0" aria-hidden="true">·</span>
                                     <span className="shrink-0 tabular-nums">{ctxText}</span>
                                   </>
                                 ) : null}
                                 {isTesting ? (
                                   <>
-                                    <span aria-hidden="true">·</span>
+                                    <span className="shrink-0" aria-hidden="true">·</span>
                                     <Loader2 className="h-3 w-3 shrink-0 animate-spin text-emerald-500" />
                                   </>
                                 ) : outcome ? (
                                   <>
-                                    <span aria-hidden="true">·</span>
+                                    <span className="shrink-0" aria-hidden="true">·</span>
                                     <span
                                       className={`shrink-0 ${
                                         !outcome.ok

@@ -31,7 +31,7 @@ import {
 } from "../skills/loader.js";
 import { computeTurnMetrics, extractTraceSteps, formatLlmTelemetryLog } from "../stats/metrics.js";
 import { logWarn } from "../utils/logger.js";
-import { splitIntoBubbles } from "./bubbles.js";
+import { joinPersistedBubbles, splitIntoBubbles } from "./bubbles.js";
 import {
   buildEphemeralContextBlock,
   buildStaticSystemPrompt,
@@ -673,10 +673,10 @@ export class PersonaRuntime {
         const callTtftMs =
           msgFirstDeltaPerf !== null ? Math.max(0, Math.round(msgFirstDeltaPerf - callStart)) : callTotalMs;
         const callDecodeMs =
-          msgFirstDeltaPerf !== null
-            ? Math.max(1, nowPerf - msgFirstDeltaPerf)
-            : Math.max(1, callTotalMs - callTtftMs);
-        totalDecodeMs += callDecodeMs;
+          msgFirstDeltaPerf !== null ? Math.max(1, nowPerf - msgFirstDeltaPerf) : undefined;
+        if (callDecodeMs !== undefined) {
+          totalDecodeMs += callDecodeMs;
+        }
         this.activeCallStartPerf = null;
         msgFirstDeltaPerf = null;
 
@@ -871,7 +871,10 @@ export class PersonaRuntime {
         })
       : [];
     const allBubbles = [...preReplyState.sentBubbles, ...bubbles];
-    const persistedText = allBubbles.join("\n\n");
+    const persistedText = joinPersistedBubbles(allBubbles, {
+      enabled: this.hatoConfig.gateway.bubbles.enabled,
+      delimiter: this.hatoConfig.gateway.bubbles.delimiter,
+    });
 
     if (!isSilentNoReply && persistedText.length > 0) {
       this.repo.appendRawMessage({
@@ -974,7 +977,10 @@ export class PersonaRuntime {
       delimiter: this.hatoConfig.gateway.bubbles.delimiter,
     });
 
-    const persisted = bubbles.join("\n\n");
+    const persisted = joinPersistedBubbles(bubbles, {
+      enabled: this.hatoConfig.gateway.bubbles.enabled,
+      delimiter: this.hatoConfig.gateway.bubbles.delimiter,
+    });
     if (persisted) {
       this.repo.appendRawMessage({
         canonicalUserId: params.canonicalUserId,
@@ -1098,7 +1104,7 @@ export class PersonaRuntime {
     const ttftMs =
       firstDeltaPerf !== null ? Math.max(0, Math.round(firstDeltaPerf - callStartPerf)) : latencyMs;
     const decodeMs =
-      firstDeltaPerf !== null ? Math.max(1, nowPerf - firstDeltaPerf) : Math.max(1, latencyMs - ttftMs);
+      firstDeltaPerf !== null ? Math.max(1, nowPerf - firstDeltaPerf) : undefined;
 
     console.log(
       formatLlmTelemetryLog({

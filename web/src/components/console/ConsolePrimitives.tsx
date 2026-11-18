@@ -1,6 +1,7 @@
 import { Check, ChevronDown, Plus } from "lucide-react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import { type ReactNode, useCallback, useMemo, useRef, useState } from "react";
+import { SLOT_COLOR_MAP } from "@/components/console/models/types";
 import { Input, type InputProps } from "@/components/motion/input";
 import {
   Select,
@@ -348,6 +349,7 @@ export function ConsoleMultiSelect({
                     role="option"
                     aria-selected={checked}
                     disabled={locked}
+                    title={locked ? `至少保留 ${minSelected} 项` : undefined}
                     onClick={() => toggleValue(opt.value)}
                     className={cn(
                       "flex w-full items-center justify-between gap-2 rounded-md px-2.5 py-1.5 text-left text-xs transition-colors outline-none",
@@ -427,8 +429,6 @@ export function ConsoleInput({ size = "md", className, ...props }: ConsoleInputP
     />
   );
 }
-
-import { SLOT_COLOR_MAP } from "@/components/console/models/types";
 
 export function SlotBadge({ slot, className }: { slot: string; className?: string }) {
   const tone =

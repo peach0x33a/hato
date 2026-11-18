@@ -102,6 +102,9 @@ export function ProviderDrawer({
   onUpdateProviderSettings,
 }: ProviderDrawerProps) {
   const [form, setForm] = useState<ProviderDraft>(EMPTY_DRAFT);
+  const [initialFormSnapshot, setInitialFormSnapshot] = useState<string>(() =>
+    JSON.stringify(EMPTY_DRAFT),
+  );
   const [envManuallyEdited, setEnvManuallyEdited] = useState(false);
   const [showApiKey, setShowApiKey] = useState(false);
   const [showAdvanced, setShowAdvanced] = useState(false);
@@ -110,9 +113,10 @@ export function ProviderDrawer({
   useEffect(() => {
     if (!open) return;
     const timer = window.setTimeout(() => {
+      let nextForm: ProviderDraft;
       if (mode === "edit" && editingProvider) {
         const envKey = editingProvider.apiKeyEnv || deriveEnvName(editingProvider.name);
-        setForm({
+        nextForm = {
           name: editingProvider.name,
           displayName: editingProvider.displayName ?? "",
           protocol: editingProvider.protocol,
@@ -126,7 +130,7 @@ export function ProviderDrawer({
           initialModelName: "",
           initialModelVision: false,
           initialModelThinking: false,
-        });
+        };
         setEnvManuallyEdited(true);
         setShowAdvanced(
           Boolean(
@@ -136,7 +140,7 @@ export function ProviderDrawer({
           ),
         );
       } else if (savedDraft) {
-        setForm({ ...EMPTY_DRAFT, ...savedDraft });
+        nextForm = { ...EMPTY_DRAFT, ...savedDraft };
         setEnvManuallyEdited(Boolean(savedDraft.apiKeyEnv));
         setShowAdvanced(
           Boolean(
@@ -146,26 +150,40 @@ export function ProviderDrawer({
           ),
         );
       } else {
-        setForm(EMPTY_DRAFT);
+        nextForm = EMPTY_DRAFT;
         setEnvManuallyEdited(false);
         setShowAdvanced(false);
       }
+      setForm(nextForm);
+      setInitialFormSnapshot(JSON.stringify(nextForm));
       setShowApiKey(false);
       setValidationError(null);
     }, 0);
     return () => window.clearTimeout(timer);
   }, [open, mode, editingProvider, savedDraft, pendingSecrets]);
 
+  const isDrawerDirty = useMemo(
+    () => JSON.stringify(form) !== initialFormSnapshot,
+    [form, initialFormSnapshot],
+  );
+
   useEffect(() => {
     if (!open) return;
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
+        e.preventDefault();
+        if (
+          isDrawerDirty &&
+          !window.confirm("当前抽屉中有未保存的修改，确定放弃并关闭吗？")
+        ) {
+          return;
+        }
         onClose();
       }
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [open, onClose]);
+  }, [open, isDrawerDirty, onClose]);
 
   const effectiveEnvKey = useMemo(
     () => form.apiKeyEnv.trim() || deriveEnvName(form.name),
@@ -258,6 +276,17 @@ export function ProviderDrawer({
       return;
     }
 
+    try {
+      const parsed = new URL(trimmedUrl);
+      if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+        setValidationError("Base URL 须使用 http:// 或 https:// 协议");
+        return;
+      }
+    } catch {
+      setValidationError("Base URL 格式无效，请输入完整的 http(s):// 地址");
+      return;
+    }
+
     if (form.cacheTtlMinutes.trim()) {
       const ttlRes = validatePositiveIntInput(form.cacheTtlMinutes, "缓存 TTL（分钟）");
       if (!ttlRes.ok) {
@@ -275,6 +304,10 @@ export function ProviderDrawer({
     }
 
     const resolvedEnv = form.apiKeyEnv.trim() || deriveEnvName(trimmedName);
+    if (resolvedEnv && !/^[A-Za-z_][A-Za-z0-9_]*$/.test(resolvedEnv)) {
+      setValidationError("映射密钥变量名仅支持字母、数字和下划线，且不能以数字开头");
+      return;
+    }
 
     if (mode === "edit" && editingProvider) {
       onUpdateProviderSettings(editingProvider.uid, {
@@ -346,21 +379,14 @@ export function ProviderDrawer({
           >
             {/* Header */}
             <div className="flex items-center justify-between gap-4 border-b border-zinc-200 px-6 py-4 dark:border-zinc-800/90">
-              <div className="flex flex-col gap-0.5">
-                <h2
-                  id="provider-drawer-title"
-                  className="text-base font-semibold text-zinc-900 dark:text-zinc-100"
-                >
-                  {isEdit
-                    ? `配置供应商 · ${editingProvider?.name ?? ""}`
-                    : "添加供应商"}
-                </h2>
-                <p className="text-xs text-zinc-500 dark:text-zinc-400">
-                  {isEdit
-                    ? "编辑基础连接信息、接口协议与 API Key 鉴权配置"
-                    : "可一键套用常用预设，或在下方完成接口与密钥配置"}
-                </p>
-              </div>
+              <h2
+                id="provider-drawer-title"
+                className="text-base font-semibold text-zinc-900 dark:text-zinc-100"
+              >
+                {isEdit
+                  ? `配置供应商 · ${editingProvider?.name ?? ""}`
+                  : "添加供应商"}
+              </h2>
 
               <button
                 type="button"
@@ -506,15 +532,10 @@ export function ProviderDrawer({
 
               {/* Group 2: API Key Configuration in the same interface */}
               <div className="flex flex-col gap-4">
-                <div className="flex items-center justify-between gap-2">
-                  <h3 className="inline-flex items-center gap-1.5 text-xs font-semibold text-zinc-800 dark:text-zinc-200">
-                    <KeyRound className="h-3.5 w-3.5 text-emerald-500" />
-                    <span>API Key 鉴权配置</span>
-                  </h3>
-                  <span className="text-[11px] text-zinc-500 dark:text-zinc-400">
-                    同屏直配，无需跳转「密钥与自检」
-                  </span>
-                </div>
+                <h3 className="inline-flex items-center gap-1.5 text-xs font-semibold text-zinc-800 dark:text-zinc-200">
+                  <KeyRound className="h-3.5 w-3.5 text-emerald-500" />
+                  <span>API Key 鉴权配置</span>
+                </h3>
 
                 <div className="flex flex-col gap-1.5">
                   <div className="flex items-center justify-between gap-2">
@@ -578,6 +599,7 @@ export function ProviderDrawer({
                     type="text"
                     value={form.apiKeyEnv}
                     onChange={(e) => {
+                      setValidationError(null);
                       setEnvManuallyEdited(true);
                       setForm((prev) => ({
                         ...prev,
@@ -587,9 +609,6 @@ export function ProviderDrawer({
                     placeholder="例如 DEEPSEEK_API_KEY"
                     className="h-9 w-full rounded-lg border border-zinc-200 bg-zinc-50 px-3 font-mono text-xs text-zinc-900 placeholder:text-zinc-400 focus:border-emerald-500 focus:outline-none dark:border-zinc-800 dark:bg-[#090d10] dark:text-zinc-100 dark:placeholder:text-zinc-600"
                   />
-                  <p className="text-[11px] text-zinc-500 dark:text-zinc-500">
-                    作为运行时环境变量键名使用，可随供应商名称自动推导
-                  </p>
                 </div>
               </div>
 
