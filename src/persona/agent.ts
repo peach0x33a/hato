@@ -53,6 +53,11 @@ import {
 } from "./interruption.js";
 import { loadLayeredPrompts, type LoadedLayeredPrompts } from "./prompts.js";
 import { createPersonaReadOnlyTools } from "./tools.js";
+import {
+  buildToolIndexBlock,
+  createActivateToolsTool,
+  selectToolsForTurn,
+} from "./tool-disclosure.js";
 
 export const NO_REPLY_SENTINEL = "[NO_REPLY]";
 
@@ -96,6 +101,9 @@ export class PersonaRuntime {
   private layeredPrompts: LoadedLayeredPrompts | null = null;
   private personalSkills: SkillEntry[] = [];
   private personalSkillsIndexText = "";
+  private allTools: AgentTool<any>[] = [];
+  private toolIndexText = "";
+  private readonly sessionTools = new Set<string>();
   private lastTimeCardSnapshot = "";
   private activeCallStartPerf: number | null = null;
   private activeBeforeToolHook: ((toolName: string, input: unknown) => Promise<void>) | null = null;
@@ -131,6 +139,10 @@ export class PersonaRuntime {
         caption?: string;
       }) => Promise<{ ok: boolean; message: string }>)
     | null = null;
+  private activePhotoSender: SendPhotoToUserFn | null = null;
+  private renderMarkdownImageHandler:
+    | ((markdown: string, options?: { theme?: "light" | "dark" }) => Promise<Buffer>)
+    | null = null;
   private botProfileHandler:
     | ((input: {
         platform: "tg" | "qq";
@@ -162,7 +174,13 @@ export class PersonaRuntime {
     this.reloadPrompt();
     const resolved = this.modelRegistry.resolveSlot("persona");
     const canonicalUserId = this.hatoConfig.owner.canonical_user_id;
-    const tools = this.buildPersonaTools();
+    this.allTools = this.buildPersonaTools();
+    this.toolIndexText = buildToolIndexBlock(this.allTools);
+    const tools = selectToolsForTurn({
+      allTools: this.allTools,
+      userText: "",
+      hasPersonalSkills: this.personalSkills.length > 0,
+    });
 
     this.agent = new Agent({
       initialState: {
@@ -170,6 +188,7 @@ export class PersonaRuntime {
           this.basePersonaPrompt,
           this.repo,
           this.personalSkillsIndexText,
+          this.toolIndexText,
         ),
         model: resolved.model,
         thinkingLevel: clampThinkingLevel(resolved.model, resolved.model.reasoning ? "low" : "off"),
@@ -284,6 +303,17 @@ export class PersonaRuntime {
     }
   }
 
+  setRenderMarkdownImageHandler(
+    handler:
+      | ((markdown: string, options?: { theme?: "light" | "dark" }) => Promise<Buffer>)
+      | null,
+  ): void {
+    this.renderMarkdownImageHandler = handler;
+    if (!this.activeTurn) {
+      this.syncTools();
+    }
+  }
+
   setSendMessageHandler(
     handler:
       | ((input: {
@@ -349,7 +379,17 @@ export class PersonaRuntime {
   }
 
   syncTools(): void {
-    this.agent.state.tools = this.buildPersonaTools();
+    this.allTools = this.buildPersonaTools();
+    this.toolIndexText = buildToolIndexBlock(this.allTools);
+    this.agent.state.tools = selectToolsForTurn({
+      allTools: this.allTools,
+      userText: "",
+      hasPersonalSkills: this.personalSkills.length > 0,
+    });
+  }
+
+  getToolIndexText(): string {
+    return this.toolIndexText;
   }
 
   getPersonalSkills(): readonly SkillEntry[] {
@@ -370,6 +410,7 @@ export class PersonaRuntime {
       this.basePersonaPrompt,
       this.repo,
       this.personalSkillsIndexText,
+      this.toolIndexText,
     );
     const leadingSystem = createInitialSystemMessage(
       systemPromptText,
@@ -381,6 +422,16 @@ export class PersonaRuntime {
 
   private buildPersonaTools(): AgentTool<any>[] {
     const canonicalUserId = this.hatoConfig.owner.canonical_user_id;
+    const activateToolsTool = createActivateToolsTool({
+      getAllTools: () => this.allTools,
+      getActiveTools: () => this.agent.state.tools,
+      setActiveTools: (nextTools) => {
+        this.agent.state.tools = nextTools;
+      },
+      onActivated: (names) => {
+        for (const n of names) this.sessionTools.add(n);
+      },
+    });
     return createPersonaReadOnlyTools({
       repo: this.repo,
       canonicalUserId,
@@ -390,7 +441,10 @@ export class PersonaRuntime {
       browserRuntime: this.browserRuntime,
       getMemoryStore: () => this.memoryStore,
       enableReadSkillTool: this.personalSkills.length > 0,
-      extraTools: this.mcpPool?.getToolsForZone("personal") ?? [],
+      extraTools: [
+        activateToolsTool,
+        ...(this.mcpPool?.getToolsForZone("personal") ?? []),
+      ],
       ...(this.delegateHandler
         ? {
             onDelegate: (input: { hint: string; urgency?: "normal" | "high"; deliverFiles?: boolean }) =>
@@ -438,6 +492,35 @@ export class PersonaRuntime {
           }
         : {}),
       ...(this.botProfileHandler ? { onBotProfile: this.botProfileHandler } : {}),
+      ...(this.renderMarkdownImageHandler
+        ? {
+            onRenderMarkdownImage: async (input: {
+              markdown: string;
+              theme?: "light" | "dark";
+              caption?: string;
+            }) => {
+              if (!this.activePhotoSender) {
+                return { ok: false, message: "当前对话渠道暂不支持直接发送图片。" };
+              }
+              try {
+                const buffer = await this.renderMarkdownImageHandler!(input.markdown, {
+                  theme: input.theme ?? "light",
+                });
+                await this.activePhotoSender(buffer, input.caption);
+                return {
+                  ok: true,
+                  message: "已将 Markdown 渲染为图片并发送给用户。",
+                  bytes: buffer.byteLength,
+                };
+              } catch (err) {
+                return {
+                  ok: false,
+                  message: `渲染或发送图片失败：${err instanceof Error ? err.message : String(err)}`,
+                };
+              }
+            },
+          }
+        : {}),
       ...(this.stickerHandlers
         ? {
             onStickerSearch: (input: { query: string; emotion?: string; limit?: number }) =>
@@ -510,7 +593,13 @@ export class PersonaRuntime {
   resetSession(): void {
     this.lastTimeCardSnapshot = "";
     this.pendingSupersededImages.clear();
+    this.sessionTools.clear();
     this.agent.clearAllQueues();
+    this.agent.state.tools = selectToolsForTurn({
+      allTools: this.allTools,
+      userText: "",
+      hasPersonalSkills: this.personalSkills.length > 0,
+    });
     this.refreshTranscriptFromDb();
   }
 
@@ -840,7 +929,38 @@ export class PersonaRuntime {
       }
     }
 
+    this.activePhotoSender = trackedSendPhoto ?? null;
     this.browserRuntime?.setPhotoSender(trackedSendPhoto ?? null);
+    const turnTools = selectToolsForTurn({
+      allTools: this.allTools,
+      userText: batch.combinedText,
+      hasImages: effectiveImages.length > 0,
+      hasAttachments: batch.attachments.length > 0,
+      hasPersonalSkills: this.personalSkills.length > 0,
+      previouslyActivated: this.sessionTools,
+    });
+    for (const t of turnTools) {
+      this.sessionTools.add(t.name);
+    }
+    this.agent.state.tools = turnTools;
+    if (
+      this.agent.state.messages.length === 1 &&
+      this.agent.state.messages[0]?.role === "system"
+    ) {
+      const systemPromptText = buildStaticSystemPrompt(
+        this.basePersonaPrompt,
+        this.repo,
+        this.personalSkillsIndexText,
+        this.toolIndexText,
+      );
+      const refreshedLeading = createInitialSystemMessage(
+        systemPromptText,
+        turnTools.map(toToolDeclaration),
+      );
+      if (refreshedLeading) {
+        this.agent.state.messages = [refreshedLeading];
+      }
+    }
     let promptErr: unknown = null;
     try {
       if (!turnState.abortedForSupersede && !options?.shouldSuppressSend?.()) {
@@ -857,6 +977,7 @@ export class PersonaRuntime {
       turnState.promptSettled = true;
       this.activeBeforeToolHook = null;
       this.activeRetryNoticeHook = null;
+      this.activePhotoSender = null;
       this.browserRuntime?.setPhotoSender(null);
       unsubscribe();
       this.activeCallStartPerf = null;
@@ -1173,6 +1294,7 @@ export class PersonaRuntime {
       this.basePersonaPrompt,
       this.repo,
       this.personalSkillsIndexText,
+      this.toolIndexText,
     );
     const tz = this.getEffectiveTimezone(params.canonicalUserId);
 

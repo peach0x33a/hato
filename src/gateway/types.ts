@@ -29,6 +29,7 @@ export interface InboundMessage {
   platformMsgId: string;
   canonicalUserId: string;
   replyToPlatformMsgId?: string;
+  replyToText?: string;
   text: string;
   attachments: InboundAttachment[];
   images?: ImageContent[];

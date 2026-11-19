@@ -46,7 +46,9 @@ export interface PromptPanelProps {
   }) => void;
 }
 
-type PromptKind = "user" | "system" | "soul";
+type PromptKind = "user" | "system" | "soul" | "injected";
+
+const INJECTED_TOKEN = "__system_injected__";
 
 interface OrderedPromptItem {
   token: string;
@@ -221,6 +223,11 @@ const KIND_BADGE: Record<PromptKind, { label: string; className: string }> = {
     className:
       "border-violet-500/30 bg-violet-500/10 text-violet-700 dark:text-violet-300",
   },
+  injected: {
+    label: "系统注入",
+    className:
+      "border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300",
+  },
 };
 
 export function PromptPanel({
@@ -312,13 +319,27 @@ export function PromptPanel({
     return map;
   }, [promptLayers]);
 
+  const systemInjectedText = (promptLayers?.systemInjectedText ?? "").trim();
+
+  const injectedItem = useMemo<OrderedPromptItem>(
+    () => ({
+      token: INJECTED_TOKEN,
+      kind: "injected",
+      name: "runtime-injected",
+      path: "runtime://system-injected",
+      enabled: true,
+    }),
+    [],
+  );
+
   const getItemContent = useCallback(
     (item: OrderedPromptItem): string => {
       if (item.kind === "soul") return soulDraft;
       if (item.kind === "system") return promptLayers?.systemText ?? "";
+      if (item.kind === "injected") return systemInjectedText;
       return blockDrafts[item.name] ?? savedBlocksMap.get(item.name) ?? "";
     },
-    [soulDraft, promptLayers?.systemText, blockDrafts, savedBlocksMap],
+    [soulDraft, promptLayers?.systemText, systemInjectedText, blockDrafts, savedBlocksMap],
   );
 
   const isItemContentDirty = useCallback(
@@ -376,8 +397,11 @@ export function PromptPanel({
       const text = getItemContent(item).trim();
       if (text) parts.push(text);
     }
+    if (systemInjectedText) {
+      parts.push(systemInjectedText);
+    }
     return parts.join("\n\n");
-  }, [items, getItemContent]);
+  }, [items, getItemContent, systemInjectedText]);
 
   const enabledItems = useMemo(
     () => items.filter((it) => it.enabled),
@@ -385,7 +409,9 @@ export function PromptPanel({
   );
 
   const selectedItem =
-    items.find((it) => it.token === selectedToken) ?? items[0] ?? null;
+    selectedToken === INJECTED_TOKEN
+      ? injectedItem
+      : items.find((it) => it.token === selectedToken) ?? items[0] ?? null;
 
   const moveItem = (index: number, delta: -1 | 1) => {
     const targetIndex = index + delta;
@@ -857,6 +883,50 @@ export function PromptPanel({
                 </div>
               );
             }))}
+            {/* Fixed, immutable runtime-injected block at the tail */}
+            <div
+              className={`flex items-center gap-2 border-l-2 px-3.5 py-2.5 transition-colors ${
+                selectedItem?.token === INJECTED_TOKEN
+                  ? "border-l-primary bg-primary/6"
+                  : "border-l-transparent hover:bg-muted/40"
+              }`}
+            >
+              <span
+                className="text-muted-foreground/50"
+                title="系统固定注入（不可调序）"
+                aria-hidden="true"
+              >
+                <Lock className="size-3.5" />
+              </span>
+              <button
+                type="button"
+                onClick={() => {
+                  setSelectedToken(INJECTED_TOKEN);
+                  setViewMode("edit");
+                }}
+                className="flex min-w-0 flex-1 flex-col gap-1 text-left focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
+              >
+                <div className="flex min-w-0 items-center gap-1.5">
+                  <span className="font-mono text-[10px] text-muted-foreground tabular-nums">
+                    #{items.length + 1}
+                  </span>
+                  <span
+                    className={`shrink-0 rounded border px-1.5 py-0.5 text-[10px] font-medium leading-none ${KIND_BADGE.injected.className}`}
+                  >
+                    {KIND_BADGE.injected.label}
+                  </span>
+                  <span className="truncate font-mono text-xs font-medium text-foreground">
+                    {injectedItem.name}
+                  </span>
+                </div>
+                <div className="flex items-center gap-2 text-[11px] text-muted-foreground tabular-nums">
+                  <span>{systemInjectedText.length} 字</span>
+                </div>
+              </button>
+              <span className="shrink-0 rounded border border-border bg-muted/50 px-1.5 py-0.5 text-[10px] text-muted-foreground">
+                固定末尾
+              </span>
+            </div>
           </div>
         </section>
 
@@ -900,10 +970,14 @@ export function PromptPanel({
                 <span className="font-mono text-xs text-muted-foreground tabular-nums">
                   {selectedContent.length} 字符 · {selectedLineCount} 行
                 </span>
-                {selectedItem.kind === "system" ? (
+                {selectedItem.kind === "system" || selectedItem.kind === "injected" ? (
                   <span className="inline-flex items-center gap-1 rounded-md border border-border bg-muted/60 px-2 py-0.5 text-[11px] font-medium text-muted-foreground">
                     <Lock className="size-3" />
-                    <span>系统只读</span>
+                    <span>
+                      {selectedItem.kind === "injected"
+                        ? "系统注入 · 不可编辑/调序/禁用/删除"
+                        : "系统只读"}
+                    </span>
                   </span>
                 ) : null}
                 {selectedItem.kind === "user" ? (
@@ -950,11 +1024,19 @@ export function PromptPanel({
                   </div>
                 </div>
 
-                {selectedItem.kind === "system" ? (
+                {selectedItem.kind === "system" || selectedItem.kind === "injected" ? (
                   <textarea
                     readOnly
-                    value={selectedContent}
-                    aria-label="系统提示词只读查看"
+                    value={
+                      selectedItem.kind === "injected"
+                        ? selectedContent || "（当前暂无动态注入内容：关系约定与 Personal Skills 索引均为空）"
+                        : selectedContent
+                    }
+                    aria-label={
+                      selectedItem.kind === "injected"
+                        ? "系统注入提示词只读查看"
+                        : "系统提示词只读查看"
+                    }
                     className="min-h-[360px] w-full flex-1 resize-none rounded-lg bg-muted/30 p-4 font-mono text-[13px] leading-relaxed text-muted-foreground focus:outline-none lg:min-h-0"
                   />
                 ) : (

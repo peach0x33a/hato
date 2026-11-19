@@ -445,6 +445,7 @@ export interface PromptLayersSnapshot {
   soulPath: string;
   soulText: string;
   combinedText: string;
+  systemInjectedText?: string;
 }
 
 export interface TelegramUserProfile {

@@ -64,15 +64,15 @@ export interface EphemeralTailBuilderInput {
 }
 
 /**
- * Assemble Layer 1 static system prompt from persona markdown, static relationship facts,
- * and the deterministic Level 1 Personal Skills index.
+ * Build the immutable runtime-injected suffix appended after the configurable Layer 1 prompt
+ * (static relationship facts + Level 1 Personal Skills index).
  */
-export function buildStaticSystemPrompt(
-  basePersonaPrompt: string,
+export function buildSystemInjectedPromptText(
   repo: HatoRepository,
   personalSkillsIndexText = "",
+  toolIndexText = "",
 ): string {
-  const parts = [basePersonaPrompt.trim()];
+  const parts: string[] = [];
   const facts = repo.listRelationshipFacts();
   if (facts.length > 0) {
     const factLines = facts.map((f) => `- ${f.key}: ${f.value}`).join("\n");
@@ -81,7 +81,24 @@ export function buildStaticSystemPrompt(
   if (personalSkillsIndexText.trim().length > 0) {
     parts.push(personalSkillsIndexText.trim());
   }
-  return parts.filter(Boolean).join("\n\n");
+  if (toolIndexText.trim().length > 0) {
+    parts.push(toolIndexText.trim());
+  }
+  return parts.join("\n\n");
+}
+
+/**
+ * Assemble Layer 1 static system prompt from persona markdown, static relationship facts,
+ * the deterministic Level 1 Personal Skills index, and the on-demand tool index.
+ */
+export function buildStaticSystemPrompt(
+  basePersonaPrompt: string,
+  repo: HatoRepository,
+  personalSkillsIndexText = "",
+  toolIndexText = "",
+): string {
+  const injected = buildSystemInjectedPromptText(repo, personalSkillsIndexText, toolIndexText);
+  return [basePersonaPrompt.trim(), injected].filter(Boolean).join("\n\n");
 }
 
 /**

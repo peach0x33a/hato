@@ -158,6 +158,12 @@ const SendMessageParams = obj({
   caption: opt(str({ description: "Optional short caption when sending file_path" })),
 });
 
+const RenderMarkdownImageParams = obj({
+  markdown: str({ description: "Markdown text to render into a PNG image" }),
+  theme: opt(oneOf(["light", "dark"], { description: "Color theme: light (default) or dark" })),
+  caption: opt(str({ description: "Optional short caption sent alongside the image" })),
+});
+
 const StickerSearchParams = obj({
   query: str({ description: "Keywords describing desired mood, scene, text, or visual content" }),
   emotion: opt(str({ description: "Optional emotion filter (e.g. 开心, 委屈, 吐槽, 贴贴)" })),
@@ -263,6 +269,11 @@ export function createPersonaReadOnlyTools(params: {
     shortDescription?: string;
     avatarPath?: string;
   }) => Promise<{ ok: boolean; message: string; details?: Record<string, unknown> }>;
+  onRenderMarkdownImage?: (input: {
+    markdown: string;
+    theme?: "light" | "dark";
+    caption?: string;
+  }) => Promise<{ ok: boolean; message: string; bytes?: number }>;
   onMemoryRecalled?: (ids: string[]) => void;
   onBeforeToolExecute?: (toolName: string, input: unknown) => Promise<void>;
 }): AgentTool<any>[] {
@@ -943,6 +954,29 @@ export function createPersonaReadOnlyTools(params: {
       },
     };
     tools.push(botProfileTool);
+  }
+
+  if (params.onRenderMarkdownImage) {
+    const renderFn = params.onRenderMarkdownImage;
+    const renderTool: AgentTool<typeof RenderMarkdownImageParams> = {
+      name: "render_markdown_image",
+      label: "Markdown 渲染为图片",
+      description:
+        "按需将 Markdown 文本（支持标题、列表、表格、代码块、引用等）渲染为 PNG 图片并直接发送给用户。仅在用户要求生成图片，或确实需要用图片卡片清晰展示复杂表格/长代码/结构化内容时调用；日常闲聊不要主动推销或滥用，发送图片后无需再用文字重复倾倒全文。",
+      parameters: RenderMarkdownImageParams,
+      async execute(_toolCallId, input) {
+        const res = await renderFn({
+          markdown: input.markdown,
+          theme: input.theme,
+          caption: input.caption,
+        });
+        return {
+          content: [{ type: "text", text: res.message }],
+          details: { ok: res.ok, ...(res.bytes !== undefined ? { bytes: res.bytes } : {}) },
+        };
+      },
+    };
+    tools.push(renderTool);
   }
 
   if (params.extraTools && params.extraTools.length > 0) {

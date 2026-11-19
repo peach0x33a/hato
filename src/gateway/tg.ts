@@ -18,6 +18,7 @@ import {
   selectTelegramStickerDownloadCandidates,
 } from "./media.js";
 import { formatGatewayMessageLog } from "./msg-log.js";
+import { extractTelegramReplyText } from "./reply-context.js";
 import { markdownToTelegramHtml } from "./tg-markdown.js";
 import type {
   ChannelAdapter,
@@ -434,6 +435,7 @@ export class TelegramAdapter implements ChannelAdapter {
         platformMsgId: String(msg.message_id),
         canonicalUserId: this.config.owner.canonical_user_id,
         replyToPlatformMsgId: msg.reply_to_message ? String(msg.reply_to_message.message_id) : undefined,
+        replyToText: extractTelegramReplyText(msg.reply_to_message),
         text,
         attachments,
         images: images.length > 0 ? images : undefined,

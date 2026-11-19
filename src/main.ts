@@ -1,7 +1,7 @@
 import { basename, resolve } from "node:path";
 import { ActorLock, EventBus } from "./bus/actor-bus.js";
 import { BrowserRuntime } from "./browser/runtime.js";
-import { tryHandleSlashCommand } from "./commands/slash.js";
+import { tryExecuteSlashCommand } from "./commands/slash.js";
 import {
   loadHatoConfig,
   resolveMemoryCuratorConfig,
@@ -9,6 +9,7 @@ import {
   resolveMemoryProvider,
   resolveMemoryRecallConfig,
   resolveTavilySearchConfig,
+  resolveWebBrowserConfig,
   type HatoConfig,
 } from "./config/app.js";
 import { collectReloadDiff, fingerprintSecret, type ReloadSnapshot } from "./config/diff.js";
@@ -33,6 +34,7 @@ import { QqAdapter } from "./gateway/qq.js";
 import { QqOpenApiClient } from "./gateway/qq-client.js";
 import { TelegramAdapter } from "./gateway/tg.js";
 import type { ChannelAdapter, ChannelName, InboundBatch } from "./gateway/types.js";
+import { MarkdownImageRenderer } from "./render/markdown-image.js";
 import { McpClientPool } from "./mcp/pool.js";
 import { CompactionManager } from "./memory/compaction.js";
 import { MemoryCurator } from "./memory/curator.js";
@@ -487,6 +489,13 @@ async function main(): Promise<void> {
     await reloadAll();
   });
 
+  const markdownRenderer = new MarkdownImageRenderer({
+    browserConfig: resolveWebBrowserConfig(hatoConfig),
+  });
+  personaRuntime.setRenderMarkdownImageHandler((markdown, options) =>
+    markdownRenderer.render(markdown, options),
+  );
+
   const buildSlashDeps = (
     canonicalUserId: string,
     platformInfo?: { channel: "tg" | "qq" | "web"; platformUserId: string },
@@ -511,6 +520,8 @@ async function main(): Promise<void> {
     },
     reloadAll,
     forceCompact: (uid: string) => compactionManager.runIdleCommit(uid),
+    renderMarkdownImage: (markdown: string, options?: { theme?: "light" | "dark" }) =>
+      markdownRenderer.render(markdown, options),
     resetContext: async (uid: string) => {
       debouncer.discardUser(uid);
       queuedBatchesByUser.delete(uid);
@@ -939,17 +950,31 @@ async function main(): Promise<void> {
       },
       onInboundMessage: async (msg) => {
         if (msg.text.trim().startsWith("/")) {
-          const reply = await tryHandleSlashCommand(
-            msg.canonicalUserId,
-            msg.text,
-            buildSlashDeps(msg.canonicalUserId, {
+          const slashOut = await tryExecuteSlashCommand({
+            canonicalUserId: msg.canonicalUserId,
+            text: msg.text,
+            channel: msg.channel,
+            platformUserId: msg.platformUserId,
+            platformMsgId: msg.platformMsgId,
+            replyToPlatformMsgId: msg.replyToPlatformMsgId,
+            replyToText: msg.replyToText,
+            deps: buildSlashDeps(msg.canonicalUserId, {
               channel: msg.channel,
               platformUserId: msg.platformUserId,
             }),
-          );
+          });
 
-          if (reply !== null) {
-            await tgAdapter?.sendText(msg.platformUserId, reply, msg.platformMsgId);
+          if (slashOut !== null) {
+            if (slashOut.photo) {
+              await tgAdapter?.sendPhoto(
+                msg.platformUserId,
+                slashOut.photo.buffer,
+                slashOut.photo.caption,
+              );
+            }
+            if (slashOut.text !== undefined) {
+              await tgAdapter?.sendText(msg.platformUserId, slashOut.text, msg.platformMsgId);
+            }
             return;
           }
         }
@@ -1024,16 +1049,30 @@ async function main(): Promise<void> {
       },
       onInboundMessage: async (msg) => {
         if (msg.text.trim().startsWith("/")) {
-          const reply = await tryHandleSlashCommand(
-            msg.canonicalUserId,
-            msg.text,
-            buildSlashDeps(msg.canonicalUserId, {
+          const slashOut = await tryExecuteSlashCommand({
+            canonicalUserId: msg.canonicalUserId,
+            text: msg.text,
+            channel: msg.channel,
+            platformUserId: msg.platformUserId,
+            platformMsgId: msg.platformMsgId,
+            replyToPlatformMsgId: msg.replyToPlatformMsgId,
+            replyToText: msg.replyToText,
+            deps: buildSlashDeps(msg.canonicalUserId, {
               channel: msg.channel,
               platformUserId: msg.platformUserId,
             }),
-          );
-          if (reply !== null) {
-            await qqAdapter?.sendText(msg.platformUserId, reply, msg.platformMsgId);
+          });
+          if (slashOut !== null) {
+            if (slashOut.photo) {
+              await qqAdapter?.sendPhoto(
+                msg.platformUserId,
+                slashOut.photo.buffer,
+                slashOut.photo.caption,
+              );
+            }
+            if (slashOut.text !== undefined) {
+              await qqAdapter?.sendText(msg.platformUserId, slashOut.text, msg.platformMsgId);
+            }
             return;
           }
         }
@@ -1130,6 +1169,7 @@ async function main(): Promise<void> {
     compactionManager.dispose();
     memoryCurator.dispose();
     await browserRuntime.dispose();
+    await markdownRenderer.dispose();
     await mcpPool.closeAll();
     await webConsoleServer?.stop();
     await tgAdapter?.stop();

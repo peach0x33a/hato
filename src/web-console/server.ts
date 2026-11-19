@@ -11,6 +11,7 @@ import {
   resolvePromptDisabled,
   resolveMemoryProvider,
   resolvePromptOrder,
+  resolveSkillsDir,
   resolveTavilySearchConfig,
   resolveWebConsoleConfig,
   resolveWorkerExternalCliConfig,
@@ -30,12 +31,14 @@ import type { CompactionManager } from "../memory/compaction.js";
 import type { MemoryCurator } from "../memory/curator.js";
 import type { PersonaRuntime } from "../persona/agent.js";
 import { splitIntoBubbles } from "../persona/bubbles.js";
+import { buildSystemInjectedPromptText } from "../persona/context.js";
 import {
   deletePromptBlock,
   loadLayeredPrompts,
   normalizePromptBlockFilename,
   upsertPromptBlock,
 } from "../persona/prompts.js";
+import { formatSkillsIndexBlock, loadZoneSkills } from "../skills/loader.js";
 import {
   fetchTelegramBotAvatar,
   fetchTelegramUserProfiles,
@@ -908,6 +911,13 @@ export class WebConsoleServer {
       resolvePromptOrder(hatoConfig),
       resolvePromptDisabled(hatoConfig),
     );
+    const personalSkills = loadZoneSkills(resolveSkillsDir(hatoConfig), "personal");
+    const toolIndexText = this.deps.getPersonaRuntime().getToolIndexText();
+    const systemInjectedText = buildSystemInjectedPromptText(
+      this.deps.getRepo(),
+      formatSkillsIndexBlock(personalSkills),
+      toolIndexText,
+    );
     return {
       layered,
       promptLayers: {
@@ -920,6 +930,7 @@ export class WebConsoleServer {
         soulPath: layered.soulPath,
         soulText: layered.soulText,
         combinedText: layered.combinedText,
+        systemInjectedText,
       },
     };
   }
