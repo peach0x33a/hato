@@ -1,5 +1,8 @@
 # Project Agent Guidelines
 
-## Remote VM Deployment Rule
-- **Do NOT touch, modify, restart, or deploy to the Hato instance running on the remote VM (`root@192.168.2.231` / `/opt/hato` / `/root/.hato`) without explicit user permission.**
-- All code changes, builds, and tests should be performed in the local workspace first; only sync or restart the remote VM service when the user explicitly asks to deploy.
+## Private / Environment Rules
+- If `agents.private.md` exists in the workspace root, read and follow it as well for environment-specific and private deployment rules.
+
+## Migration & Version Compatibility Rule
+- **Do NOT bake legacy data/schema/config migration logic into the main application runtime.** Keep `src/` clean and focused on the current version's schema and config structure.
+- Any cross-version upgrade or migration (e.g., SQLite `ALTER TABLE` / backfills, config or prompt directory migrations) must be implemented as an external **sidecar** script or upgrade hook rather than inside the runtime startup path.

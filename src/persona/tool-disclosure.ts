@@ -3,6 +3,8 @@ import { arr, obj, str } from "@earendil-works/pi-schema";
 
 export const ACTIVATE_TOOLS_NAME = "activate_tools";
 
+export type ToolDomainId = "memory" | "math_time" | "web" | "media" | "ops";
+
 export interface ToolDisclosureContext {
   userText: string;
   hasImages?: boolean;
@@ -10,70 +12,67 @@ export interface ToolDisclosureContext {
   hasPersonalSkills?: boolean;
 }
 
-type ToolPredicate = (ctx: ToolDisclosureContext) => boolean;
+export interface ToolDomainPack {
+  id: ToolDomainId;
+  tools: readonly string[];
+  matches: (ctx: ToolDisclosureContext) => boolean;
+}
 
-const BUILTIN_TOOL_RULES: Record<string, ToolPredicate> = {
-  calc: ({ userText }) =>
-    /\d+\s*[+\-*/^%()]\s*\d+|计算|算一下|算下|等于几|等于多少|平方|开方|汇率|百分比|乘法|除法|加法|减法|乘以|除以|加上|减去|\bcalc\b/i.test(
-      userText,
-    ),
-  date_math: ({ userText }) =>
-    /\b\d{4}-\d{1,2}-\d{1,2}\b|几天|星期|周几|礼拜|时区|几点|日期|明天|后天|大后天|昨天|前天|下周|上周|下个月|上个月|倒计时|\bdate\b|\btimezone\b/i.test(
-      userText,
-    ),
-  web_search: ({ userText }) =>
-    /搜|查一下|查询|最新|新闻|天气|价格|官网|怎么|什么是|百科|教程|攻略|\bsearch\b|\blookup\b/i.test(
-      userText,
-    ),
-  web_fetch: ({ userText }) =>
-    /https?:\/\/|网页|链接|文章|原文|网址|\bfetch\b|\burl\b/i.test(userText),
-  browser_task: ({ userText }) =>
-    /https?:\/\/|浏览器|截图|截屏|打开网页|登录|验证码|点击|网页交互|\bbrowser\b|\bscreenshot\b/i.test(
-      userText,
-    ),
-  recall_memory: ({ userText }) =>
-    /记得|记忆|回忆|喜好|偏好|以前|之前说过|我喜欢|我不喜欢|我用什么|忌口|习惯|\brecall\b|\bmemory\b/i.test(
-      userText,
-    ),
-  search_past_sessions: ({ userText }) =>
-    /上次|上个会话|之前聊|历史对话|聊天记录|前几天|那次|翻一下|会话|\bpast\b|\bsession\b/i.test(
-      userText,
-    ),
-  delegate: ({ userText }) =>
-    /写代码|写个|编写|脚本|代码|运行|执行|修改文件|改一下|重构|修\s*bug|部署|定时|提醒|每天|每周|cron|schedule|delegate|python|bash|shell|\.py\b|\.ts\b|\.js\b|\.sh\b/i.test(
-      userText,
-    ),
-  inspect_tickets: ({ userText }) =>
-    /工单|任务|进度|状态|日志|后台|执行详情|\bticket\b|\bt_\d+\b/i.test(userText),
-  list_schedules: ({ userText }) =>
-    /定时|日程|闹钟|提醒|周期|\bschedule\b|\bcron\b/i.test(userText),
-  self_config: ({ userText }) =>
-    /人设|设定|性格|提示词|配置|模型|切换模型|代理|气泡|安静时间|少用|多用|语气|\bsoul\b|\bconfig\b|\bmodel\b|\bproxy\b/i.test(
-      userText,
-    ),
-  read_skill: ({ userText, hasPersonalSkills }) =>
-    Boolean(hasPersonalSkills) || /skill|技能|手册|规范/i.test(userText),
-  send_file: ({ userText }) =>
-    /发给我|发文件|导出|下载|附件|传给我|\bsend_file\b|\bfile\b/i.test(userText),
-  send_message: ({ userText }) =>
-    /发到|发给|qq|telegram|tg|转发|通知/i.test(userText),
-  sticker_search: ({ userText, hasImages, hasAttachments }) =>
-    Boolean(hasImages || hasAttachments) ||
-    /表情|贴纸|斗图|梗图|表情包|\bsticker\b|\bemoji\b/i.test(userText),
-  send_sticker: ({ userText, hasImages, hasAttachments }) =>
-    Boolean(hasImages || hasAttachments) ||
-    /表情|贴纸|斗图|梗图|表情包|\bsticker\b|\bemoji\b/i.test(userText),
-  sticker_save: ({ userText, hasImages, hasAttachments }) =>
-    Boolean(hasImages || hasAttachments) ||
-    /保存表情|收图|表情包|贴纸|\bsticker\b/i.test(userText),
-  sticker_collect: ({ userText, hasImages, hasAttachments }) =>
-    Boolean(hasImages || hasAttachments) ||
-    /收图|一堆表情|批量.*表情|表情包|\bsticker\b/i.test(userText),
-  bot_profile: ({ userText }) =>
-    /头像|昵称|名字|简介|资料|机器人资料|\bbot\b|\bprofile\b|\bavatar\b/i.test(userText),
-  render_markdown_image: ({ userText }) =>
-    /渲染|生成图片|转图片|长图|卡片|表格|markdown|\brender\b|\bimage\b/i.test(userText),
-};
+export const TOOL_DOMAIN_PACKS: readonly ToolDomainPack[] = [
+  {
+    id: "memory",
+    tools: ["recall_memory", "search_past_sessions"],
+    matches: ({ userText }) =>
+      /记得|记忆|回忆|喜好|偏好|以前|之前说过|我喜欢|我不喜欢|我用什么|忌口|习惯|上次|上个会话|之前聊|历史对话|聊天记录|前几天|那次|翻一下|会话|\brecall\b|\bmemory\b|\bpast\b|\bsession\b/i.test(
+        userText,
+      ),
+  },
+  {
+    id: "math_time",
+    tools: ["calc", "date_math"],
+    matches: ({ userText }) =>
+      /\d+\s*[+\-*/^%()]\s*\d+|计算|算一下|算下|等于几|等于多少|平方|开方|汇率|百分比|乘法|除法|加法|减法|乘以|除以|加上|减去|\bcalc\b|\b\d{4}-\d{1,2}-\d{1,2}\b|几天|星期|周几|礼拜|时区|几点|日期|明天|后天|大后天|昨天|前天|下周|上周|下个月|上个月|倒计时|\bdate\b|\btimezone\b/i.test(
+        userText,
+      ),
+  },
+  {
+    id: "web",
+    tools: ["web_search", "web_fetch", "browser_task"],
+    matches: ({ userText }) =>
+      /https?:\/\/|搜|查一下|查询|最新|新闻|天气|价格|官网|怎么|什么是|百科|教程|攻略|网页|链接|文章|原文|网址|浏览器|截图|截屏|打开网页|登录|验证码|点击|网页交互|\bsearch\b|\blookup\b|\bfetch\b|\burl\b|\bbrowser\b|\bscreenshot\b/i.test(
+        userText,
+      ),
+  },
+  {
+    id: "media",
+    tools: [
+      "render_markdown_image",
+      "sticker_search",
+      "send_sticker",
+      "sticker_save",
+      "sticker_collect",
+      "send_file",
+      "send_message",
+    ],
+    matches: ({ userText, hasImages, hasAttachments }) =>
+      Boolean(hasImages || hasAttachments) ||
+      /渲染|生成图片|转图片|长图|卡片|表格|markdown|\brender\b|\bimage\b|表情|贴纸|斗图|梗图|表情包|保存表情|收图|批量.*表情|\bsticker\b|\bemoji\b|发给我|发文件|导出|下载|附件|传给我|发到|发给|qq|telegram|tg|转发|通知|\bsend_file\b|\bfile\b/i.test(
+        userText,
+      ),
+  },
+  {
+    id: "ops",
+    tools: ["delegate", "inspect_tickets", "list_schedules", "self_config", "bot_profile"],
+    matches: ({ userText }) =>
+      /写代码|写个|编写|脚本|代码|运行|执行|修改文件|改一下|重构|修\s*bug|部署|定时|提醒|每天|每周|cron|schedule|delegate|python|bash|shell|\.py\b|\.ts\b|\.js\b|\.sh\b|工单|任务|进度|状态|日志|后台|执行详情|\bticket\b|\bt_\d+\b|日程|闹钟|周期|人设|设定|性格|提示词|配置|模型|切换模型|代理|气泡|安静时间|少用|多用|语气|\bsoul\b|\bconfig\b|\bmodel\b|\bproxy\b|头像|昵称|名字|简介|资料|机器人资料|\bbot\b|\bprofile\b|\bavatar\b/i.test(
+        userText,
+      ),
+  },
+];
+
+const DOMAIN_PACK_BY_ID = new Map<string, readonly string[]>(
+  TOOL_DOMAIN_PACKS.map((pack) => [pack.id, pack.tools]),
+);
 
 const MCP_ZH_ALIASES: Array<{ en: RegExp; zh: RegExp }> = [
   { en: /note|memo|diary|log/i, zh: /记|笔记|记录|备忘/ },
@@ -115,7 +114,7 @@ export function sortToolsCanonically(tools: readonly AgentTool<any>[]): AgentToo
 }
 
 /**
- * Select the subset of tools relevant to the current turn, always keeping `activate_tools`.
+ * Select domain-grouped tools relevant to the current turn, always keeping `activate_tools`.
  */
 export function selectToolsForTurn(params: {
   allTools: readonly AgentTool<any>[];
@@ -132,20 +131,32 @@ export function selectToolsForTurn(params: {
     hasPersonalSkills: params.hasPersonalSkills,
   };
 
+  const unlockedToolNames = new Set<string>([ACTIVATE_TOOLS_NAME]);
+  if (params.previouslyActivated) {
+    for (const name of params.previouslyActivated) {
+      unlockedToolNames.add(name);
+    }
+  }
+
+  for (const pack of TOOL_DOMAIN_PACKS) {
+    if (pack.matches(ctx)) {
+      for (const toolName of pack.tools) {
+        unlockedToolNames.add(toolName);
+      }
+    }
+  }
+
+  if (ctx.hasPersonalSkills || /skill|技能|手册|规范/i.test(ctx.userText)) {
+    unlockedToolNames.add("read_skill");
+  }
+
   const selected: AgentTool<any>[] = [];
   for (const tool of params.allTools) {
-    if (tool.name === ACTIVATE_TOOLS_NAME || params.previouslyActivated?.has(tool.name)) {
+    if (unlockedToolNames.has(tool.name)) {
       selected.push(tool);
       continue;
     }
-
-    const rule = BUILTIN_TOOL_RULES[tool.name];
-    if (rule) {
-      if (rule(ctx)) selected.push(tool);
-      continue;
-    }
-
-    if (tool.name.startsWith("mcp__") && matchesMcpTool(tool, params.userText)) {
+    if (tool.name.startsWith("mcp__") && matchesMcpTool(tool, ctx.userText)) {
       selected.push(tool);
     }
   }
@@ -154,7 +165,12 @@ export function selectToolsForTurn(params: {
 }
 
 const ActivateToolsParams = obj({
-  tools: arr(str({ description: "Tool names from <available_tools> to activate for this turn" })),
+  tools: arr(
+    str({
+      description:
+        "Tool names from <available_tools> (or domain pack ids: memory, math_time, web, media, ops) to activate",
+    }),
+  ),
 });
 
 /**
@@ -170,17 +186,27 @@ export function createActivateToolsTool(params: {
     name: ACTIVATE_TOOLS_NAME,
     label: "Activate Tools",
     description:
-      "Activate one or more tools listed in `<available_tools>` when needed for the current turn so they become immediately callable on the next step.",
+      "Activate one or more tools listed in `<available_tools>` (or a domain pack id) when needed for the current turn so they become immediately callable on the next step.",
     parameters: ActivateToolsParams,
     async execute(_toolCallId, input) {
-      const requested = Array.from(
+      const rawRequested = Array.from(
         new Set((input.tools ?? []).map((n) => n.trim()).filter(Boolean)),
       );
-      if (requested.length === 0) {
+      if (rawRequested.length === 0) {
         return {
-          content: [{ type: "text", text: "请提供至少一个需要激活的工具名称。" }],
+          content: [{ type: "text", text: "Provide at least one tool name or domain pack id to activate." }],
           details: { activated: [], notFound: [] },
         };
+      }
+
+      const expandedNames: string[] = [];
+      for (const item of rawRequested) {
+        const packTools = DOMAIN_PACK_BY_ID.get(item);
+        if (packTools) {
+          expandedNames.push(...packTools);
+        } else {
+          expandedNames.push(item);
+        }
       }
 
       const catalog = new Map(params.getAllTools().map((t) => [t.name, t]));
@@ -191,7 +217,7 @@ export function createActivateToolsTool(params: {
       const alreadyActive: string[] = [];
       const notFound: string[] = [];
 
-      for (const name of requested) {
+      for (const name of Array.from(new Set(expandedNames))) {
         const found = catalog.get(name);
         if (!found) {
           notFound.push(name);
@@ -243,7 +269,7 @@ export function buildToolIndexBlock(tools: readonly AgentTool<any>[]): string {
 
   return [
     "<available_tools>",
-    "Tools are disclosed on demand. Invoke only when needed; if a required tool is not yet loaded, call `activate_tools({ tools: [\"name\"] })` first:",
+    "Tools are disclosed on demand by domain pack. Invoke only when needed; if a required tool is not yet loaded, call `activate_tools({ tools: [\"name\"] })` first:",
     ...lines,
     "</available_tools>",
   ].join("\n");

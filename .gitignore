@@ -14,3 +14,4 @@ config/mcp.toml
 *.db-shm
 *.db-wal
 .DS_Store
+agents.private.md

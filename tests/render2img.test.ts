@@ -326,6 +326,7 @@ test("on-demand tool disclosure selects relevant tools, builds index, and activa
       getHatoConfig: () => config,
       proxyRouter: new ScopedProxyRouter([]),
       extraTools: [activateTool],
+      onSendFile: async () => ({ ok: true, message: "sent" }),
       onRenderMarkdownImage: async () => ({ ok: true, message: "ok" }),
     });
 
@@ -341,20 +342,22 @@ test("on-demand tool disclosure selects relevant tools, builds index, and activa
       [ACTIVATE_TOOLS_NAME],
     );
 
-    // Render request discloses render_markdown_image + activate_tools
+    // Render request discloses the media domain pack + activate_tools
     const renderTurn = selectToolsForTurn({ allTools, userText: "帮我把这段渲染成图片" });
     assert.ok(renderTurn.some((t) => t.name === "render_markdown_image"));
+    assert.ok(renderTurn.some((t) => t.name === "send_file"));
     assert.equal(renderTurn.some((t) => t.name === "calc"), false);
 
-    // Meta-tool dynamically activates calc into activeTools
+    // Meta-tool dynamically activates individual tools or domain packs into activeTools
     activeTools = casual;
-    const actRes = await activateTool.execute("call_act", { tools: ["calc", "unknown_tool"] });
+    const actRes = await activateTool.execute("call_act", { tools: ["math_time", "unknown_tool"] });
     assert.deepEqual(actRes.details, {
-      activated: ["calc"],
+      activated: ["calc", "date_math"],
       alreadyActive: [],
       notFound: ["unknown_tool"],
     });
     assert.ok(activeTools.some((t) => t.name === "calc"));
+    assert.ok(activeTools.some((t) => t.name === "date_math"));
   } finally {
     handle.close();
   }

@@ -217,7 +217,6 @@ export function openDatabase(sqlitePath: string): DbHandle {
   const sqlite = new Database(sqlitePath);
   sqlite.exec("PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL; PRAGMA foreign_keys = ON;");
   sqlite.exec(INIT_SQL);
-  migrateTurnTracesTable(sqlite);
 
   const db = drizzle(sqlite, { schema });
   return {
@@ -227,39 +226,4 @@ export function openDatabase(sqlitePath: string): DbHandle {
       sqlite.close();
     },
   };
-}
-
-function migrateTurnTracesTable(sqlite: Database): void {
-  const existingCols = new Set(
-    (sqlite.prepare("PRAGMA table_info(turn_traces)").all() as Array<{ name: string }>).map(
-      (col) => col.name,
-    ),
-  );
-
-  if (!existingCols.has("cache_hit_rate")) {
-    sqlite.exec("ALTER TABLE turn_traces ADD COLUMN cache_hit_rate REAL NOT NULL DEFAULT 0");
-  }
-  if (!existingCols.has("ttft_ms")) {
-    sqlite.exec("ALTER TABLE turn_traces ADD COLUMN ttft_ms INTEGER");
-  }
-  if (!existingCols.has("tps")) {
-    sqlite.exec("ALTER TABLE turn_traces ADD COLUMN tps REAL");
-  }
-  if (!existingCols.has("user_preview")) {
-    sqlite.exec("ALTER TABLE turn_traces ADD COLUMN user_preview TEXT");
-  }
-  if (!existingCols.has("steps_json")) {
-    sqlite.exec("ALTER TABLE turn_traces ADD COLUMN steps_json TEXT NOT NULL DEFAULT '[]'");
-  }
-
-  sqlite.exec(`
-    UPDATE turn_traces
-    SET cache_hit_rate = ROUND(
-      CAST(cache_read_tokens AS REAL) / (input_tokens + cache_read_tokens + cache_write_tokens),
-      4
-    )
-    WHERE cache_hit_rate = 0
-      AND cache_read_tokens > 0
-      AND (input_tokens + cache_read_tokens + cache_write_tokens) > 0;
-  `);
 }

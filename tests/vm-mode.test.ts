@@ -22,40 +22,24 @@ test("resolveWorkerExecutionMode and resolveWorkerVmWorkdir handle isolated and 
   assert.equal(resolveWorkerVmWorkdir(cfg), resolve(homedir(), "hato-vm-work"));
 });
 
-test("ensureHatoHomeConfig migrates legacy files into HATO_HOME once without overwriting", () => {
+test("ensureHatoHomeConfig ensures HATO_HOME directory exists and resolves config paths", () => {
   const prevHome = process.env.HATO_HOME;
-  const prevCwd = process.cwd();
   const tempHome = mkdtempSync(join(tmpdir(), "hato-home-"));
-  const tempRepo = mkdtempSync(join(tmpdir(), "hato-legacy-repo-"));
-  mkdirSync(join(tempRepo, "config"), { recursive: true });
-  writeFileSync(join(tempRepo, "config", "hato.toml"), "[owner]\ntimezone = \"UTC\"\n", "utf8");
-  writeFileSync(join(tempRepo, "config", "models.toml"), "[slots]\n", "utf8");
-  writeFileSync(join(tempRepo, "config", "mcp.toml"), "# mcp\n", "utf8");
-  writeFileSync(join(tempRepo, ".env"), "TG_BOT_TOKEN=dummy\n", "utf8");
+  const nestedHome = join(tempHome, "nested");
 
-  process.env.HATO_HOME = tempHome;
-  process.chdir(tempRepo);
+  process.env.HATO_HOME = nestedHome;
   try {
-    assert.equal(resolveHatoHomeDir(), resolve(tempHome));
+    assert.equal(resolveHatoHomeDir(), resolve(nestedHome));
     const paths = ensureHatoHomeConfig();
-    assert.equal(paths.hatoConfigPath, join(resolve(tempHome), "hato.toml"));
-    assert.equal(paths.modelsConfigPath, join(resolve(tempHome), "models.toml"));
-    assert.equal(paths.mcpConfigPath, join(resolve(tempHome), "mcp.toml"));
-    assert.equal(paths.envPath, join(resolve(tempHome), ".env"));
-    assert.equal(existsSync(paths.hatoConfigPath), true);
-    assert.equal(existsSync(paths.modelsConfigPath), true);
-    assert.equal(existsSync(paths.mcpConfigPath), true);
-    assert.equal(existsSync(paths.envPath), true);
-
-    writeFileSync(paths.hatoConfigPath, "# custom sentinel\n", "utf8");
-    ensureHatoHomeConfig();
-    assert.equal(readFileSync(paths.hatoConfigPath, "utf8"), "# custom sentinel\n");
+    assert.equal(existsSync(paths.homeDir), true);
+    assert.equal(paths.hatoConfigPath, join(resolve(nestedHome), "hato.toml"));
+    assert.equal(paths.modelsConfigPath, join(resolve(nestedHome), "models.toml"));
+    assert.equal(paths.mcpConfigPath, join(resolve(nestedHome), "mcp.toml"));
+    assert.equal(paths.envPath, join(resolve(nestedHome), ".env"));
   } finally {
-    process.chdir(prevCwd);
     if (prevHome === undefined) delete process.env.HATO_HOME;
     else process.env.HATO_HOME = prevHome;
     rmSync(tempHome, { recursive: true, force: true });
-    rmSync(tempRepo, { recursive: true, force: true });
   }
 });
 

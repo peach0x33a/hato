@@ -1,4 +1,4 @@
-import { copyFileSync, existsSync, mkdirSync } from "node:fs";
+import { existsSync, mkdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 
@@ -31,37 +31,17 @@ export function resolveDefaultEnvPath(): string {
 }
 
 /**
- * Ensure `~/.hato/` exists and migrate any legacy `config/*.toml` and `.env` files into it
- * when the target file does not yet exist.
+ * Ensure `~/.hato/` exists and return resolved config/env paths.
  */
 export function ensureHatoHomeConfig(): HatoConfigPaths {
   const homeDir = resolveHatoHomeDir();
   mkdirSync(homeDir, { recursive: true });
 
-  const hatoConfigPath = join(homeDir, "hato.toml");
-  const modelsConfigPath = join(homeDir, "models.toml");
-  const mcpConfigPath = join(homeDir, "mcp.toml");
-  const envPath = join(homeDir, ".env");
-
-  const migrations: Array<[string, string]> = [
-    ["config/hato.toml", hatoConfigPath],
-    ["config/models.toml", modelsConfigPath],
-    ["config/mcp.toml", mcpConfigPath],
-    [".env", envPath],
-  ];
-
-  for (const [legacyRel, targetAbs] of migrations) {
-    const legacyAbs = resolve(legacyRel);
-    if (!existsSync(targetAbs) && existsSync(legacyAbs)) {
-      copyFileSync(legacyAbs, targetAbs);
-    }
-  }
-
   return {
     homeDir,
-    hatoConfigPath,
-    modelsConfigPath,
-    mcpConfigPath,
-    envPath,
+    hatoConfigPath: join(homeDir, "hato.toml"),
+    modelsConfigPath: join(homeDir, "models.toml"),
+    mcpConfigPath: join(homeDir, "mcp.toml"),
+    envPath: join(homeDir, ".env"),
   };
 }

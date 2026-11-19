@@ -127,54 +127,6 @@ test("computeTurnMetrics and summarizeTurnTraces compute cache hit ratio, TTFT, 
   assert.equal(sanitizedSummary.avgDecodeTps, 25);
 });
 
-test("openDatabase migrates legacy turn_traces columns and backfills cache_hit_rate without losing data", () => {
-  const tempDir = mkdtempSync(join(tmpdir(), "hato-migrate-test-"));
-  const dbPath = join(tempDir, "legacy.db");
-  try {
-    // Simulate a legacy DB created before cache_hit_rate, ttft_ms, tps, and user_preview existed.
-    const legacy = new Database(dbPath);
-    legacy.exec(`
-      CREATE TABLE turn_traces (
-        id TEXT PRIMARY KEY,
-        canonical_user_id TEXT NOT NULL,
-        slot TEXT NOT NULL,
-        provider TEXT NOT NULL,
-        model_id TEXT NOT NULL,
-        api TEXT NOT NULL,
-        input_tokens INTEGER NOT NULL DEFAULT 0,
-        output_tokens INTEGER NOT NULL DEFAULT 0,
-        cache_read_tokens INTEGER NOT NULL DEFAULT 0,
-        cache_write_tokens INTEGER NOT NULL DEFAULT 0,
-        recalled_ids_json TEXT NOT NULL DEFAULT '[]',
-        time_card_text TEXT NOT NULL DEFAULT '',
-        tool_calls_json TEXT NOT NULL DEFAULT '[]',
-        latency_ms INTEGER NOT NULL DEFAULT 0,
-        created_at INTEGER NOT NULL
-      );
-      INSERT INTO turn_traces VALUES (
-        'tr_legacy_1', 'owner', 'persona', 'relay', 'model-x', 'openai-completions',
-        126, 82, 1024, 0, '[]', '', '[]', 3945, 1700000000000
-      );
-    `);
-    legacy.close();
-
-    const handle = openDatabase(dbPath);
-    try {
-      const repo = new HatoRepository(handle.db);
-      const rows = repo.listTurnTraces();
-      assert.equal(rows.length, 1);
-      assert.equal(rows[0]!.cacheHitRate, 0.8904);
-      assert.equal(rows[0]!.ttftMs, null);
-      assert.equal(rows[0]!.tps, null);
-      assert.equal(rows[0]!.userPreview, null);
-    } finally {
-      handle.close();
-    }
-  } finally {
-    rmSync(tempDir, { recursive: true, force: true });
-  }
-});
-
 test("runStaticsCli supports filtering, summary, --json, and help output", () => {
   const tempDir = mkdtempSync(join(tmpdir(), "hato-statics-cli-"));
   const dbPath = join(tempDir, "hato.db");
