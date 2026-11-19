@@ -167,7 +167,7 @@ function expandLayersToItems(
 
     if (token === "blocks") {
       for (const b of layers.blocks) {
-        if (explicitBlockNames.has(b.name)) continue;
+        if (b.defaultDisabled || explicitBlockNames.has(b.name)) continue;
         pushBlock(b, wildcardBlocksDisabled);
       }
       continue;

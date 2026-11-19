@@ -6,6 +6,8 @@ export interface PromptBlockEntry {
   name: string;
   path: string;
   content: string;
+  /** Root-level `.md` files outside `blocks/` default to disabled unless explicitly enabled in `order`. */
+  defaultDisabled?: boolean;
 }
 
 export interface LoadedLayeredPrompts {
@@ -16,10 +18,9 @@ export interface LoadedLayeredPrompts {
   systemText: string;
   soulPath: string;
   soulText: string;
-  legacyPersonaPath: string;
   order: string[];
   disabled: string[];
-  mode: "layered" | "legacy";
+  mode: "layered";
   combinedText: string;
 }
 
@@ -49,7 +50,6 @@ export function normalizePromptBlockFilename(rawName: string): string {
 /**
  * Load and assemble Layer 1 static prompts in configurable order:
  * e.g. `["blocks", "system", "soul"]` or custom `["block:01-user.md", "system", "soul"]`.
- * Falls back cleanly to legacy `persona.md` when neither `soul.md`, `system.md`, nor `blocks/` exists.
  */
 export function loadLayeredPrompts(
   promptsDir: string,
@@ -60,38 +60,14 @@ export function loadLayeredPrompts(
   const blocksDir = resolve(absPromptsDir, "blocks");
   const systemPath = resolve(absPromptsDir, "system.md");
   const soulPath = resolve(absPromptsDir, "soul.md");
-  const legacyPersonaPath = resolve(absPromptsDir, "persona.md");
 
-  const blocks = loadPromptBlocks(blocksDir);
+  const blocks = loadPromptBlocks(absPromptsDir, blocksDir);
   const hasSystem = existsSync(systemPath);
   const hasSoul = existsSync(soulPath);
   const effectiveDisabled = disabled.map((d) => d.trim()).filter(Boolean);
-  const disabledSet = new Set(effectiveDisabled);
-
-  if (!hasSystem && !hasSoul && blocks.length === 0 && existsSync(legacyPersonaPath)) {
-    const legacyText = readFileSync(legacyPersonaPath, "utf8").trim();
-    return {
-      promptsDir: absPromptsDir,
-      blocksDir,
-      blocks: [],
-      systemPath,
-      systemText: "",
-      soulPath: legacyPersonaPath,
-      soulText: legacyText,
-      legacyPersonaPath,
-      order: order.length > 0 ? [...order] : [...DEFAULT_PROMPT_ORDER],
-      disabled: effectiveDisabled,
-      mode: "legacy",
-      combinedText: disabledSet.has("soul") ? "" : legacyText,
-    };
-  }
 
   const systemText = hasSystem ? readFileSync(systemPath, "utf8").trim() : "";
-  const soulText = hasSoul
-    ? readFileSync(soulPath, "utf8").trim()
-    : existsSync(legacyPersonaPath)
-      ? readFileSync(legacyPersonaPath, "utf8").trim()
-      : "";
+  const soulText = hasSoul ? readFileSync(soulPath, "utf8").trim() : "";
 
   const effectiveOrder = order.length > 0 ? [...order] : [...DEFAULT_PROMPT_ORDER];
   const combinedText = assembleLayeredPromptText({
@@ -108,9 +84,8 @@ export function loadLayeredPrompts(
     blocks,
     systemPath,
     systemText,
-    soulPath: hasSoul || !existsSync(legacyPersonaPath) ? soulPath : legacyPersonaPath,
+    soulPath,
     soulText,
-    legacyPersonaPath,
     order: effectiveOrder,
     disabled: effectiveDisabled,
     mode: "layered",
@@ -168,7 +143,12 @@ export function assembleLayeredPromptText(params: {
     if (token === "blocks") {
       if (disabledSet.has("blocks")) continue;
       for (const b of params.blocks) {
-        if (explicitlyNamed.has(b.name) || emittedBlocks.has(b.name) || isBlockDisabled(b.name)) {
+        if (
+          b.defaultDisabled ||
+          explicitlyNamed.has(b.name) ||
+          emittedBlocks.has(b.name) ||
+          isBlockDisabled(b.name)
+        ) {
           continue;
         }
         emittedBlocks.add(b.name);
@@ -223,8 +203,13 @@ export function upsertPromptBlock(
   content: string,
 ): { name: string; path: string; backupPath?: string } {
   const filename = normalizePromptBlockFilename(name);
-  const absPath = resolve(promptsDir, "blocks", filename);
-  const res = writeFileWithBackup(absPath, content.endsWith("\n") ? content : `${content}\n`);
+  const blocksPath = resolve(promptsDir, "blocks", filename);
+  const rootPath = resolve(promptsDir, filename);
+  const targetPath =
+    !existsSync(blocksPath) && filename !== "system.md" && filename !== "soul.md" && existsSync(rootPath)
+      ? rootPath
+      : blocksPath;
+  const res = writeFileWithBackup(targetPath, content.endsWith("\n") ? content : `${content}\n`);
   return { name: filename, ...res };
 }
 
@@ -233,7 +218,12 @@ export function deletePromptBlock(
   name: string,
 ): { name: string; path: string; deleted: boolean; backupPath?: string } {
   const filename = normalizePromptBlockFilename(name);
-  const absPath = resolve(promptsDir, "blocks", filename);
+  const blocksPath = resolve(promptsDir, "blocks", filename);
+  const rootPath = resolve(promptsDir, filename);
+  const absPath =
+    !existsSync(blocksPath) && filename !== "system.md" && filename !== "soul.md" && existsSync(rootPath)
+      ? rootPath
+      : blocksPath;
   if (!existsSync(absPath)) {
     return { name: filename, path: absPath, deleted: false };
   }
@@ -243,19 +233,38 @@ export function deletePromptBlock(
   return { name: filename, path: absPath, deleted: true, backupPath };
 }
 
-function loadPromptBlocks(blocksDir: string): PromptBlockEntry[] {
-  if (!existsSync(blocksDir)) return [];
-  const files = readdirSync(blocksDir, { withFileTypes: true })
-    .filter((entry) => entry.isFile() && entry.name.endsWith(".md") && !entry.name.startsWith("."))
+function readMarkdownDir(dir: string, excludeNames?: ReadonlySet<string>): PromptBlockEntry[] {
+  if (!existsSync(dir)) return [];
+  const files = readdirSync(dir, { withFileTypes: true })
+    .filter(
+      (entry) =>
+        entry.isFile() &&
+        entry.name.endsWith(".md") &&
+        !entry.name.startsWith(".") &&
+        !(excludeNames?.has(entry.name) ?? false),
+    )
     .map((entry) => entry.name)
     .sort((a, b) => a.localeCompare(b));
 
   return files.map((file) => {
-    const absPath = resolve(blocksDir, file);
+    const absPath = resolve(dir, file);
     return {
       name: basename(file),
       path: absPath,
       content: readFileSync(absPath, "utf8").trim(),
     };
   });
+}
+
+function loadPromptBlocks(promptsDir: string, blocksDir: string): PromptBlockEntry[] {
+  const blockEntries = readMarkdownDir(blocksDir).map((entry) => ({
+    ...entry,
+    defaultDisabled: false,
+  }));
+  const seen = new Set<string>(["system.md", "soul.md", ...blockEntries.map((b) => b.name)]);
+  const rootEntries = readMarkdownDir(promptsDir, seen).map((entry) => ({
+    ...entry,
+    defaultDisabled: true,
+  }));
+  return [...blockEntries, ...rootEntries];
 }

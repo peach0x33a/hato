@@ -192,7 +192,7 @@ export function formatSkillsIndexBlock(skills: readonly SkillEntry[]): string {
   if (skills.length === 0) return "";
   const lines = [
     "<available_skills>",
-    "以下为可用个人技能索引（日常无需提及；仅在任务明显匹配时静默调用 `read_skill` 读取完整指引）：",
+    "Personal skills index (do not mention in casual chat; silently call `read_skill` only when a task clearly matches):",
   ];
   for (const skill of skills) {
     lines.push(`- ${skill.name}: ${skill.description}`);

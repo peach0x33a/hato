@@ -14,7 +14,7 @@ type ToolPredicate = (ctx: ToolDisclosureContext) => boolean;
 
 const BUILTIN_TOOL_RULES: Record<string, ToolPredicate> = {
   calc: ({ userText }) =>
-    /\d+\s*[+\-*/^%()]\s*\d+|计算|算一下|算下|等于几|等于多少|平方|开方|汇率|百分比|乘法|除法|加法|减法|\bcalc\b/i.test(
+    /\d+\s*[+\-*/^%()]\s*\d+|计算|算一下|算下|等于几|等于多少|平方|开方|汇率|百分比|乘法|除法|加法|减法|乘以|除以|加上|减去|\bcalc\b/i.test(
       userText,
     ),
   date_math: ({ userText }) =>
@@ -156,9 +156,9 @@ export function createActivateToolsTool(params: {
 }): AgentTool<typeof ActivateToolsParams> {
   return {
     name: ACTIVATE_TOOLS_NAME,
-    label: "按需激活工具",
+    label: "Activate Tools",
     description:
-      "当对话需要某项能力、而该工具尚未出现在当前可用工具列表中时，传入 `<available_tools>` 中的工具名列表将其激活，激活后即可在下一步直接调用。",
+      "Activate one or more tools listed in `<available_tools>` when needed for the current turn so they become immediately callable on the next step.",
     parameters: ActivateToolsParams,
     async execute(_toolCallId, input) {
       const requested = Array.from(
@@ -227,7 +227,7 @@ export function buildToolIndexBlock(tools: readonly AgentTool<any>[]): string {
 
   return [
     "<available_tools>",
-    "以下工具按需披露。仅当对话确实需要时调用；若某工具未出现在当前工具列表中，可先调用 `activate_tools({ tools: [\"工具名\"] })` 激活后再调用：",
+    "Tools are disclosed on demand. Invoke only when needed; if a required tool is not yet loaded, call `activate_tools({ tools: [\"name\"] })` first:",
     ...lines,
     "</available_tools>",
   ].join("\n");

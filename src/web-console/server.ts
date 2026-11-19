@@ -924,7 +924,12 @@ export class WebConsoleServer {
         mode: layered.mode,
         order: layered.order,
         disabled: layered.disabled,
-        blocks: layered.blocks.map((b) => ({ name: b.name, path: b.path, content: b.content })),
+        blocks: layered.blocks.map((b) => ({
+          name: b.name,
+          path: b.path,
+          content: b.content,
+          ...(b.defaultDisabled ? { defaultDisabled: true } : {}),
+        })),
         systemPath: layered.systemPath,
         systemText: layered.systemText,
         soulPath: layered.soulPath,

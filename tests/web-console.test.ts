@@ -45,7 +45,7 @@ test("WebConsoleServer enforces auth, masks secrets, streams chat SSE, controls 
   mkdirSync(promptsDir, { recursive: true });
   mkdirSync(staticDir, { recursive: true });
 
-  writeFileSync(join(promptsDir, "persona.md"), "你是 Hato 测试人设", "utf8");
+  writeFileSync(join(promptsDir, "soul.md"), "你是 Hato 测试人设", "utf8");
   writeFileSync(join(staticDir, "index.html"), "<!doctype html><html><body>HATO_SPA_OK</body></html>", "utf8");
 
   const tokenEnvName = "HATO_TEST_WEB_TOKEN_XYZ";
@@ -274,7 +274,7 @@ hindsight_llm = "faux-provider/faux-persona-1"
     });
     const savePromptJson = (await savePromptRes.json()) as { ok: boolean; error?: string; changes?: string[] };
     assert.equal(savePromptJson.ok, true, savePromptJson.error ?? "savePrompt failed");
-    assert.match(readFileSync(join(promptsDir, "persona.md"), "utf8"), /更新后的/);
+    assert.match(readFileSync(join(promptsDir, "soul.md"), "utf8"), /更新后的/);
 
     const addBlockRes = await fetch(`${baseUrl}/api/config/prompts/block`, {
       method: "PUT",

@@ -126,7 +126,7 @@ const ImageGenParams = obj({
   size: opt(str({ description: "Optional size like '1024x1024', '1536x1024', or '1024x1536'" })),
   quality: opt(str({ description: "Optional quality like 'standard', 'hd', 'medium', or 'high'" })),
   filename: opt(str({ description: "Optional relative output filename inside workspace (defaults to generated_<ts>.png)" })),
-  reference_image_paths: opt(arr(str({ description: "Optional local reference image path(s) (e.g. from attachment 路径=...) for image editing/reference generation" }))),
+  reference_image_paths: opt(arr(str({ description: "Optional local reference image path(s) from context for image editing/reference generation" }))),
   n: opt(num({ description: "Optional number of images (1-4), defaults to 1" })),
 });
 

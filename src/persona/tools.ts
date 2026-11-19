@@ -279,8 +279,8 @@ export function createPersonaReadOnlyTools(params: {
 }): AgentTool<any>[] {
   const calcTool: AgentTool<typeof CalcParams> = {
     name: "calc",
-    label: "数学计算",
-    description: "安全计算四则运算、幂运算与基础数学函数，避免口算误差。",
+    label: "Calculator",
+    description: "Safely evaluate arithmetic, powers, and basic math functions.",
     parameters: CalcParams,
     async execute(_toolCallId, input) {
       const value = evaluateSafeMath(input.expression);
@@ -293,8 +293,8 @@ export function createPersonaReadOnlyTools(params: {
 
   const dateMathTool: AgentTool<typeof DateMathParams> = {
     name: "date_math",
-    label: "日期时间换算",
-    description: "精准计算星期几、日期加减、相差天数及跨时区时间转换。",
+    label: "Date & Time Math",
+    description: "Compute weekdays, date offsets, day differences, and timezone conversions.",
     parameters: DateMathParams,
     async execute(_toolCallId, input) {
       const text = runDateMath(input, Date.now(), params.getTimezone());
@@ -307,9 +307,9 @@ export function createPersonaReadOnlyTools(params: {
 
   const inspectTicketsTool: AgentTool<typeof InspectTicketsParams> = {
     name: "inspect_tickets",
-    label: "查看后台任务详情",
+    label: "Inspect Background Tickets",
     description:
-      "只读查询后台任务状态与执行输出详情。仅在用户主动询问任务进展、要求查看“执行输出详情”/详细报告/生成产物时调用（设置 include_details: true）；日常闲聊不要主动提及。",
+      "Read-only lookup of background ticket status and execution details. Call only when the user asks about task progress, reports, logs, or generated artifacts (set include_details: true when details are requested).",
     parameters: InspectTicketsParams,
     async execute(_toolCallId, input) {
       const text = runInspectTickets(
@@ -327,9 +327,9 @@ export function createPersonaReadOnlyTools(params: {
 
   const listSchedulesTool: AgentTool<typeof ListSchedulesParams> = {
     name: "list_schedules",
-    label: "查看定时任务",
+    label: "List Schedules",
     description:
-      "只读列出已登记的定时任务与提醒事项。仅在用户主动问及日程/定时/提醒时调用；日常闲聊不要主动提及或推荐此工具。",
+      "Read-only list of registered scheduled jobs and reminders. Call only when the user asks about schedules, cron jobs, or reminders.",
     parameters: ListSchedulesParams,
     async execute() {
       const text = runListSchedules(params.repo, params.canonicalUserId, params.getTimezone());
@@ -342,9 +342,9 @@ export function createPersonaReadOnlyTools(params: {
 
   const searchPastSessionsTool: AgentTool<typeof SearchPastSessionsParams> = {
     name: "search_past_sessions",
-    label: "检索历史会话",
+    label: "Search Past Sessions",
     description:
-      "只读检索或查看已经被 /new 清空归档的历史会话（Session）及其对话内容。当用户提及之前清空前的讨论、往日聊天信息或要求翻看旧会话时调用；日常闲聊不要主动推销此工具。",
+      "Read-only search of archived chat sessions cleared by /new. Call only when the user refers to earlier conversations or asks to look up past chats.",
     parameters: SearchPastSessionsParams,
     async execute(_toolCallId, input) {
       const tz = params.getTimezone();
@@ -407,9 +407,9 @@ export function createPersonaReadOnlyTools(params: {
 
   const webSearchTool: AgentTool<typeof WebSearchParams> = {
     name: "web_search",
-    label: "联网搜索",
+    label: "Web Search",
     description:
-      "使用 Tavily 进行实时联网搜索，查找最新消息、事实资料、技术文档或即时信息。仅当需要外部/实时事实或核对资料时调用；日常闲聊不要主动推销此工具。",
+      "Real-time web search via Tavily for news, facts, documentation, or current info. Call only when external or up-to-date facts are needed.",
     parameters: WebSearchParams,
     async execute(_toolCallId, input, signal) {
       const searchConfig = resolveTavilySearchConfig(params.getHatoConfig());
@@ -440,9 +440,9 @@ export function createPersonaReadOnlyTools(params: {
 
   const webFetchTool: AgentTool<typeof WebFetchParams> = {
     name: "web_fetch",
-    label: "抓取网页正文",
+    label: "Web Fetch",
     description:
-      "轻量直读指定 HTTP/HTTPS 网址的文本或正文内容（不启动浏览器）。读取文章/文档链接时优先使用；若页面依赖 JS 渲染、需要登录或点击交互，再改用 browser_task。",
+      "Lightweight HTTP/HTTPS text fetch without launching a browser. Prefer this for static articles/docs; use browser_task only for JS-rendered, authenticated, or interactive pages.",
     parameters: WebFetchParams,
     async execute(_toolCallId, input, signal) {
       const fetchConfig = resolveWebFetchConfig(params.getHatoConfig());
@@ -480,9 +480,9 @@ export function createPersonaReadOnlyTools(params: {
     const getStore = params.getMemoryStore;
     const recallMemoryTool: AgentTool<typeof RecallMemoryParams> = {
       name: "recall_memory",
-      label: "检索长期记忆",
+      label: "Recall Long-Term Memory",
       description:
-        "只读检索用户的长期记忆（支持 persona 生活偏好记忆与 tech 技术环境记忆）。当需要回忆往事、个人习惯、历史约定或过往技术背景时主动调用；日常普通闲聊无需强行调用。",
+        "Read-only semantic search of long-term memory (persona preferences/life and tech environment/habits). Call when recalling past facts, preferences, or technical context.",
       parameters: RecallMemoryParams,
       async execute(_toolCallId, input) {
         const recallCfg = resolveMemoryRecallConfig(params.getHatoConfig());
@@ -577,9 +577,9 @@ export function createPersonaReadOnlyTools(params: {
     const runtime = params.browserRuntime;
     const browserTaskTool: AgentTool<typeof BrowserTaskParams> = {
       name: "browser_task",
-      label: "浏览器任务",
+      label: "Browser Task",
       description:
-        "派发独立隔离的浏览器执行器打开有头浏览器完成 JS 页面阅读、点击输入交互、截图或人工接管流程。当返回 status=needs_takeover 时，说明截图已发给用户等待操作；用户完成后再用 resume=true 继续。",
+        "Run an isolated headless/headed browser worker for JS-rendered pages, UI interaction, screenshots, or manual takeover. When status=needs_takeover is returned, tell the user a screenshot was sent and resume with resume=true after they finish.",
       parameters: BrowserTaskParams,
       async execute(_toolCallId, input) {
         const out = await runtime.runTask({
@@ -604,9 +604,9 @@ export function createPersonaReadOnlyTools(params: {
     const scDeps = params.selfConfigDeps;
     const selfConfigTool: AgentTool<typeof SelfConfigParams> = {
       name: "self_config",
-      label: "自我配置管理",
+      label: "Self Config",
       description:
-        "安全查看或修改 Hato 自身的运行配置（hato.toml 白名单项、只读 worker 后端与外部 CLI 委派状态、prompts.order 提示词顺序、模型槽位、人设 soul.md、自定义提示词块 blocks/*.md 与固定关系约定）。当用户询问当前配置、模型、worker 后端或要求调整设定时调用；不要凭猜测回答配置细节。",
+        "Safely inspect or update Hato runtime config (hato.toml allowlisted keys, read-only worker backends/CLI status, prompts.order, model slots, soul.md, blocks/*.md, and static relationship facts). Call when the user asks about or wants to change settings.",
       parameters: SelfConfigParams,
       async execute(_toolCallId, input) {
         let parsedPatch: Record<string, unknown> | undefined;
@@ -671,9 +671,9 @@ export function createPersonaReadOnlyTools(params: {
   if (shouldExposeReadSkill) {
     const readSkillTool: AgentTool<typeof ReadSkillParams> = {
       name: "read_skill",
-      label: "读取个人技能",
+      label: "Read Personal Skill",
       description:
-        "只读读取 personal 区某个 Skill 的完整 SKILL.md 指引或同目录下的参考文档（仅在 <available_skills> 匹配当前任务时调用）。",
+        "Read-only loader for a personal skill's full SKILL.md instructions or its reference files (call only when <available_skills> matches the current task).",
       parameters: ReadSkillParams,
       async execute(_toolCallId, input) {
         try {
@@ -723,9 +723,9 @@ export function createPersonaReadOnlyTools(params: {
     const delegateFn = params.onDelegate;
     const delegateTool: AgentTool<typeof DelegateParams> = {
       name: "delegate",
-      label: "派发后台任务",
+      label: "Delegate Background Task",
       description:
-        "仅用于写代码、写/改/跑脚本（如 Python、Shell 等）、编辑本地文件或仓库、执行命令行操作或修改定时任务。普通的算数请用 calc，查天气/查资讯请直接用 web_search/web_fetch，绝不要误派发到这里。",
+        "Delegate coding, scripts (Python/Shell/etc.), file/repo edits, shell commands, or schedule mutations to a background worker. Never use this for math (use calc) or online lookups (use web_search/web_fetch).",
       parameters: DelegateParams,
       async execute(_toolCallId, input) {
         const accepted = delegateFn({
@@ -751,9 +751,9 @@ export function createPersonaReadOnlyTools(params: {
     const sendFileFn = params.onSendFile;
     const sendFileTool: AgentTool<typeof SendFileParams> = {
       name: "send_file",
-      label: "发送文件",
+      label: "Send File",
       description:
-        "将本地文件发送到当前聊天窗口或指定平台（tg / qq）。仅在用户明确索取文件、要求发到某平台、或你判断需要把生成的文件发给用户时调用。",
+        "Send a local file to the current chat or a target channel (tg / qq). Call when the user requests a file or when delivering a generated artifact.",
       parameters: SendFileParams,
       async execute(_toolCallId, input) {
         const resolved = resolve(input.path.trim());
@@ -799,9 +799,9 @@ export function createPersonaReadOnlyTools(params: {
     const sendMessageFn = params.onSendMessage;
     const sendMessageTool: AgentTool<typeof SendMessageParams> = {
       name: "send_message",
-      label: "跨平台发消息",
+      label: "Send Cross-Channel Message",
       description:
-        "主动向指定平台（tg、qq 或 web）发送文本消息和/或本地文件（图片、附件）。适合跨平台转达、把生成好的图/文件直接发到 QQ 或 Telegram。",
+        "Send a text message and/or local file (image, attachment) to a target channel (tg, qq, or web), useful for cross-platform delivery.",
       parameters: SendMessageParams,
       async execute(_toolCallId, input) {
         const text = input.text?.trim() || undefined;
@@ -859,9 +859,9 @@ export function createPersonaReadOnlyTools(params: {
     const searchFn = params.onStickerSearch;
     tools.push({
       name: "sticker_search",
-      label: "搜索表情包",
+      label: "Search Stickers",
       description:
-        "按情绪、语境或画面描述检索已保存的表情包库，返回匹配的 sticker_id 与语义卡片。",
+        "Search the saved sticker library by emotion, context, or visual description, returning matching sticker_ids.",
       parameters: StickerSearchParams,
       async execute(_toolCallId, input) {
         const text = await searchFn({
@@ -878,9 +878,9 @@ export function createPersonaReadOnlyTools(params: {
     const sendStickerFn = params.onSendSticker;
     tools.push({
       name: "send_sticker",
-      label: "发送表情包",
+      label: "Send Sticker",
       description:
-        "发送指定 sticker_id 的表情包（TG 使用原生 sendSticker，QQ 发送对应图片）。可先调用 sticker_search 获取 sticker_id。",
+        "Send a sticker by sticker_id (native sendSticker on TG, image on QQ). Call sticker_search first to get a sticker_id.",
       parameters: SendStickerParams,
       async execute(_toolCallId, input) {
         const res = await sendStickerFn({
@@ -899,9 +899,9 @@ export function createPersonaReadOnlyTools(params: {
     const saveFn = params.onStickerSave;
     tools.push({
       name: "sticker_save",
-      label: "保存表情包",
+      label: "Save Sticker",
       description:
-        "自主保存表情包或整套 Telegram Sticker Pack：传入本地图片/贴纸 path 保存单张，或传入 pack_url (如 https://t.me/addstickers/xxx 或 set_name) 批量导入整套贴纸包并自动视觉打标入库。",
+        "Save a local image/sticker path or batch-import a Telegram sticker pack (pack_url or set_name) with automatic vision tagging.",
       parameters: StickerSaveParams,
       async execute(_toolCallId, input) {
         const res = await saveFn({
@@ -919,9 +919,9 @@ export function createPersonaReadOnlyTools(params: {
     const collectFn = params.onStickerCollect;
     tools.push({
       name: "sticker_collect",
-      label: "表情包收图模式",
+      label: "Sticker Batch Collect",
       description:
-        "开启或关闭批量收图模式。当用户说“我给你发一堆表情包你保存下来”时调用 start，用户后续发来的图片/贴纸会自动入库打标；发完后调用 stop。",
+        "Start, stop, or inspect batch sticker collection mode when the user wants to send multiple stickers/images to save.",
       parameters: StickerCollectParams,
       async execute(_toolCallId, input) {
         const res = await collectFn({ action: input.action });
@@ -934,9 +934,9 @@ export function createPersonaReadOnlyTools(params: {
     const botProfileFn = params.onBotProfile;
     const botProfileTool: AgentTool<typeof BotProfileParams> = {
       name: "bot_profile",
-      label: "机器人资料管理",
+      label: "Bot Profile",
       description:
-        "查看或修改 Telegram / QQ 平台上的机器人资料（名称、简介、头像等）。修改前请确认符合用户意图。",
+        "Inspect or update the Telegram / QQ bot profile (name, description, short description, avatar). Confirm intent before modifying.",
       parameters: BotProfileParams,
       async execute(_toolCallId, input) {
         const res = await botProfileFn({
@@ -960,9 +960,9 @@ export function createPersonaReadOnlyTools(params: {
     const renderFn = params.onRenderMarkdownImage;
     const renderTool: AgentTool<typeof RenderMarkdownImageParams> = {
       name: "render_markdown_image",
-      label: "Markdown 渲染为图片",
+      label: "Render Markdown Image",
       description:
-        "按需将 Markdown 文本（支持标题、列表、表格、代码块、引用等）渲染为 PNG 图片并直接发送给用户。仅在用户要求生成图片，或确实需要用图片卡片清晰展示复杂表格/长代码/结构化内容时调用；日常闲聊不要主动推销或滥用，发送图片后无需再用文字重复倾倒全文。",
+        "Render Markdown (headings, lists, tables, code blocks, quotes) into a PNG image and send it to the user. Use only when the user asks for an image or when a complex table/code card is clearer visually; do not resend the full Markdown text after sending the image.",
       parameters: RenderMarkdownImageParams,
       async execute(_toolCallId, input) {
         const res = await renderFn({

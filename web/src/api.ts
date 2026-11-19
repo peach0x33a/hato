@@ -433,6 +433,7 @@ export interface PromptBlockRecord {
   name: string;
   path: string;
   content: string;
+  defaultDisabled?: boolean;
 }
 
 export interface PromptLayersSnapshot {

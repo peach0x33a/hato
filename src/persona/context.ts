@@ -76,7 +76,7 @@ export function buildSystemInjectedPromptText(
   const facts = repo.listRelationshipFacts();
   if (facts.length > 0) {
     const factLines = facts.map((f) => `- ${f.key}: ${f.value}`).join("\n");
-    parts.push(`## 关系与约定（固定参考）\n${factLines}`);
+    parts.push(`## Relationship & Agreements (Static Reference)\n${factLines}`);
   }
   if (personalSkillsIndexText.trim().length > 0) {
     parts.push(personalSkillsIndexText.trim());

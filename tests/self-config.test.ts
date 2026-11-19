@@ -47,16 +47,20 @@ test("loadLayeredPrompts assembles blocks, system.md, and soul.md in default and
     const disabledWildcard = loadLayeredPrompts(tempDir, ["blocks", "system", "soul"], ["blocks", "soul"]);
     assert.equal(disabledWildcard.combinedText, "SYSTEM_RULES");
 
-    // Legacy directory with only persona.md still works seamlessly
-    const legacyDir = mkdtempSync(join(tmpdir(), "hato-legacy-prompts-"));
-    try {
-      writeFileSync(join(legacyDir, "persona.md"), "LEGACY_PERSONA", "utf8");
-      const leg = loadLayeredPrompts(legacyDir);
-      assert.equal(leg.mode, "legacy");
-      assert.equal(leg.combinedText, "LEGACY_PERSONA");
-    } finally {
-      rmSync(legacyDir, { recursive: true, force: true });
-    }
+    // Root-level .md files outside blocks/ are scanned as defaultDisabled blocks
+    writeFileSync(join(tempDir, "curator.md"), "CURATOR_ONLY", "utf8");
+    writeFileSync(join(tempDir, "extra.md"), "EXTRA_ROOT_BLOCK", "utf8");
+    const withRootFiles = loadLayeredPrompts(tempDir, ["blocks", "system", "soul"]);
+    assert.equal(
+      withRootFiles.blocks.some((b) => b.name === "curator.md" && b.defaultDisabled === true),
+      true,
+    );
+    assert.equal(withRootFiles.combinedText.includes("CURATOR_ONLY"), false);
+    assert.equal(withRootFiles.combinedText.includes("EXTRA_ROOT_BLOCK"), false);
+
+    const enabledRoot = loadLayeredPrompts(tempDir, ["block:extra.md", "system", "soul"]);
+    assert.equal(enabledRoot.combinedText.includes("EXTRA_ROOT_BLOCK"), true);
+    assert.equal(enabledRoot.combinedText.includes("CURATOR_ONLY"), false);
   } finally {
     rmSync(tempDir, { recursive: true, force: true });
   }
