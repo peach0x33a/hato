@@ -48,6 +48,11 @@ function formatUsd(usd: number): string {
   return `$${usd.toFixed(3)}`;
 }
 
+function formatDurationMs(ms: number): string {
+  if (ms >= 1000) return `${(ms / 1000).toFixed(1)}s`;
+  return `${Math.round(ms)}ms`;
+}
+
 function parseToolsJson(raw: string | null | undefined): string[] {
   if (!raw) return [];
   try {
@@ -303,13 +308,13 @@ export function StaticsPanel({ onToast, sessionEpoch = 0, sessionId = null }: St
               ],
               [
                 "首字延迟 (TTFT)",
-                kpiValue(summary?.avgTtftMs !== null && summary ? `${summary.avgTtftMs}ms` : "--"),
-                summary?.p95TtftMs !== null && summary ? `P95 ${summary.p95TtftMs}ms` : "",
+                kpiValue(summary?.avgTtftMs !== null && summary ? formatDurationMs(summary.avgTtftMs) : "--"),
+                summary?.p95TtftMs !== null && summary ? `P95 ${formatDurationMs(summary.p95TtftMs)}` : "",
               ],
               [
                 "平均耗时",
-                kpiValue(summary ? `${summary.avgLatencyMs}ms` : "--"),
-                summary ? `P95 ${summary.p95LatencyMs}ms` : "",
+                kpiValue(summary ? formatDurationMs(summary.avgLatencyMs) : "--"),
+                summary ? `P95 ${formatDurationMs(summary.p95LatencyMs)}` : "",
               ],
               [
                 "预估成本",
@@ -383,23 +388,32 @@ export function StaticsPanel({ onToast, sessionEpoch = 0, sessionId = null }: St
                   return (
                     <div
                       key={item.key}
-                      className="flex items-center justify-between gap-2 py-1.5 text-xs"
+                      className="flex flex-col gap-1 py-2 text-xs"
                     >
-                      <div className="flex flex-1 min-w-0 items-center gap-1.5">
-                        <SlotBadge slot={item.slot} className="h-4 shrink-0 px-1 text-[10px]" />
-                        <span className="truncate font-mono text-[11px] font-medium text-foreground">
-                          {item.target}
+                      <div className="flex items-center justify-between gap-2">
+                        <div className="flex min-w-0 flex-1 items-center gap-1.5">
+                          <SlotBadge slot={item.slot} className="h-4 shrink-0 px-1 text-[10px]" />
+                          <span
+                            className="truncate font-mono text-[11px] font-medium text-foreground"
+                            title={item.target}
+                          >
+                            {item.target}
+                          </span>
+                        </div>
+                        <span className="shrink-0 font-mono text-[11px] tabular-nums text-foreground">
+                          {item.count} 次
                         </span>
-                        <ApiBadge api={item.api} className="h-4 shrink-0 px-1 text-[10px]" />
                       </div>
-                      <div className="flex shrink-0 items-center gap-2.5 font-mono text-[11px] tabular-nums text-muted-foreground">
-                        <span>{item.count} 次</span>
-                        <span>命中 {hit.toFixed(1)}%</span>
-                        <span>出 {item.outputTokens.toLocaleString()}</span>
-                        <span>均 {avgLat}ms</span>
-                        {item.costUsd !== undefined ? (
-                          <span className="text-foreground">{formatUsd(item.costUsd)}</span>
-                        ) : null}
+                      <div className="flex flex-wrap items-center justify-between gap-2 pl-0.5">
+                        <ApiBadge api={item.api} className="h-4 shrink-0 px-1 text-[10px]" />
+                        <div className="flex shrink-0 items-center gap-2.5 font-mono text-[11px] tabular-nums text-muted-foreground">
+                          <span>命中 {hit.toFixed(1)}%</span>
+                          <span>出 {item.outputTokens.toLocaleString()}</span>
+                          <span title={`${avgLat}ms`}>均 {formatDurationMs(avgLat)}</span>
+                          {item.costUsd !== undefined ? (
+                            <span className="text-foreground">{formatUsd(item.costUsd)}</span>
+                          ) : null}
+                        </div>
                       </div>
                     </div>
                   );
@@ -462,16 +476,16 @@ export function StaticsPanel({ onToast, sessionEpoch = 0, sessionId = null }: St
                 <thead className="sticky top-0 z-10 bg-background text-[11px] text-muted-foreground">
                   <tr className="border-b border-border">
                     <th className="w-6 py-2 pl-3" />
-                    <th className="py-2 pr-2 font-medium">时间</th>
-                    <th className="py-2 pr-2 font-medium">槽位与模型</th>
-                    <th className="py-2 pr-2 font-medium">输入 / 摘要</th>
-                    <th className="py-2 pr-2 font-medium">提示词</th>
-                    <th className="py-2 pr-2 font-medium">缓存读</th>
-                    <th className="py-2 pr-2 font-medium">命中率</th>
-                    <th className="py-2 pr-2 font-medium">输出</th>
-                    <th className="py-2 pr-2 font-medium">首字 / 耗时</th>
-                    <th className="py-2 pr-2 font-medium">成本</th>
-                    <th className="py-2 pr-3 font-medium">工具</th>
+                    <th className="whitespace-nowrap py-2 pr-3 font-medium">时间</th>
+                    <th className="whitespace-nowrap py-2 pr-3 font-medium">槽位与模型</th>
+                    <th className="whitespace-nowrap py-2 pr-3 font-medium">输入 / 摘要</th>
+                    <th className="whitespace-nowrap py-2 pr-3 font-medium">提示词</th>
+                    <th className="whitespace-nowrap py-2 pr-3 font-medium">缓存读</th>
+                    <th className="whitespace-nowrap py-2 pr-3 font-medium">命中率</th>
+                    <th className="whitespace-nowrap py-2 pr-3 font-medium">输出</th>
+                    <th className="whitespace-nowrap py-2 pr-3 font-medium">首字 / 耗时</th>
+                    <th className="whitespace-nowrap py-2 pr-3 font-medium">成本</th>
+                    <th className="whitespace-nowrap py-2 pr-3 font-medium">工具</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-border/50">
@@ -530,8 +544,11 @@ export function StaticsPanel({ onToast, sessionEpoch = 0, sessionId = null }: St
                           <td className="py-2 pr-2 font-mono text-[11px] tabular-nums">
                             {tr.outputTokens.toLocaleString()}
                           </td>
-                          <td className="whitespace-nowrap py-2 pr-2 font-mono text-[11px] tabular-nums text-muted-foreground">
-                            {tr.ttftMs !== null ? `${tr.ttftMs}ms` : "--"} / {tr.latencyMs}ms
+                          <td
+                            className="whitespace-nowrap py-2 pr-3 font-mono text-[11px] tabular-nums text-muted-foreground"
+                            title={`首字 ${tr.ttftMs ?? "--"}ms / 总耗时 ${tr.latencyMs}ms`}
+                          >
+                            {tr.ttftMs !== null ? formatDurationMs(tr.ttftMs) : "--"} / {formatDurationMs(tr.latencyMs)}
                             {(() => {
                               const hasBogusDecode =
                                 tr.ttftMs !== null && tr.latencyMs > 0 && tr.latencyMs - tr.ttftMs < 50;

@@ -1,5 +1,4 @@
 import {
-  Activity,
   AlertTriangle,
   Bot,
   Check,
@@ -38,6 +37,12 @@ function formatDurationClock(totalSec: number): string {
   const mins = Math.floor((totalSec % 3600) / 60);
   const secs = totalSec % 60;
   return [hrs, mins, secs].map((n) => String(n).padStart(2, "0")).join(":");
+}
+
+function formatLatency(ms: number | null | undefined): string {
+  if (ms == null) return "--";
+  if (ms >= 1000) return `${(ms / 1000).toFixed(1)}s`;
+  return `${Math.round(ms)}ms`;
 }
 
 function loadSavedProbeResults(): ProbeResponse["results"] {
@@ -80,16 +85,16 @@ interface GatewayCardProps {
   onOpenSettings: () => void;
 }
 
-function PlatformEmblem({ code }: { code: "TG" | "QQ" }) {
+function PlatformEmblem({ code, className = "size-11" }: { code: "TG" | "QQ"; className?: string }) {
   if (code === "TG") {
     return (
-      <svg viewBox="0 0 24 24" className="size-11 text-sky-400" fill="currentColor" aria-hidden="true">
+      <svg viewBox="0 0 24 24" className={`${className} text-sky-500 dark:text-sky-400`} fill="currentColor" aria-hidden="true">
         <path d="M21.94 4.66a1.1 1.1 0 0 0-1.15-.16L2.7 11.77a1.02 1.02 0 0 0 .06 1.92l4.47 1.48 1.66 5.26a.96.96 0 0 0 1.62.38l2.58-2.61 4.53 3.31a1.1 1.1 0 0 0 1.72-.66l3.15-15.01a1.1 1.1 0 0 0-.55-1.18ZM9.65 14.37l-.38 3.63-1.08-3.43 9.79-6.23-8.33 6.03Z" />
       </svg>
     );
   }
   return (
-    <svg viewBox="0 0 24 24" className="size-11 text-sky-400" fill="currentColor" aria-hidden="true">
+    <svg viewBox="0 0 24 24" className={`${className} text-primary`} fill="currentColor" aria-hidden="true">
       <path d="M12 2c-3.3 0-5.7 2.55-5.7 6.1 0 .9.14 1.62.25 2.08-.85.92-1.75 2.48-1.75 3.92 0 .92.34 1.48.88 1.48.36 0 .68-.26.96-.67.18.67.5 1.24.94 1.68-.74.29-1.23.75-1.23 1.29 0 .85 1.45 1.52 3.35 1.52.83 0 1.6-.13 2.2-.34.07.01.13.01.2.01s.13 0 .2-.01c.6.21 1.37.34 2.2.34 1.9 0 3.35-.67 3.35-1.52 0-.54-.49-1-1.23-1.29.44-.44.76-1.01.94-1.68.28.41.6.67.96.67.54 0 .88-.56.88-1.48 0-1.44-.9-3-1.75-3.92.11-.46.25-1.18.25-2.08C17.7 4.55 15.3 2 12 2Z" />
     </svg>
   );
@@ -123,76 +128,64 @@ function GatewayStatusCard({
       : running
         ? "warning"
         : "danger";
+  const platformName = code === "TG" ? "Telegram" : "QQ 机器人";
 
   return (
     <motion.div
       layout
-      whileHover={{ y: -3, scale: 1.005 }}
+      whileHover={{ y: -2 }}
       transition={{
         layout: SPRING_LAYOUT,
         type: "spring",
         stiffness: 360,
-        damping: 24,
+        damping: 26,
       }}
-      className="relative overflow-hidden rounded-2xl border border-border/80 bg-card/75 p-5 shadow-sm transition-colors hover:border-blue-500/40 hover:shadow-md"
+      className="relative overflow-hidden rounded-2xl border border-border/80 bg-card/75 p-5 shadow-sm transition-colors hover:border-primary/35 hover:shadow-md"
     >
-      <motion.svg
+      {/* Subtle top-right radial ambient glow aligned with brand palette */}
+      <div
         aria-hidden="true"
-        viewBox="0 0 180 180"
-        preserveAspectRatio="none"
-        initial={false}
-        animate={{
-          x: enabled ? [0, -6, 0] : 56,
-          opacity: enabled ? 1 : 0.22,
-        }}
-        transition={
+        className={`pointer-events-none absolute -right-12 -top-12 size-44 rounded-full blur-3xl transition-opacity duration-300 ${
           enabled
-            ? {
-                x: { repeat: Infinity, duration: 7, ease: "easeInOut" },
-                opacity: { duration: 0.3 },
-              }
-            : { type: "spring", stiffness: 220, damping: 26 }
-        }
-        className={`pointer-events-none absolute inset-y-0 right-0 h-full w-44 transition-colors duration-300 ${
-          enabled ? "text-blue-500/18" : "text-muted-foreground/8"
+            ? code === "TG"
+              ? "bg-sky-500/10 opacity-100"
+              : "bg-primary/12 opacity-100"
+            : "bg-muted-foreground/5 opacity-40"
         }`}
-      >
-        <path
-          d="M42 0 C18 28, 56 54, 34 86 C12 118, 52 146, 26 180 L180 180 L180 0 Z"
-          fill="currentColor"
-        />
-      </motion.svg>
+      />
 
-      {/* Top-right animated Start / Stop button */}
+      {/* Top-right Start / Stop button */}
       <motion.button
         type="button"
-        title={enabled ? `暂停 ${code} 网关` : `启动 ${code} 网关`}
-        aria-label={enabled ? `暂停 ${code} 网关` : `启动 ${code} 网关`}
+        title={enabled ? `暂停 ${platformName}` : `启动 ${platformName}`}
+        aria-label={enabled ? `暂停 ${platformName}` : `启动 ${platformName}`}
         disabled={toggling}
-        whileHover={{ scale: 1.07 }}
-        whileTap={{ scale: 0.86, rotate: enabled ? -10 : 10 }}
-        transition={{ type: "spring", stiffness: 420, damping: 20 }}
+        whileHover={{ scale: 1.05 }}
+        whileTap={{ scale: 0.92 }}
+        transition={{ type: "spring", stiffness: 420, damping: 22 }}
         onClick={onToggle}
-        className={`absolute right-4 top-4 z-20 flex size-10 cursor-pointer items-center justify-center rounded-2xl shadow-md transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-wait disabled:opacity-70 ${
+        className={`absolute right-4 top-4 z-20 flex size-9 cursor-pointer items-center justify-center rounded-xl border transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-wait disabled:opacity-70 ${
           enabled
-            ? "bg-blue-500 text-white shadow-blue-500/25 hover:bg-blue-400"
-            : "bg-secondary text-foreground hover:bg-secondary/80"
+            ? "border-border/80 bg-muted/60 text-muted-foreground hover:border-primary/40 hover:bg-primary/12 hover:text-primary"
+            : "border-primary/30 bg-primary text-primary-foreground shadow-sm hover:bg-primary/90"
         }`}
       >
         {toggling ? (
           <Loader2 className="size-4 animate-spin" />
         ) : enabled ? (
-          <Pause className="size-4" />
+          <Pause className="size-3.5" />
         ) : (
-          <Play className="size-4 translate-x-[1px]" />
+          <Play className="size-3.5 translate-x-[1px]" />
         )}
       </motion.button>
 
-      <div className="relative z-10 flex flex-col gap-4 pr-12">
-        {/* Status header */}
-        <div className="flex items-center gap-2 text-xs text-muted-foreground">
-          <Activity className="size-3.5" />
-          <span>状态</span>
+      <div className="relative z-10 flex flex-col gap-4">
+        {/* Platform + Status header */}
+        <div className="flex items-center gap-2 pr-12 text-xs text-muted-foreground">
+          <span className="inline-flex items-center gap-1.5 rounded-md border border-border/70 bg-muted/45 px-2 py-0.5 text-[11px] font-medium text-foreground">
+            <PlatformEmblem code={code} className="size-3.5" />
+            {platformName}
+          </span>
           <AnimatedBadge status={statusBadgeTone} size="sm">
             {statusLabel}
           </AnimatedBadge>
@@ -203,19 +196,17 @@ function GatewayStatusCard({
           <button
             type="button"
             onClick={onOpenSettings}
-            className={`flex size-16 shrink-0 cursor-pointer items-center justify-center overflow-hidden rounded-2xl transition-transform hover:scale-105 ${
-              avatarUrl ? "" : "bg-transparent"
-            }`}
+            className="relative flex size-14 shrink-0 cursor-pointer items-center justify-center overflow-hidden rounded-2xl border border-border/60 bg-muted/30 transition-transform hover:scale-105"
             title="点击前往网关设置"
           >
             {avatarUrl ? (
               <img src={avatarUrl} alt={title} className="size-full object-cover" />
             ) : (
-              <PlatformEmblem code={code} />
+              <PlatformEmblem code={code} className="size-8" />
             )}
           </button>
           <div className="min-w-0 flex-1">
-            <div className="truncate text-lg font-semibold leading-tight tracking-tight text-foreground">
+            <div className="truncate text-base font-semibold leading-tight tracking-tight text-foreground">
               {title}
             </div>
             {subtitle ? (
@@ -246,7 +237,7 @@ function GatewayStatusCard({
                     size="sm"
                   >
                     {probeResult.ok
-                      ? `延迟 ${probeResult.latencyMs}ms`
+                      ? `延迟 ${formatLatency(probeResult.latencyMs)}`
                       : probeResult.skipped
                         ? "未启用"
                         : "测试失败"}
@@ -262,16 +253,16 @@ function GatewayStatusCard({
         </div>
 
         {/* Bottom metadata grid */}
-        <div className="grid grid-cols-2 gap-3 border-t border-border/50 pt-3 text-xs sm:grid-cols-3">
+        <div className="grid grid-cols-3 gap-3 border-t border-border/50 pt-3 text-xs">
           <div>
             <div className="text-[11px] text-muted-foreground">运行时长</div>
-            <div className="mt-0.5 font-mono font-medium text-foreground">
+            <div className="mt-0.5 font-mono font-medium tabular-nums text-foreground">
               {enabled ? formatDurationClock(uptimeSec) : "--:--:--"}
             </div>
           </div>
           <div>
             <div className="text-[11px] text-muted-foreground">消息数</div>
-            <div className="mt-0.5 font-mono font-medium text-foreground">{messageCount}</div>
+            <div className="mt-0.5 font-mono font-medium tabular-nums text-foreground">{messageCount}</div>
           </div>
           <div>
             <div className="text-[11px] text-muted-foreground">白名单</div>
@@ -513,10 +504,10 @@ export function OverviewPanel({
             animate={{ opacity: 1, y: 0, scale: 1 }}
             exit={{ opacity: 0, y: -8, scale: 0.98 }}
             transition={{ ...SPRING_LAYOUT, opacity: { duration: 0.16 } }}
-            className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-blue-500/30 bg-blue-500/5 px-4 py-3 text-xs"
+            className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-primary/30 bg-primary/5 px-4 py-3 text-xs"
           >
             <div className="flex flex-wrap items-center gap-2">
-              <KeyRound className="size-4 text-blue-400" />
+              <KeyRound className="size-4 text-primary" />
               <span className="font-medium text-foreground">主人绑定指令：</span>
               <code className="rounded-md bg-muted px-2 py-1 font-mono text-xs font-semibold text-foreground">
                 {pairingInfo.command}
@@ -549,7 +540,7 @@ export function OverviewPanel({
       <motion.div
         layout
         transition={{ layout: SPRING_LAYOUT }}
-        className="grid grid-cols-1 gap-4 lg:grid-cols-2"
+        className="grid grid-cols-1 gap-4 md:grid-cols-2"
       >
         <GatewayStatusCard
           code="TG"
@@ -617,7 +608,7 @@ export function OverviewPanel({
         >
           <Card
             variant="muted"
-            className="h-full rounded-2xl border border-border/80 bg-card/75 px-1 shadow-sm transition-colors hover:border-blue-500/40 hover:shadow-md"
+            className="h-full rounded-2xl border border-border/80 bg-card/75 px-1 shadow-sm transition-colors hover:border-primary/35 hover:shadow-md"
           >
             <CardHeader className="pb-1">
               <div className="flex items-center justify-between">
@@ -633,37 +624,55 @@ export function OverviewPanel({
             <CardContent className="grid grid-cols-2 gap-3 sm:grid-cols-3">
               <div className="rounded-xl border border-border/60 bg-muted/30 p-3">
                 <div className="text-[11px] text-muted-foreground">总消息数</div>
-                <div className="mt-1 font-mono text-lg font-semibold text-foreground">
+                <div className="mt-1 font-mono text-lg font-semibold tabular-nums text-foreground">
                   {overview?.messages.total ?? 0}
                 </div>
               </div>
               <div className="rounded-xl border border-border/60 bg-muted/30 p-3">
                 <div className="text-[11px] text-muted-foreground">接收消息</div>
-                <div className="mt-1 font-mono text-lg font-semibold text-foreground">
+                <div className="mt-1 font-mono text-lg font-semibold tabular-nums text-foreground">
                   {overview?.messages.inbound ?? 0}
                 </div>
               </div>
               <div className="rounded-xl border border-border/60 bg-muted/30 p-3">
                 <div className="text-[11px] text-muted-foreground">发出回复</div>
-                <div className="mt-1 font-mono text-lg font-semibold text-foreground">
+                <div className="mt-1 font-mono text-lg font-semibold tabular-nums text-foreground">
                   {overview?.messages.outbound ?? 0}
                 </div>
               </div>
               <div className="rounded-xl border border-border/60 bg-muted/30 p-3">
                 <div className="text-[11px] text-muted-foreground">近 24 小时</div>
-                <div className="mt-1 font-mono text-base font-semibold text-foreground">
+                <div
+                  className={`mt-1 font-mono text-base font-semibold tabular-nums ${
+                    (overview?.messages.last24h ?? 0) === 0
+                      ? "text-muted-foreground"
+                      : "text-foreground"
+                  }`}
+                >
                   {overview?.messages.last24h ?? 0}
                 </div>
               </div>
               <div className="rounded-xl border border-border/60 bg-muted/30 p-3">
                 <div className="text-[11px] text-muted-foreground">热区消息</div>
-                <div className="mt-1 font-mono text-base font-semibold text-foreground">
+                <div
+                  className={`mt-1 font-mono text-base font-semibold tabular-nums ${
+                    (overview?.messages.hotCount ?? 0) === 0
+                      ? "text-muted-foreground"
+                      : "text-foreground"
+                  }`}
+                >
                   {overview?.messages.hotCount ?? 0}
                 </div>
               </div>
               <div className="rounded-xl border border-border/60 bg-muted/30 p-3">
                 <div className="text-[11px] text-muted-foreground">Web 消息</div>
-                <div className="mt-1 font-mono text-base font-semibold text-foreground">
+                <div
+                  className={`mt-1 font-mono text-base font-semibold tabular-nums ${
+                    (overview?.messages.byChannel.web ?? 0) === 0
+                      ? "text-muted-foreground"
+                      : "text-foreground"
+                  }`}
+                >
                   {overview?.messages.byChannel.web ?? 0}
                 </div>
               </div>
@@ -673,12 +682,12 @@ export function OverviewPanel({
 
         <motion.div
           layout
-          whileHover={{ y: -3, scale: 1.005 }}
-          transition={{ layout: SPRING_LAYOUT, type: "spring", stiffness: 360, damping: 24 }}
+          whileHover={{ y: -2 }}
+          transition={{ layout: SPRING_LAYOUT, type: "spring", stiffness: 360, damping: 26 }}
         >
           <Card
             variant="muted"
-            className="h-full rounded-2xl border border-border/80 bg-card/75 px-1 shadow-sm transition-colors hover:border-blue-500/40 hover:shadow-md"
+            className="h-full rounded-2xl border border-border/80 bg-card/75 px-1 shadow-sm transition-colors hover:border-primary/35 hover:shadow-md"
           >
             <CardHeader className="pb-1">
               <div className="flex items-center justify-between">
@@ -700,7 +709,7 @@ export function OverviewPanel({
               <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
                 <div className="rounded-xl border border-border/60 bg-muted/30 p-3">
                   <div className="text-[11px] text-muted-foreground">后台工单</div>
-                  <div className="mt-1 font-mono text-base font-semibold text-foreground">
+                  <div className="mt-1 font-mono text-base font-semibold tabular-nums text-foreground">
                     {overview?.tickets.total ?? 0}
                     <span className="ml-1.5 text-[11px] font-normal text-muted-foreground">
                       ({overview?.tickets.active ?? 0} 活跃)
@@ -709,13 +718,26 @@ export function OverviewPanel({
                 </div>
                 <div className="rounded-xl border border-border/60 bg-muted/30 p-3">
                   <div className="text-[11px] text-muted-foreground">平均耗时</div>
-                  <div className="mt-1 font-mono text-base font-semibold text-foreground">
-                    {overview?.turns.avgLatencyMs != null ? `${overview.turns.avgLatencyMs}ms` : "--"}
+                  <div
+                    className="mt-1 font-mono text-base font-semibold tabular-nums text-foreground"
+                    title={
+                      overview?.turns.avgLatencyMs != null
+                        ? `${overview.turns.avgLatencyMs}ms`
+                        : undefined
+                    }
+                  >
+                    {formatLatency(overview?.turns.avgLatencyMs)}
                   </div>
                 </div>
                 <div className="rounded-xl border border-border/60 bg-muted/30 p-3">
                   <div className="text-[11px] text-muted-foreground">缓存命中率</div>
-                  <div className="mt-1 font-mono text-base font-semibold text-foreground">
+                  <div
+                    className={`mt-1 font-mono text-base font-semibold tabular-nums ${
+                      (overview?.turns.avgCacheHitRate ?? 0) === 0
+                        ? "text-muted-foreground"
+                        : "text-foreground"
+                    }`}
+                  >
                     {overview?.turns.avgCacheHitRate != null
                       ? `${overview.turns.avgCacheHitRate}%`
                       : "--"}

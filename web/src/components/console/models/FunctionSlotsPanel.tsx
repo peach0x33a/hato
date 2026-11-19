@@ -1,7 +1,9 @@
-import { AlertTriangle, Brain, Eye, KeyRound } from "lucide-react";
-import { useMemo } from "react";
+import { AlertTriangle, Brain, ChevronDown, Eye, KeyRound } from "lucide-react";
+import { AnimatePresence, motion, useReducedMotion } from "motion/react";
+import { useMemo, useState } from "react";
 import type { ModelsFileConfig, SecretState } from "@/api";
 import { ConsoleSelect } from "@/components/console/ConsolePrimitives";
+import { EASE_OUT } from "@/lib/ease";
 import {
   resolveProviderKeyStatus,
   SLOT_DEFINITIONS,
@@ -91,6 +93,27 @@ export function FunctionSlotsPanel({
   onChangeSlot,
   onConfigureProvider,
 }: FunctionSlotsPanelProps) {
+  const reduceMotion = useReducedMotion() ?? false;
+  const [collapsed, setCollapsed] = useState<boolean>(() => {
+    try {
+      return window.localStorage.getItem("hato.modelsRoutingCollapsed") === "1";
+    } catch {
+      return false;
+    }
+  });
+
+  const toggleCollapsed = () => {
+    setCollapsed((prev) => {
+      const next = !prev;
+      try {
+        window.localStorage.setItem("hato.modelsRoutingCollapsed", next ? "1" : "0");
+      } catch {
+        // ignore storage restrictions
+      }
+      return next;
+    });
+  };
+
   const visibleSlots = useMemo(
     () =>
       hindsightEnabled
@@ -137,22 +160,42 @@ export function FunctionSlotsPanel({
       aria-labelledby="function-slots-heading"
       className="rounded-xl border border-zinc-200 bg-white dark:border-zinc-800/90 dark:bg-[#0f1418]"
     >
-      <div className="flex flex-wrap items-center justify-between gap-3 border-b border-zinc-200/80 px-5 py-3.5 dark:border-zinc-800/80">
-        <div className="flex items-center gap-2.5">
-          <h2
-            id="function-slots-heading"
-            className="text-sm font-semibold text-zinc-900 dark:text-zinc-100"
-          >
-            功能槽位 · 路由表
-          </h2>
-          <span className="text-xs text-zinc-500 tabular-nums dark:text-zinc-400">
-            {visibleSlots.length} 个运行时槽位
-          </span>
-        </div>
-      </div>
+      <button
+        type="button"
+        aria-expanded={!collapsed}
+        onClick={toggleCollapsed}
+        className={`flex w-full cursor-pointer items-center justify-between gap-3 px-5 py-3.5 text-left transition-colors hover:bg-zinc-50/70 dark:hover:bg-white/[0.02] ${
+          collapsed
+            ? "rounded-xl"
+            : "rounded-t-xl border-b border-zinc-200/80 dark:border-zinc-800/80"
+        }`}
+      >
+        <h2
+          id="function-slots-heading"
+          className="text-sm font-semibold text-zinc-900 dark:text-zinc-100"
+        >
+          模型路由表
+        </h2>
+        <ChevronDown
+          aria-hidden="true"
+          className={`h-4 w-4 shrink-0 text-zinc-500 transition-transform duration-200 dark:text-zinc-400 ${
+            collapsed ? "-rotate-90" : "rotate-0"
+          }`}
+        />
+      </button>
 
-      {/* Desktop Routing Table */}
-      <div className="hidden md:block">
+      <AnimatePresence initial={false}>
+        {!collapsed ? (
+          <motion.div
+            key="routing-table-body"
+            initial={reduceMotion ? false : { height: 0, opacity: 0 }}
+            animate={{ height: "auto", opacity: 1 }}
+            exit={reduceMotion ? undefined : { height: 0, opacity: 0 }}
+            transition={reduceMotion ? { duration: 0 } : { duration: 0.2, ease: EASE_OUT }}
+            className="overflow-hidden"
+          >
+            {/* Desktop Routing Table */}
+            <div className="hidden md:block">
         <table className="w-full border-collapse text-left text-xs">
           <thead>
             <tr className="border-b border-zinc-200/80 text-zinc-500 dark:border-zinc-800/80 dark:text-zinc-400">
@@ -361,6 +404,9 @@ export function FunctionSlotsPanel({
           );
         })}
       </div>
+          </motion.div>
+        ) : null}
+      </AnimatePresence>
     </section>
   );
 }

@@ -30,6 +30,7 @@ import {
   Sun,
   Terminal,
   Trash2,
+  User,
   X,
 } from "lucide-react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
@@ -1287,7 +1288,7 @@ export function SettingsPanel({
                             alt={profile.displayName || idStr}
                             className="size-9 shrink-0 rounded-full object-cover ring-1 ring-border/80"
                           />
-                        ) : (
+                        ) : profile?.displayName ? (
                           <div
                             className={cn(
                               "grid size-9 shrink-0 place-items-center rounded-full border text-xs font-semibold",
@@ -1295,6 +1296,10 @@ export function SettingsPanel({
                             )}
                           >
                             {initials}
+                          </div>
+                        ) : (
+                          <div className="grid size-9 shrink-0 place-items-center rounded-full border border-border/70 bg-muted/50 text-muted-foreground">
+                            <User className="size-4" />
                           </div>
                         )}
 
@@ -1773,20 +1778,6 @@ export function SettingsPanel({
                 </div>
               </SettingsRow>
               <SettingsRow
-                title="完全访问"
-                description="无需批准即可编辑文件并运行可访问网络的命令，将清除各后端单独设置"
-              >
-                <Button
-                  type="button"
-                  size="sm"
-                  variant="outline"
-                  onClick={applyAllNoApprovalPreset}
-                >
-                  <ShieldAlert className="size-3.5 text-amber-500" />
-                  设为完全访问
-                </Button>
-              </SettingsRow>
-              <SettingsRow
                 title="复用本机配置"
                 description="继承本机已有账号登录与供应商中转设置"
               >
@@ -1807,6 +1798,28 @@ export function SettingsPanel({
                 />
               </SettingsRow>
             </SettingsCardGroup>
+
+            <div className="flex flex-col gap-3 rounded-xl border border-amber-500/30 bg-amber-500/6 px-4 py-3.5 sm:flex-row sm:items-center sm:justify-between">
+              <div className="flex min-w-0 items-start gap-2.5">
+                <ShieldAlert className="mt-0.5 size-4 shrink-0 text-amber-500" />
+                <div className="min-w-0">
+                  <div className="text-[13px] font-medium text-foreground">一键完全访问（高权限）</div>
+                  <div className="mt-0.5 text-xs text-muted-foreground">
+                    无需批准即可编辑文件并运行可访问网络的命令，且将清除各后端单独覆写设置
+                  </div>
+                </div>
+              </div>
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                className="shrink-0 border-amber-500/40 text-amber-700 hover:bg-amber-500/12 dark:text-amber-300"
+                onClick={applyAllNoApprovalPreset}
+              >
+                <ShieldAlert className="size-3.5" />
+                设为完全访问
+              </Button>
+            </div>
 
             <SettingsCardGroup
               title="环境变量"
@@ -2126,9 +2139,9 @@ export function SettingsPanel({
                       : ["all"];
 
                   return (
-                    <div key={ruleId} className="flex flex-col gap-3 px-4 py-4">
-                      <div className="flex items-start justify-between gap-3">
-                        <div className="grid flex-1 gap-3 sm:grid-cols-2">
+                    <div key={ruleId} className="flex items-start gap-3 px-4 py-4">
+                      <div className="flex min-w-0 flex-1 flex-col gap-3">
+                        <div className="grid gap-3 sm:grid-cols-2">
                           <ConsoleInput
                             size="sm"
                             label="规则名称"
@@ -2146,55 +2159,56 @@ export function SettingsPanel({
                             }
                           />
                         </div>
-                        <Button
-                          type="button"
-                          variant="ghost"
-                          size="icon"
-                          aria-label="删除代理规则"
-                          onClick={() => removeProxyRule(idx, ruleId)}
-                          className="mt-5 shrink-0 text-muted-foreground hover:text-destructive"
-                        >
-                          <Trash2 className="size-4" />
-                        </Button>
+
+                        <div className="grid gap-3 sm:grid-cols-12">
+                          <div className="sm:col-span-4">
+                            <ConsoleSelect
+                              size="sm"
+                              label="连接方式"
+                              value={isDirect ? "direct" : "proxy"}
+                              options={MODE_OPTIONS}
+                              onValueChange={(nextMode) => {
+                                if (nextMode === "direct") {
+                                  if (!isDirect && rule.url.trim()) {
+                                    setLastProxyUrls((prev) => ({
+                                      ...prev,
+                                      [ruleId]: rule.url.trim(),
+                                    }));
+                                  }
+                                  updateProxyRule(idx, { url: "direct" });
+                                } else {
+                                  updateProxyRule(idx, {
+                                    url: lastProxyUrls[ruleId] || "http://127.0.0.1:7890",
+                                  });
+                                }
+                              }}
+                            />
+                          </div>
+                          <div className="sm:col-span-8">
+                            <ConsoleInput
+                              size="sm"
+                              label="代理地址"
+                              value={isDirect ? "" : rule.url}
+                              disabled={isDirect}
+                              onChange={(v) => updateProxyRule(idx, { url: v })}
+                              placeholder={
+                                isDirect ? "直连模式（无需填写代理地址）" : "http://127.0.0.1:7890"
+                              }
+                            />
+                          </div>
+                        </div>
                       </div>
 
-                      <div className="grid gap-3 pr-11 sm:grid-cols-12">
-                        <div className="sm:col-span-4">
-                          <ConsoleSelect
-                            size="sm"
-                            label="连接方式"
-                            value={isDirect ? "direct" : "proxy"}
-                            options={MODE_OPTIONS}
-                            onValueChange={(nextMode) => {
-                              if (nextMode === "direct") {
-                                if (!isDirect && rule.url.trim()) {
-                                  setLastProxyUrls((prev) => ({
-                                    ...prev,
-                                    [ruleId]: rule.url.trim(),
-                                  }));
-                                }
-                                updateProxyRule(idx, { url: "direct" });
-                              } else {
-                                updateProxyRule(idx, {
-                                  url: lastProxyUrls[ruleId] || "http://127.0.0.1:7890",
-                                });
-                              }
-                            }}
-                          />
-                        </div>
-                        <div className="sm:col-span-8">
-                          <ConsoleInput
-                            size="sm"
-                            label="代理地址"
-                            value={isDirect ? "" : rule.url}
-                            disabled={isDirect}
-                            onChange={(v) => updateProxyRule(idx, { url: v })}
-                            placeholder={
-                              isDirect ? "直连模式（无需填写代理地址）" : "http://127.0.0.1:7890"
-                            }
-                          />
-                        </div>
-                      </div>
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="icon"
+                        aria-label="删除代理规则"
+                        onClick={() => removeProxyRule(idx, ruleId)}
+                        className="mt-5 shrink-0 text-muted-foreground hover:text-destructive"
+                      >
+                        <Trash2 className="size-4" />
+                      </Button>
                     </div>
                   );
                 })
@@ -2370,6 +2384,8 @@ export function SettingsPanel({
         <StatefulButton
           type="button"
           size="sm"
+          variant={isDirty || saveState !== "idle" ? undefined : "secondary"}
+          disabled={!isDirty && saveState === "idle"}
           state={saveState}
           loadingText="保存中…"
           successText="已保存"
@@ -2377,7 +2393,7 @@ export function SettingsPanel({
           icon={<Save className="size-3.5" />}
           onClick={() => void handleSave()}
         >
-          保存设置
+          {isDirty ? "保存设置" : "已保存"}
         </StatefulButton>
       </div>
     );

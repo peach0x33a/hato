@@ -637,9 +637,17 @@ export function PromptPanel({
 
   const selectedContent = selectedItem ? getItemContent(selectedItem) : "";
   const selectedLineCount = selectedContent ? selectedContent.split("\n").length : 0;
+  const formatDisplayPath = (rawPath: string) => {
+    const normalized = rawPath.replace(/\\/g, "/");
+    const markerIdx = normalized.lastIndexOf("/data/prompts/");
+    if (markerIdx >= 0) return normalized.slice(markerIdx + 1);
+    const promptsIdx = normalized.lastIndexOf("/prompts/");
+    if (promptsIdx >= 0) return normalized.slice(promptsIdx + 1);
+    return normalized;
+  };
 
   return (
-    <div className="flex min-h-full flex-col lg:h-full lg:min-h-0">
+    <div className="flex min-h-full flex-col md:h-full md:min-h-0">
       {/* Sticky Page Header */}
       <div className="sticky top-0 z-30 shrink-0 border-b border-border bg-background px-6 py-3.5">
         <div className="mx-auto flex max-w-[1280px] flex-wrap items-center justify-between gap-4">
@@ -686,7 +694,8 @@ export function PromptPanel({
             <Button
               type="button"
               size="sm"
-              disabled={savePhase === "saving"}
+              variant={anyDirty || savePhase !== "idle" ? undefined : "secondary"}
+              disabled={savePhase === "saving" || (!anyDirty && savePhase === "idle")}
               onClick={() => void handleSaveAll()}
             >
               {savePhase === "saving" ? (
@@ -702,7 +711,7 @@ export function PromptPanel({
               ) : (
                 <>
                   <Save className="size-3.5" />
-                  <span>保存更改</span>
+                  <span>{anyDirty ? "保存更改" : "已保存"}</span>
                 </>
               )}
             </Button>
@@ -711,19 +720,26 @@ export function PromptPanel({
       </div>
 
       {/* Main Content: Flat Hairline-Divided Split Pane */}
-      <div className="mx-auto grid w-full max-w-[1280px] flex-1 grid-cols-1 divide-y divide-border lg:min-h-0 lg:grid-cols-[340px_minmax(0,1fr)] lg:grid-rows-[minmax(0,1fr)] lg:divide-x lg:divide-y-0 lg:overflow-hidden">
+      <div className="mx-auto grid w-full max-w-[1280px] flex-1 grid-cols-1 divide-y divide-border md:min-h-0 md:grid-cols-[300px_minmax(0,1fr)] md:grid-rows-[minmax(0,1fr)] md:divide-x md:divide-y-0 md:overflow-hidden lg:grid-cols-[330px_minmax(0,1fr)]">
         {/* Left Pane: Ordered Prompt Layers */}
         <section
           aria-label="提示词层级列表"
-          className="flex flex-col lg:h-full lg:min-h-0"
+          className="flex flex-col md:h-full md:min-h-0"
         >
-          <div className="shrink-0 border-b border-border px-5 py-3.5">
+          <div className="flex shrink-0 items-center justify-between gap-2 border-b border-border px-4 py-3">
             <h2 className="text-xs font-semibold tracking-wide text-foreground">
               提示词编排顺序
             </h2>
+            <button
+              type="button"
+              onClick={handleResetDefaultOrder}
+              className="text-[11px] font-medium text-muted-foreground transition-colors hover:text-foreground"
+            >
+              恢复默认顺序
+            </button>
           </div>
 
-          <div className="flex-1 divide-y divide-border/60 lg:min-h-0 lg:overflow-y-auto">
+          <div className="flex-1 divide-y divide-border/60 md:min-h-0 md:overflow-y-auto">
             {items.length === 0 ? (
               <div className="flex h-32 items-center justify-center px-4 text-xs text-muted-foreground">
                 暂无提示词层级
@@ -842,20 +858,10 @@ export function PromptPanel({
               );
             }))}
           </div>
-
-          <div className="mt-auto flex shrink-0 items-center justify-between gap-2 border-t border-border px-5 py-3">
-            <button
-              type="button"
-              onClick={handleResetDefaultOrder}
-              className="text-xs font-medium text-muted-foreground transition-colors hover:text-foreground"
-            >
-              恢复默认顺序
-            </button>
-          </div>
         </section>
 
         {/* Right Pane: Flat Editor & Live Combined Preview */}
-        <section className="flex min-h-[480px] flex-col lg:h-full lg:min-h-0">
+        <section className="flex min-h-[480px] flex-col md:h-full md:min-h-0">
           {/* Flat Underline Sub-Tabs Header */}
           <div className="flex shrink-0 flex-wrap items-center justify-between gap-3 border-b border-border px-6">
             <div className="-mb-px flex items-center gap-5" role="tablist">
@@ -935,8 +941,11 @@ export function PromptPanel({
                     >
                       {KIND_BADGE[selectedItem.kind].label}
                     </span>
-                    <span className="truncate font-mono text-xs text-muted-foreground">
-                      {selectedItem.path}
+                    <span
+                      className="truncate font-mono text-xs text-muted-foreground"
+                      title={selectedItem.path}
+                    >
+                      {formatDisplayPath(selectedItem.path)}
                     </span>
                   </div>
                 </div>

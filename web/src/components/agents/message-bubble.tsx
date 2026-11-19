@@ -168,8 +168,8 @@ function bubbleContentClass(
   interactive: boolean,
 ) {
   return cn(
-    "relative z-0 min-w-9 max-w-[88%] rounded-xl px-3.5 py-2 text-sm leading-6 text-foreground sm:max-w-[78%]",
-    "[&_a]:font-medium [&_a]:underline [&_a]:underline-offset-4 [&_code]:rounded [&_code]:bg-muted/60 [&_code]:px-1 [&_code]:py-0.5 [&_code]:font-mono [&_code]:text-[0.9em] [&_ol]:my-2 [&_ol]:list-decimal [&_ol]:pl-5 [&_p+p]:mt-2 [&_pre]:my-2 [&_pre]:overflow-x-auto [&_pre]:rounded-lg [&_pre]:border [&_pre]:border-border/50 [&_pre]:bg-muted/40 [&_pre]:p-3 [&_ul]:my-2 [&_ul]:list-disc [&_ul]:pl-5",
+    "relative z-0 min-w-0 max-w-[88%] rounded-xl px-3.5 py-2 text-sm leading-6 text-foreground sm:max-w-[78%]",
+    "[&_a]:font-medium [&_a]:underline [&_a]:underline-offset-4 [&_code]:rounded [&_code]:bg-muted/60 [&_code]:px-1 [&_code]:py-0.5 [&_code]:font-mono [&_code]:text-[0.9em] [&_ol]:my-2 [&_ol]:list-decimal [&_ol]:pl-5 [&_p+p]:mt-2 [&_pre]:my-2 [&_pre]:max-w-full [&_pre]:overflow-x-auto [&_pre]:rounded-lg [&_pre]:border [&_pre]:border-border/50 [&_pre]:bg-muted/40 [&_pre]:p-3 [&_ul]:my-2 [&_ul]:list-disc [&_ul]:pl-5",
     variant === "solid" && "text-background",
     variant === "ghost" && "w-full max-w-none sm:max-w-none rounded-none px-0 py-0.5",
     variant === "danger" && "text-destructive",
@@ -186,8 +186,8 @@ function bubbleSurfaceClass(
     "pointer-events-none absolute inset-0 -z-10 rounded-[inherit]",
     align === "end" ? "origin-bottom-right" : "origin-bottom-left",
     variant === "solid" && "bg-foreground",
-    variant === "soft" && "bg-muted/65",
-    variant === "tint" && "bg-primary/10",
+    variant === "soft" && "border border-border/55 bg-muted/65 dark:border-border/35",
+    variant === "tint" && "border border-primary/25 bg-primary/14 dark:border-primary/20 dark:bg-primary/12",
     variant === "outline" && "border border-border/60 bg-transparent",
     variant === "danger" && "bg-destructive/10",
   );

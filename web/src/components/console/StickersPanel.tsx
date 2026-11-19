@@ -196,15 +196,17 @@ export function StickersPanel({ onToast }: StickersPanelProps) {
           </CardContent>
         </Card>
       ) : stickers.length === 0 ? (
-        <Card>
-          <CardContent className="flex flex-col items-center justify-center gap-2 py-14 text-center">
-            <Smile className="size-8 text-muted-foreground/50" />
+        <div className="flex flex-col items-center justify-center gap-3 rounded-2xl border border-dashed border-border/80 bg-card/30 px-6 py-16 text-center">
+          <div className="grid size-12 place-items-center rounded-2xl border border-border/60 bg-muted/40 text-muted-foreground">
+            <Smile className="size-6" />
+          </div>
+          <div className="space-y-1">
             <div className="text-sm font-medium text-foreground">暂无表情包</div>
-            <p className="max-w-md text-xs text-muted-foreground">
+            <p className="max-w-md text-xs leading-relaxed text-muted-foreground">
               可以在 Telegram / QQ 中对 Hato 说「我给你发一堆表情包你保存下来」，或直接发送 TG 贴纸包链接让她导入。
             </p>
-          </CardContent>
-        </Card>
+          </div>
+        </div>
       ) : (
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
           {stickers.map((item) => (

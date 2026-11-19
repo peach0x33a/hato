@@ -6,6 +6,7 @@ import {
   History,
   ImagePlus,
   Loader2,
+  MoreHorizontal,
   RefreshCw,
   Terminal,
   Trash2,
@@ -185,6 +186,7 @@ export function ChatPanel({
   const [historyError, setHistoryError] = useState("");
   const [hoverTraceOpen, setHoverTraceOpen] = useState(false);
   const [hoverMemoryOpen, setHoverMemoryOpen] = useState(false);
+  const [moreMenuOpen, setMoreMenuOpen] = useState(false);
   const [mobileSessionsOpen, setMobileSessionsOpen] = useState(false);
   const [latestTrace, setLatestTrace] = useState<TurnTraceRecord | null>(null);
   const [traceLoading, setTraceLoading] = useState(false);
@@ -196,11 +198,14 @@ export function ChatPanel({
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const traceRef = useRef<HTMLDivElement | null>(null);
   const memoryRef = useRef<HTMLDivElement | null>(null);
+  const moreMenuRef = useRef<HTMLDivElement | null>(null);
 
   const dismissTrace = useCallback(() => setHoverTraceOpen(false), []);
   const dismissMemory = useCallback(() => setHoverMemoryOpen(false), []);
+  const dismissMoreMenu = useCallback(() => setMoreMenuOpen(false), []);
   useDismiss(hoverTraceOpen, dismissTrace, traceRef);
   useDismiss(hoverMemoryOpen, dismissMemory, memoryRef);
+  useDismiss(moreMenuOpen, dismissMoreMenu, moreMenuRef);
 
   const loadLatestTrace = async () => {
     setTraceLoading(true);
@@ -608,159 +613,212 @@ export function ChatPanel({
               </Button>
             ) : (
               <>
-                {/* Click-toggled Popover: 查看 Trace */}
-                <div ref={traceRef} className="sm:relative">
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    size="sm"
-                    aria-expanded={hoverTraceOpen}
-                    className="h-7 px-2 text-xs"
-                    onClick={() => {
-                      setHoverMemoryOpen(false);
-                      setHoverTraceOpen((prev) => {
-                        const next = !prev;
-                        if (next) void loadLatestTrace();
-                        return next;
-                      });
-                    }}
-                  >
-                    <Activity className="size-3.5" />
-                    查看 Trace
-                  </Button>
+                  {/* Click-toggled Popover: 查看 Trace */}
+                  <div ref={traceRef} className="sm:relative">
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="sm"
+                      aria-expanded={hoverTraceOpen}
+                      className="h-7 px-2 text-xs text-muted-foreground hover:text-foreground"
+                      onClick={() => {
+                        setHoverMemoryOpen(false);
+                        setMoreMenuOpen(false);
+                        setHoverTraceOpen((prev) => {
+                          const next = !prev;
+                          if (next) void loadLatestTrace();
+                          return next;
+                        });
+                      }}
+                    >
+                      <Activity className="size-3.5" />
+                      Trace
+                    </Button>
 
-                  {hoverTraceOpen && (
-                    <div className="absolute top-full inset-x-3 z-50 mt-1 rounded-lg border border-border bg-popover p-3 text-xs shadow-md sm:inset-x-auto sm:right-0 sm:w-[min(22rem,calc(100vw-2rem))]">
-                      <div className="mb-2 flex items-center justify-between border-b border-border/70 pb-1.5">
-                        <span className="font-medium text-foreground">最近一次调用 Trace</span>
+                    {hoverTraceOpen && (
+                      <div className="absolute top-full inset-x-3 z-50 mt-1 rounded-lg border border-border bg-popover p-3 text-xs shadow-md sm:inset-x-auto sm:right-0 sm:w-[min(22rem,calc(100vw-2rem))]">
+                        <div className="mb-2 flex items-center justify-between border-b border-border/70 pb-1.5">
+                          <span className="font-medium text-foreground">最近一次调用 Trace</span>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setHoverTraceOpen(false);
+                              setSubTab("trajectory");
+                            }}
+                            className="text-[11px] text-primary hover:underline"
+                          >
+                            查看完整轨迹 →
+                          </button>
+                        </div>
+                        {traceLoading && !latestTrace ? (
+                          <div className="py-3 text-center text-muted-foreground">读取中…</div>
+                        ) : !latestTrace ? (
+                          <div className="py-2 text-muted-foreground">当前会话暂无 Trace 记录</div>
+                        ) : (
+                          <div className="flex flex-col gap-2">
+                            <div className="flex flex-wrap items-center gap-1.5">
+                              <SlotBadge slot={latestTrace.slot} className="h-4 px-1 text-[10px]" />
+                              <span className="truncate font-mono text-[11px] text-foreground">
+                                {latestTrace.provider}/{latestTrace.modelId}
+                              </span>
+                              <ApiBadge api={latestTrace.api} className="h-4 px-1 text-[10px]" />
+                            </div>
+                            <div className="grid grid-cols-2 gap-x-3 gap-y-1 font-mono text-[11px] tabular-nums text-muted-foreground">
+                              <span>
+                                命中率:{" "}
+                                <strong className="text-foreground">
+                                  {(latestTrace.cacheHitRate * 100).toFixed(1)}%
+                                </strong>
+                              </span>
+                              <span title={`${latestTrace.latencyMs}ms`}>
+                                耗时:{" "}
+                                <strong className="text-foreground">
+                                  {latestTrace.latencyMs >= 1000
+                                    ? `${(latestTrace.latencyMs / 1000).toFixed(1)}s`
+                                    : `${latestTrace.latencyMs}ms`}
+                                </strong>
+                              </span>
+                              <span title={latestTrace.ttftMs !== null ? `${latestTrace.ttftMs}ms` : undefined}>
+                                首字:{" "}
+                                {latestTrace.ttftMs !== null
+                                  ? latestTrace.ttftMs >= 1000
+                                    ? `${(latestTrace.ttftMs / 1000).toFixed(1)}s`
+                                    : `${latestTrace.ttftMs}ms`
+                                  : "--"}
+                              </span>
+                              <span>
+                                输出: {latestTrace.outputTokens} tok
+                                {latestTrace.tps !== null ? ` (${latestTrace.tps.toFixed(0)}/s)` : ""}
+                              </span>
+                            </div>
+                            {latestTrace.timeCardText && (
+                              <pre className="max-h-28 overflow-auto whitespace-pre-wrap break-words border-t border-border/60 pt-2 font-mono text-[10px] leading-relaxed text-muted-foreground">
+                                {latestTrace.timeCardText}
+                              </pre>
+                            )}
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Click-toggled Popover: 工作记忆摘要 */}
+                  <div ref={memoryRef} className="sm:relative">
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="sm"
+                      aria-expanded={hoverMemoryOpen}
+                      className="h-7 px-2 text-xs text-muted-foreground hover:text-foreground"
+                      disabled={streaming || slashBusy}
+                      onClick={() => {
+                        setHoverTraceOpen(false);
+                        setMoreMenuOpen(false);
+                        setHoverMemoryOpen((prev) => !prev);
+                      }}
+                    >
+                      <Database className="size-3.5" />
+                      记忆
+                    </Button>
+
+                    {hoverMemoryOpen && (
+                      <div className="absolute top-full inset-x-3 z-50 mt-1 rounded-lg border border-border bg-popover p-3 text-xs shadow-md sm:inset-x-auto sm:right-0 sm:w-[min(20rem,calc(100vw-2rem))]">
+                        <div className="mb-1.5 flex items-center justify-between border-b border-border/70 pb-1.5">
+                          <span className="font-medium text-foreground">工作记忆摘要</span>
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant="outline"
+                            className="h-6 px-2 text-[11px]"
+                            disabled={streaming || slashBusy}
+                            onClick={() => {
+                              setHoverMemoryOpen(false);
+                              void runSlashCommand("/compact");
+                            }}
+                          >
+                            立即压缩
+                          </Button>
+                        </div>
+                        {summaryText.trim() ? (
+                          <p className="max-h-40 overflow-y-auto whitespace-pre-wrap break-words text-[11px] leading-relaxed text-foreground">
+                            {summaryText}
+                          </p>
+                        ) : (
+                          <p className="text-[11px] text-muted-foreground">
+                            暂无工作记忆摘要
+                          </p>
+                        )}
+                      </div>
+                    )}
+                  </div>
+
+                  {/* More maintenance actions menu */}
+                  <div ref={moreMenuRef} className="relative">
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="sm"
+                      aria-label="更多会话操作"
+                      title="更多会话操作"
+                      aria-expanded={moreMenuOpen}
+                      className="h-7 w-7 p-0 text-muted-foreground hover:text-foreground"
+                      onClick={() => {
+                        setHoverTraceOpen(false);
+                        setHoverMemoryOpen(false);
+                        setMoreMenuOpen((prev) => !prev);
+                      }}
+                    >
+                      <MoreHorizontal className="size-4" />
+                    </Button>
+
+                    {moreMenuOpen && (
+                      <div className="absolute right-0 top-full z-50 mt-1 w-40 rounded-lg border border-border bg-popover p-1 text-xs shadow-md">
                         <button
                           type="button"
+                          disabled={historyState === "loading" || streaming}
                           onClick={() => {
-                            setHoverTraceOpen(false);
-                            setSubTab("trajectory");
+                            setMoreMenuOpen(false);
+                            void loadHistory(selectedSessionId);
                           }}
-                          className="text-[11px] text-primary hover:underline"
+                          className="flex w-full items-center gap-2 rounded-md px-2.5 py-1.5 text-left text-foreground transition-colors hover:bg-muted disabled:opacity-50"
                         >
-                          查看完整轨迹 →
+                          <RefreshCw
+                            className={`size-3.5 text-muted-foreground ${historyState === "loading" ? "animate-spin" : ""}`}
+                          />
+                          刷新记录
                         </button>
-                      </div>
-                      {traceLoading && !latestTrace ? (
-                        <div className="py-3 text-center text-muted-foreground">读取中…</div>
-                      ) : !latestTrace ? (
-                        <div className="py-2 text-muted-foreground">当前会话暂无 Trace 记录</div>
-                      ) : (
-                        <div className="flex flex-col gap-2">
-                          <div className="flex flex-wrap items-center gap-1.5">
-                            <SlotBadge slot={latestTrace.slot} className="h-4 px-1 text-[10px]" />
-                            <span className="truncate font-mono text-[11px] text-foreground">
-                              {latestTrace.provider}/{latestTrace.modelId}
-                            </span>
-                            <ApiBadge api={latestTrace.api} className="h-4 px-1 text-[10px]" />
-                          </div>
-                          <div className="grid grid-cols-2 gap-x-3 gap-y-1 font-mono text-[11px] tabular-nums text-muted-foreground">
-                            <span>
-                              命中率:{" "}
-                              <strong className="text-foreground">
-                                {(latestTrace.cacheHitRate * 100).toFixed(1)}%
-                              </strong>
-                            </span>
-                            <span>
-                              耗时: <strong className="text-foreground">{latestTrace.latencyMs}ms</strong>
-                            </span>
-                            <span>
-                              首字: {latestTrace.ttftMs !== null ? `${latestTrace.ttftMs}ms` : "--"}
-                            </span>
-                            <span>
-                              输出: {latestTrace.outputTokens} tok
-                              {latestTrace.tps !== null ? ` (${latestTrace.tps.toFixed(0)}/s)` : ""}
-                            </span>
-                          </div>
-                          {latestTrace.timeCardText && (
-                            <pre className="max-h-28 overflow-auto whitespace-pre-wrap break-words border-t border-border/60 pt-2 font-mono text-[10px] leading-relaxed text-muted-foreground">
-                              {latestTrace.timeCardText}
-                            </pre>
-                          )}
-                        </div>
-                      )}
-                    </div>
-                  )}
-                </div>
-
-                {/* Click-toggled Popover: 压缩记忆 */}
-                <div ref={memoryRef} className="sm:relative">
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    size="sm"
-                    aria-expanded={hoverMemoryOpen}
-                    className="h-7 px-2 text-xs"
-                    disabled={streaming || slashBusy}
-                    onClick={() => {
-                      setHoverTraceOpen(false);
-                      setHoverMemoryOpen((prev) => !prev);
-                    }}
-                  >
-                    <Database className="size-3.5" />
-                    压缩记忆
-                  </Button>
-
-                  {hoverMemoryOpen && (
-                    <div className="absolute top-full inset-x-3 z-50 mt-1 rounded-lg border border-border bg-popover p-3 text-xs shadow-md sm:inset-x-auto sm:right-0 sm:w-[min(20rem,calc(100vw-2rem))]">
-                      <div className="mb-1.5 flex items-center justify-between border-b border-border/70 pb-1.5">
-                        <span className="font-medium text-foreground">工作记忆摘要</span>
-                        <Button
+                        <button
                           type="button"
-                          size="sm"
-                          variant="outline"
-                          className="h-6 px-2 text-[11px]"
                           disabled={streaming || slashBusy}
                           onClick={() => {
-                            setHoverMemoryOpen(false);
-                            void runSlashCommand("/compact");
+                            setMoreMenuOpen(false);
+                            void runSlashCommand("/new");
                           }}
+                          className="flex w-full items-center gap-2 rounded-md px-2.5 py-1.5 text-left text-destructive transition-colors hover:bg-destructive/10 disabled:opacity-50"
                         >
-                          立即压缩
-                        </Button>
+                          <Terminal className="size-3.5" />
+                          清空上下文
+                        </button>
                       </div>
-                      {summaryText.trim() ? (
-                        <p className="max-h-40 overflow-y-auto whitespace-pre-wrap break-words text-[11px] leading-relaxed text-foreground">
-                          {summaryText}
-                        </p>
-                      ) : (
-                        <p className="text-[11px] text-muted-foreground">
-                          暂无工作记忆摘要
-                        </p>
-                      )}
-                    </div>
-                  )}
-                </div>
-
+                    )}
+                  </div>
+                </>
+              )}
+              {readonlySession && (
                 <Button
                   type="button"
                   variant="ghost"
                   size="sm"
-                  className="h-7 px-2 text-xs"
-                  disabled={streaming || slashBusy}
-                  onClick={() => void runSlashCommand("/new")}
+                  className="h-7 px-2 text-xs text-muted-foreground hover:text-foreground"
+                  disabled={historyState === "loading" || streaming}
+                  onClick={() => void loadHistory(selectedSessionId)}
                 >
-                  <Terminal className="size-3.5" />
-                  清空上下文
+                  <RefreshCw
+                    className={`size-3.5 ${historyState === "loading" ? "animate-spin" : ""}`}
+                  />
+                  刷新记录
                 </Button>
-              </>
-            )}
-            <Button
-              type="button"
-              variant="ghost"
-              size="sm"
-              className="h-7 px-2 text-xs"
-              disabled={historyState === "loading" || streaming}
-              onClick={() => void loadHistory(selectedSessionId)}
-            >
-              <RefreshCw
-                className={`size-3.5 ${historyState === "loading" ? "animate-spin" : ""}`}
-              />
-              刷新记录
-            </Button>
+              )}
           </div>
         )}
       </div>

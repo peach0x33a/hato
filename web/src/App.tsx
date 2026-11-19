@@ -436,7 +436,7 @@ function ConsoleShell() {
               onClick={() => setActiveTab(lastNonSettingsTab)}
               title="返回控制台"
               aria-label="返回控制台"
-              className="inline-flex size-7 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+              className="inline-flex size-7 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground lg:hidden"
             >
               <ArrowLeft className="size-4" />
             </button>
@@ -488,18 +488,6 @@ function ConsoleShell() {
         </div>
 
         <div className="flex shrink-0 items-center gap-1 sm:gap-1.5">
-          <Button
-            type="button"
-            variant="ghost"
-            size="sm"
-            title="远程浏览器"
-            aria-label="远程浏览器"
-            className="h-7 px-2 text-xs text-muted-foreground hover:text-foreground sm:px-2.5"
-            onClick={() => navigateToTab("browser")}
-          >
-            <Compass className="size-3.5" />
-            <span className="hidden sm:inline">远程浏览器</span>
-          </Button>
           <StatefulButton
             type="button"
             variant="ghost"

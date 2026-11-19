@@ -26,7 +26,7 @@ import {
   useState,
 } from "react";
 import { api, type BrowserStatus } from "@/api";
-import { ConsoleInput, ConsolePageHeader } from "@/components/console/ConsolePrimitives";
+import { ConsoleInput } from "@/components/console/ConsolePrimitives";
 import {
   Alert,
   AlertAction,
@@ -414,17 +414,6 @@ export function RemoteBrowserPanel({
 
   return (
     <div className="flex h-full min-h-0 flex-col gap-3">
-      {!status.open && (
-        <ConsolePageHeader
-          title="远程浏览器"
-          badges={
-            <AnimatedBadge status="neutral" size="sm">
-              {displayLabel}
-            </AnimatedBadge>
-          }
-        />
-      )}
-
       {streamError && (
         <Alert variant="destructive" open>
           <AlertIcon />
@@ -450,9 +439,14 @@ export function RemoteBrowserPanel({
 
       {!status.open ? (
         <div className="flex flex-1 items-center justify-center p-6">
-          <div className="flex w-full max-w-lg flex-col items-center gap-5 text-center">
-            <div className="grid size-12 place-items-center rounded-full bg-muted/60 text-muted-foreground">
-              <MousePointerClick className="size-6" />
+          <div className="flex w-full max-w-lg flex-col items-center gap-5 rounded-2xl border border-border/75 bg-card/45 px-7 py-9 text-center shadow-sm">
+            <div className="flex flex-col items-center gap-3">
+              <div className="grid size-12 place-items-center rounded-2xl border border-border/70 bg-muted/50 text-muted-foreground">
+                <MousePointerClick className="size-5" />
+              </div>
+              <AnimatedBadge status="neutral" size="sm">
+                {displayLabel}
+              </AnimatedBadge>
             </div>
             <div className="space-y-1.5">
               <h3 className="text-base font-semibold tracking-tight text-foreground">浏览器尚未启动</h3>

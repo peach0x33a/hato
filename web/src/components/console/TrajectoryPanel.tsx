@@ -1025,36 +1025,64 @@ export function TrajectoryPanel({ onToast, sessionEpoch = 0, sessionId = null }:
                                         </span>
                                       </div>
                                       {curatorParsed.persona.length > 0 && (
-                                        <div className="space-y-1 border-t border-border/50 pt-2">
+                                        <div className="space-y-1.5 border-t border-border/50 pt-2">
                                           <div className="text-[10px] font-medium text-emerald-600 dark:text-emerald-400">
                                             persona（个人/关系）
                                           </div>
-                                          <div className="divide-y divide-border/40">
-                                            {curatorParsed.persona.map((it, i) => (
-                                              <div
-                                                key={i}
-                                                className="py-1 text-[11px] text-foreground"
-                                              >
-                                                {it.content || safeStringify(it)}
-                                              </div>
-                                            ))}
+                                          <div className="space-y-1.5">
+                                            {curatorParsed.persona.map((it, i) => {
+                                              const rec = it as Record<string, unknown>;
+                                              const factText =
+                                                (typeof rec.content === "string" && rec.content) ||
+                                                (typeof rec.fact === "string" && rec.fact) ||
+                                                safeStringify(it);
+                                              const occurredAt =
+                                                typeof rec.occurred_at === "string" ? rec.occurred_at : null;
+                                              return (
+                                                <div
+                                                  key={i}
+                                                  className="rounded-lg border border-border/50 bg-muted/25 px-2.5 py-2 text-[11px] leading-relaxed text-foreground"
+                                                >
+                                                  <div>{factText}</div>
+                                                  {occurredAt ? (
+                                                    <div className="mt-1 font-mono text-[10px] text-muted-foreground">
+                                                      {occurredAt}
+                                                    </div>
+                                                  ) : null}
+                                                </div>
+                                              );
+                                            })}
                                           </div>
                                         </div>
                                       )}
                                       {curatorParsed.tech.length > 0 && (
-                                        <div className="space-y-1 border-t border-border/50 pt-2">
+                                        <div className="space-y-1.5 border-t border-border/50 pt-2">
                                           <div className="text-[10px] font-medium text-sky-600 dark:text-sky-400">
                                             tech（技术/配置）
                                           </div>
-                                          <div className="divide-y divide-border/40">
-                                            {curatorParsed.tech.map((it, i) => (
-                                              <div
-                                                key={i}
-                                                className="py-1 text-[11px] text-foreground"
-                                              >
-                                                {it.content || safeStringify(it)}
-                                              </div>
-                                            ))}
+                                          <div className="space-y-1.5">
+                                            {curatorParsed.tech.map((it, i) => {
+                                              const rec = it as Record<string, unknown>;
+                                              const factText =
+                                                (typeof rec.content === "string" && rec.content) ||
+                                                (typeof rec.fact === "string" && rec.fact) ||
+                                                safeStringify(it);
+                                              const occurredAt =
+                                                typeof rec.occurred_at === "string" ? rec.occurred_at : null;
+                                              return (
+                                                <div
+                                                  key={i}
+                                                  className="rounded-lg border border-border/50 bg-muted/25 px-2.5 py-2 text-[11px] leading-relaxed text-foreground"
+                                                >
+                                                  <div>{factText}</div>
+                                                  {occurredAt ? (
+                                                    <div className="mt-1 font-mono text-[10px] text-muted-foreground">
+                                                      {occurredAt}
+                                                    </div>
+                                                  ) : null}
+                                                </div>
+                                              );
+                                            })}
                                           </div>
                                         </div>
                                       )}

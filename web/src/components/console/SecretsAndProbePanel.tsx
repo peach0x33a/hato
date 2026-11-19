@@ -333,16 +333,13 @@ export function SecretsAndProbePanel({
               return (
                 <div
                   key={item.key}
-                  className="flex flex-col gap-3 px-4 py-3.5 transition-colors hover:bg-muted/20 sm:flex-row sm:items-center sm:justify-between"
+                  className="flex flex-col gap-3 px-4 py-3 transition-colors hover:bg-muted/20 sm:flex-row sm:items-center sm:justify-between"
                 >
-                  <div className="flex min-w-0 flex-wrap items-center gap-2.5">
+                  <div className="flex min-w-0 items-center gap-2.5">
                     <KeyRound className="size-3.5 shrink-0 text-muted-foreground" />
-                    <span className="font-mono text-xs font-semibold text-foreground">
+                    <span className="truncate font-mono text-xs font-semibold text-foreground">
                       {item.key}
                     </span>
-                    <AnimatedBadge status={item.configured ? "success" : "warning"} size="sm">
-                      {item.configured ? item.masked : "未配置"}
-                    </AnimatedBadge>
                   </div>
 
                   {isEditing ? (
@@ -397,21 +394,26 @@ export function SecretsAndProbePanel({
                       </Button>
                     </form>
                   ) : (
-                    <Button
-                      type="button"
-                      size="sm"
-                      variant={item.configured ? "ghost" : "outline"}
-                      onClick={() => {
-                        setAddingCustom(false);
-                        setShowCustomVal(false);
-                        setEditingKey(item.key);
-                        setEditValue("");
-                        setShowEditValue(false);
-                      }}
-                    >
-                      <Pencil className="size-3.5" />
-                      {item.configured ? "修改密钥" : "立即配置"}
-                    </Button>
+                    <div className="flex shrink-0 items-center justify-between gap-3 sm:justify-end">
+                      <AnimatedBadge status={item.configured ? "success" : "warning"} size="sm">
+                        {item.configured ? item.masked : "未配置"}
+                      </AnimatedBadge>
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant={item.configured ? "ghost" : "outline"}
+                        onClick={() => {
+                          setAddingCustom(false);
+                          setShowCustomVal(false);
+                          setEditingKey(item.key);
+                          setEditValue("");
+                          setShowEditValue(false);
+                        }}
+                      >
+                        <Pencil className="size-3.5" />
+                        {item.configured ? "修改密钥" : "立即配置"}
+                      </Button>
+                    </div>
                   )}
                 </div>
               );

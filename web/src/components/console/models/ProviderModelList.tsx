@@ -482,9 +482,9 @@ export function ProviderModelList({
                                 onSelectModel(provider.uid, model.uid);
                               }
                             }}
-                            className={`flex cursor-pointer items-start justify-between gap-2.5 rounded-lg px-3 py-2.5 transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-emerald-500 ${
+                            className={`group/model flex cursor-pointer items-start justify-between gap-2.5 rounded-lg px-3 py-2.5 transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-emerald-500 ${
                               isSelected
-                                ? "bg-emerald-500/10 ring-1 ring-emerald-500/45 dark:bg-emerald-500/12"
+                                ? "bg-muted/75 ring-1 ring-border dark:bg-white/[0.06]"
                                 : "hover:bg-zinc-100/80 dark:hover:bg-white/[0.03]"
                             }`}
                           >
@@ -603,6 +603,10 @@ export function ProviderModelList({
                               >
                                 <Brain className="h-3.5 w-3.5" />
                               </span>
+                              <ChevronRight
+                                aria-hidden="true"
+                                className="ml-0.5 h-3.5 w-3.5 text-muted-foreground/45 transition-transform group-hover/model:translate-x-0.5 group-hover/model:text-muted-foreground"
+                              />
                             </div>
                           </div>
                         );

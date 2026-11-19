@@ -226,6 +226,47 @@ function renderInlineMarkdown(text: string, keyPrefix: string, depth = 0): React
   return out;
 }
 
+const CODE_KEYWORDS = new Set([
+  "def", "class", "import", "from", "as", "return", "if", "elif", "else", "for", "while", "try",
+  "except", "finally", "with", "yield", "lambda", "pass", "break", "continue", "in", "is", "not",
+  "and", "or", "None", "True", "False", "async", "await", "const", "let", "var", "function",
+  "export", "default", "interface", "type", "enum", "new", "throw", "catch", "switch", "case",
+  "null", "undefined", "true", "false", "typeof", "void", "fn", "pub", "struct", "impl", "match",
+  "mut", "use", "mod", "echo", "fi", "then", "do", "done", "esac",
+]);
+
+function highlightCodeLine(line: string, keyPrefix: string): ReactNode[] {
+  const tokenRe =
+    /(#[^\n]*$|\/\/[^\n]*$)|("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|`(?:\\.|[^`\\])*`)|\b(\d+(?:\.\d+)?)\b|\b([A-Za-z_][A-Za-z0-9_]*)\b/g;
+  const out: ReactNode[] = [];
+  let last = 0;
+  let idx = 0;
+  let m: RegExpExecArray | null;
+
+  while ((m = tokenRe.exec(line)) !== null) {
+    if (m.index > last) {
+      out.push(line.slice(last, m.index));
+    }
+    const k = `${keyPrefix}-${idx++}`;
+    if (m[1]) {
+      out.push(<span key={k} className="text-muted-foreground/75 italic">{m[1]}</span>);
+    } else if (m[2]) {
+      out.push(<span key={k} className="text-emerald-600 dark:text-emerald-400">{m[2]}</span>);
+    } else if (m[3]) {
+      out.push(<span key={k} className="text-amber-600 dark:text-amber-400">{m[3]}</span>);
+    } else if (m[4] && CODE_KEYWORDS.has(m[4])) {
+      out.push(<span key={k} className="text-sky-600 dark:text-sky-400 font-medium">{m[4]}</span>);
+    } else {
+      out.push(m[0]);
+    }
+    last = tokenRe.lastIndex;
+  }
+  if (last < line.length) {
+    out.push(line.slice(last));
+  }
+  return out;
+}
+
 function CodeBlock({ lang, code }: { lang: string; code: string }) {
   const [copied, setCopied] = useState(false);
 
@@ -236,9 +277,11 @@ function CodeBlock({ lang, code }: { lang: string; code: string }) {
     });
   };
 
+  const lines = code.split("\n");
+
   return (
-    <div className="my-2 overflow-hidden rounded-lg border border-border/60 bg-background/60">
-      <div className="flex h-7 items-center justify-between border-b border-border/50 bg-muted/40 px-2.5 text-[11px] text-muted-foreground">
+    <div className="my-2 min-w-0 max-w-full overflow-hidden rounded-lg border border-border/70 bg-background/80">
+      <div className="flex h-7 items-center justify-between border-b border-border/60 bg-muted/45 px-2.5 text-[11px] text-muted-foreground">
         <span className="font-mono">{lang || "text"}</span>
         <button
           type="button"
@@ -250,8 +293,15 @@ function CodeBlock({ lang, code }: { lang: string; code: string }) {
           {copied ? "已复制" : "复制"}
         </button>
       </div>
-      <pre className="!my-0 overflow-x-auto !rounded-none !border-0 !bg-transparent p-3 font-mono text-[12px] leading-relaxed text-foreground">
-        <code className="!bg-transparent !p-0">{code}</code>
+      <pre className="!my-0 max-w-full overflow-x-auto !rounded-none !border-0 !bg-transparent p-3 font-mono text-[12px] leading-relaxed text-foreground">
+        <code className="block w-max min-w-full !bg-transparent !p-0">
+          {lines.map((ln, i) => (
+            <Fragment key={i}>
+              {i > 0 && "\n"}
+              {highlightCodeLine(ln, `cl-${i}`)}
+            </Fragment>
+          ))}
+        </code>
       </pre>
     </div>
   );
@@ -265,7 +315,7 @@ export function MarkdownContent({ content, className }: MarkdownContentProps) {
   if (blocks.length === 0) return null;
 
   return (
-    <div className={className}>
+    <div className={className ? `min-w-0 max-w-full ${className}` : "min-w-0 max-w-full"}>
       {blocks.map((block, idx) => {
         const key = `md-${idx}`;
         if (block.type === "code") {
