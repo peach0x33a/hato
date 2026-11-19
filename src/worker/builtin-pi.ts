@@ -36,7 +36,9 @@ const WORKER_SYSTEM_PROMPT = `You are Hato's isolated background engineering wor
 - Messages labeled \`[CHAT_RELAY]\` come from the companion chat layer: ignore their casual tone and extract only factual requirements initiated or confirmed by \`[USER]\`.
 - If crucial earlier references are missing, call \`expand_earlier_context\`.
 - Operate strictly within your workspace boundary. Never ask the user to paste raw secrets into chat; list required secret names in \`required_secrets\`.
-- NEVER read \`.env\` or call Telegram/QQ Bot APIs (such as \`forwardMessage\`, \`sendMessage\`, etc.) via shell commands to fetch historical messages or media. Use \`read_task_context\` / \`expand_earlier_context\` (which include saved attachment \`路径=...\` paths), and call \`ask_user\` if a file is missing.
+- NEVER read \`.env\` or call Telegram/QQ Bot APIs (such as \`forwardMessage\`, \`sendMessage\`, etc.) via shell commands to fetch historical messages or media. Use \`read_task_context\` / \`expand_earlier_context\` (which include saved attachment paths), and call \`ask_user\` if a file is missing.
+- Verify your changes (e.g. run the script, build, or tests) before calling \`finish_task\`, and report only directly observed results.
+- If a tool fails, read the error carefully and adjust your approach or parameters instead of repeating the identical call.
 - When finished, ALWAYS call \`finish_task\` with an accurate, concise \`narration_hint\`, any verbatim blocks/artifacts, and caveats.`;
 
 const VM_UNRESTRICTED_PROMPT_SUFFIX = `
@@ -45,6 +47,49 @@ const VM_UNRESTRICTED_PROMPT_SUFFIX = `
 - You are running in \`vm_unrestricted\` mode inside a dedicated VM with a persistent working directory.
 - You may read/write files across the VM (including \`~\` and absolute paths) and run shell commands with real \`HOME\` and full \`PATH\`.
 - STRICT SECURITY RULE: You are STILL strictly forbidden from reading, modifying, or printing Hato's \`.env\` / \`.env.*\` secret files (e.g. in \`~/.hato/\` or Hato's repo).`;
+
+const MAX_COMMAND_OUTPUT_CHARS = 24_000;
+const MAX_CONSECUTIVE_IDENTICAL_CALLS = 3;
+
+function truncateHeadTail(text: string, maxChars = MAX_COMMAND_OUTPUT_CHARS): string {
+  if (text.length <= maxChars) return text;
+  const headChars = Math.floor(maxChars * 0.35);
+  const tailChars = maxChars - headChars;
+  const omitted = text.length - headChars - tailChars;
+  return `${text.slice(0, headChars)}\n\n... [${omitted} chars omitted] ...\n\n${text.slice(-tailChars)}`;
+}
+
+function wrapToolsWithLoopGuard(tools: AgentTool<any>[]): AgentTool<any>[] {
+  let lastSignature = "";
+  let repeatCount = 0;
+
+  return tools.map((tool) => ({
+    ...tool,
+    execute: async (toolCallId, input, signal, onUpdate) => {
+      let serialized = "";
+      try {
+        serialized = JSON.stringify(input ?? null);
+      } catch {
+        serialized = String(input);
+      }
+      const sig = `${tool.name}:${serialized}`;
+      if (sig === lastSignature) {
+        repeatCount += 1;
+      } else {
+        lastSignature = sig;
+        repeatCount = 1;
+      }
+
+      if (repeatCount >= MAX_CONSECUTIVE_IDENTICAL_CALLS) {
+        throw new Error(
+          `Loop guard triggered: "${tool.name}" was called ${repeatCount} times in a row with identical arguments. Stop repeating the same call; inspect the previous output, change your approach/parameters, or call ask_user / finish_task.`,
+        );
+      }
+
+      return await tool.execute(toolCallId, input, signal, onUpdate);
+    },
+  }));
+}
 
 function isEnvFileName(name: string): boolean {
   return name === ".env" || name.startsWith(".env.");
@@ -496,7 +541,9 @@ export class BuiltinPiRunner implements ExecutionRunner {
         execute: async (_id, input) => {
           const abs = resolveSafeWorkspacePath(input.path);
           if (!existsSync(abs)) {
-            throw new Error(`文件不存在: ${input.path}`);
+            throw new Error(
+              `File "${input.path}" does not exist in workspace. Check the path or list files with run_command("ls -la") before retrying.`,
+            );
           }
           return {
             content: [{ type: "text", text: readFileSync(abs, "utf8").slice(0, 32_000) }],
@@ -532,23 +579,52 @@ export class BuiltinPiRunner implements ExecutionRunner {
           }
           const proxyEnv =
             mandate.network === "egress" ? this.deps.proxyRouter.getWorkerProxyEnv() : {};
-          const { stdout, stderr } = await execFileAsync("sh", ["-lc", input.command], {
-            cwd: workspaceRoot,
-            timeout: isVmUnrestricted ? mandate.timeout_ms : Math.min(mandate.timeout_ms, 60_000),
-            maxBuffer: 512 * 1024,
-            env: {
-              PATH: process.env.PATH ?? "/usr/bin:/bin",
-              HOME: isVmUnrestricted ? homedir() : workspaceRoot,
-              ...proxyEnv,
-            },
-          });
-          const combined = [stdout.trim(), stderr.trim() ? `[stderr]\n${stderr.trim()}` : ""]
-            .filter(Boolean)
-            .join("\n");
-          return {
-            content: [{ type: "text", text: combined || "(命令完成，无输出)" }],
-            details: { ok: true },
-          };
+          try {
+            const { stdout, stderr } = await execFileAsync("sh", ["-lc", input.command], {
+              cwd: workspaceRoot,
+              timeout: isVmUnrestricted ? mandate.timeout_ms : Math.min(mandate.timeout_ms, 60_000),
+              maxBuffer: 512 * 1024,
+              env: {
+                PATH: process.env.PATH ?? "/usr/bin:/bin",
+                HOME: isVmUnrestricted ? homedir() : workspaceRoot,
+                ...proxyEnv,
+              },
+            });
+            const combined = [stdout.trim(), stderr.trim() ? `[stderr]\n${stderr.trim()}` : ""]
+              .filter(Boolean)
+              .join("\n");
+            return {
+              content: [
+                {
+                  type: "text",
+                  text: combined ? truncateHeadTail(combined) : "(command completed with no output)",
+                },
+              ],
+              details: { ok: true },
+            };
+          } catch (err) {
+            const execErr = err as {
+              code?: number | string;
+              stdout?: string;
+              stderr?: string;
+              message?: string;
+              killed?: boolean;
+            };
+            const outText = typeof execErr.stdout === "string" ? execErr.stdout.trim() : "";
+            const errText = typeof execErr.stderr === "string" ? execErr.stderr.trim() : "";
+            const detail = [
+              execErr.killed
+                ? "Command timed out."
+                : `Command failed (exit=${execErr.code ?? "unknown"}).`,
+              outText ? `[stdout]\n${truncateHeadTail(outText, 10_000)}` : "",
+              errText ? `[stderr]\n${truncateHeadTail(errText, 12_000)}` : "",
+              !outText && !errText && execErr.message ? execErr.message : "",
+              "Inspect the error above and adjust the command or files before retrying.",
+            ]
+              .filter(Boolean)
+              .join("\n");
+            throw new Error(detail);
+          }
         },
       },
       {
@@ -676,6 +752,6 @@ export class BuiltinPiRunner implements ExecutionRunner {
       tools.push(...mcpTools);
     }
 
-    return tools;
+    return wrapToolsWithLoopGuard(tools);
   }
 }

@@ -103,6 +103,18 @@ function matchesMcpTool(tool: AgentTool<any>, userText: string): boolean {
 }
 
 /**
+ * Sort tools in canonical order (`activate_tools` first, then alphabetical by name)
+ * to preserve KV-cache coherency across turns.
+ */
+export function sortToolsCanonically(tools: readonly AgentTool<any>[]): AgentTool<any>[] {
+  return [...tools].sort((a, b) => {
+    if (a.name === ACTIVATE_TOOLS_NAME && b.name !== ACTIVATE_TOOLS_NAME) return -1;
+    if (b.name === ACTIVATE_TOOLS_NAME && a.name !== ACTIVATE_TOOLS_NAME) return 1;
+    return a.name.localeCompare(b.name);
+  });
+}
+
+/**
  * Select the subset of tools relevant to the current turn, always keeping `activate_tools`.
  */
 export function selectToolsForTurn(params: {
@@ -138,7 +150,7 @@ export function selectToolsForTurn(params: {
     }
   }
 
-  return selected;
+  return sortToolsCanonically(selected);
 }
 
 const ActivateToolsParams = obj({
@@ -195,17 +207,21 @@ export function createActivateToolsTool(params: {
       }
 
       if (activated.length > 0) {
-        params.setActiveTools(active);
+        params.setActiveTools(sortToolsCanonically(active));
         params.onActivated?.(activated);
       }
 
       const parts: string[] = [];
-      if (activated.length > 0) parts.push(`已激活工具: ${activated.join(", ")}`);
-      if (alreadyActive.length > 0) parts.push(`已在当前可用列表中: ${alreadyActive.join(", ")}`);
-      if (notFound.length > 0) parts.push(`未找到工具: ${notFound.join(", ")}`);
+      if (activated.length > 0) parts.push(`Activated: ${activated.join(", ")}`);
+      if (alreadyActive.length > 0) parts.push(`Already active: ${alreadyActive.join(", ")}`);
+      if (notFound.length > 0) {
+        parts.push(
+          `Unknown tool(s): ${notFound.join(", ")}. Check <available_tools> in the system prompt for exact tool names.`,
+        );
+      }
 
       return {
-        content: [{ type: "text", text: parts.join("；") || "无变更。" }],
+        content: [{ type: "text", text: parts.join("; ") || "No changes." }],
         details: { activated, alreadyActive, notFound },
       };
     },
@@ -216,7 +232,7 @@ export function createActivateToolsTool(params: {
  * Format a compact Level 1 index of all tools for Layer 1 static system prompt injection.
  */
 export function buildToolIndexBlock(tools: readonly AgentTool<any>[]): string {
-  const indexable = tools.filter((t) => t.name !== ACTIVATE_TOOLS_NAME);
+  const indexable = sortToolsCanonically(tools).filter((t) => t.name !== ACTIVATE_TOOLS_NAME);
   if (indexable.length === 0) return "";
 
   const lines = indexable.map((t) => {
