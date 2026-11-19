@@ -915,6 +915,31 @@ export async function runInitWizard(paths: SetupPaths = DEFAULT_SETUP_PATHS): Pr
 
   validateModelsInMemory(nextModels);
 
+  const updateChannel = guardCancel(
+    await p.select({
+      message: "版本更新检查渠道（按渠道检查 GitHub Release）",
+      initialValue: baseHato.updates?.channel ?? "stable",
+      options: [
+        { value: "stable", label: "stable（正式发行版，推荐）" },
+        { value: "nightly", label: "nightly（每提交预览版）" },
+      ],
+    }),
+  ) as "stable" | "nightly";
+
+  const imNotifyEnabled = guardCancel(
+    await p.confirm({
+      message: "是否开启 IM 新版本推送通知？（默认关闭，开启后仅在发现新版本时向 Home Channel 提醒一次）",
+      initialValue: baseHato.updates?.im_notify_enabled ?? false,
+    }),
+  );
+
+  nextHato.updates = {
+    check_enabled: baseHato.updates?.check_enabled ?? true,
+    channel: updateChannel,
+    im_notify_enabled: imNotifyEnabled,
+    check_interval_hours: baseHato.updates?.check_interval_hours ?? 24,
+  };
+
   if (!(await confirmTomlOverwriteIfNeeded([paths.hatoConfigPath, paths.modelsConfigPath]))) {
     return;
   }

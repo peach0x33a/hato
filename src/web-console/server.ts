@@ -13,6 +13,7 @@ import {
   resolvePromptOrder,
   resolveSkillsDir,
   resolveTavilySearchConfig,
+  resolveUpdatesConfig,
   resolveWebConsoleConfig,
   resolveWorkerExternalCliConfig,
   validateHatoConfigObject,
@@ -39,6 +40,12 @@ import {
   upsertPromptBlock,
 } from "../persona/prompts.js";
 import { formatSkillsIndexBlock, loadZoneSkills } from "../skills/loader.js";
+import {
+  HATO_GITHUB_URL,
+  checkForUpdates,
+  getCachedUpdateStatus,
+  readCurrentHatoVersion,
+} from "../utils/update-check.js";
 import {
   fetchTelegramBotAvatar,
   fetchTelegramUserProfiles,
@@ -216,8 +223,39 @@ export class WebConsoleServer {
             // ignore
           }
         }
+        const updatesCfg = resolveUpdatesConfig(hato);
+        const currentVersion = readCurrentHatoVersion();
+        const cachedUpdate = updatesCfg.checkEnabled
+          ? getCachedUpdateStatus({ channel: updatesCfg.channel })
+          : null;
+        if (
+          updatesCfg.checkEnabled &&
+          (!cachedUpdate ||
+            Date.now() - cachedUpdate.checkedAtMs >= updatesCfg.checkIntervalHours * 3600 * 1000)
+        ) {
+          void checkForUpdates({
+            channel: updatesCfg.channel,
+            ttlHours: updatesCfg.checkIntervalHours,
+            fetchFn: this.deps.getProxyRouter().createScopedFetch("updates.github"),
+          }).catch(() => undefined);
+        }
         sendJson(res, 200, {
           ok: true,
+          version: currentVersion,
+          githubUrl: HATO_GITHUB_URL,
+          update: cachedUpdate
+            ? {
+                channel: cachedUpdate.channel,
+                hasUpdate: cachedUpdate.hasUpdate,
+                latestTag: cachedUpdate.latestTag,
+                releaseUrl: cachedUpdate.releaseUrl,
+              }
+            : {
+                channel: updatesCfg.channel,
+                hasUpdate: false,
+                latestTag: null,
+                releaseUrl: `${HATO_GITHUB_URL}/releases`,
+              },
           uptimeSec: Math.round((Date.now() - this.startedAtMs) / 1000),
           telegramEnabled: hato.gateway.telegram.enabled,
           pendingTakeover: this.deps.getBrowserRuntime().isPendingTakeover(),

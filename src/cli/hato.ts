@@ -3,17 +3,18 @@ import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { logError } from "../utils/logger.js";
+import {
+  checkForUpdates,
+  getCachedUpdateStatus,
+  readCurrentHatoVersion,
+  type ReleaseChannel,
+} from "../utils/update-check.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PACKAGE_ROOT = resolve(__dirname, "../..");
 
 function readVersion(): string {
-  try {
-    const pkg = JSON.parse(readFileSync(resolve(PACKAGE_ROOT, "package.json"), "utf-8")) as { version?: string };
-    return pkg.version ?? "0.0.0";
-  } catch {
-    return "0.0.0";
-  }
+  return readCurrentHatoVersion(PACKAGE_ROOT);
 }
 
 function printHelp(): string {
@@ -24,6 +25,7 @@ function printHelp(): string {
     "  hato [start]           启动 Hato 服务（Telegram 网关 + Web Console）",
     "  hato setup [选项]      运行交互式配置向导",
     "  hato statics [选项]    查看运行与 Token 用量统计（别名: stats）",
+    "  hato check-update      检查 GitHub Release 新版本（可选: --channel stable|nightly）",
     "  hato -v, --version     显示版本号",
     "  hato -h, --help        显示帮助信息",
   ].join("\n");
@@ -40,7 +42,42 @@ async function main(): Promise<void> {
   }
 
   if (cmd === "-v" || cmd === "--version" || cmd === "version") {
-    console.log(`hato v${readVersion()}`);
+    const version = readVersion();
+    console.log(`hato v${version}`);
+    const cached = getCachedUpdateStatus({ packageRoot: PACKAGE_ROOT });
+    if (cached?.hasUpdate && cached.latestTag) {
+      console.log(`发现新版本 ${cached.latestTag} (${cached.channel}): ${cached.releaseUrl}`);
+    }
+    return;
+  }
+
+  if (cmd === "check-update" || cmd === "update-check") {
+    const chanIdx = rest.indexOf("--channel");
+    const rawChan = chanIdx >= 0 ? rest[chanIdx + 1] : undefined;
+    const channel: ReleaseChannel | undefined =
+      rawChan === "nightly" || rawChan === "stable" ? rawChan : undefined;
+    const res = await checkForUpdates({
+      packageRoot: PACKAGE_ROOT,
+      channel,
+      force: true,
+    });
+    console.log(`当前版本: v${res.currentVersion} (渠道: ${res.channel})`);
+    if (res.error) {
+      console.log(`检查更新失败: ${res.error}`);
+      return;
+    }
+    if (res.hasUpdate && res.latestTag) {
+      console.log(`发现新版本: ${res.latestTag}`);
+      console.log(`发布地址: ${res.releaseUrl}`);
+      if (res.notesPreview) {
+        console.log(`更新摘要:\n${res.notesPreview}`);
+      }
+      console.log(
+        `升级命令: bash <(curl -fsSL https://raw.githubusercontent.com/peach0x33a/hato/main/scripts/install.sh) --version ${res.latestTag}`,
+      );
+    } else {
+      console.log(`已是最新版本（${res.latestTag ?? `v${res.currentVersion}`}）。`);
+    }
     return;
   }
 

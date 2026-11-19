@@ -292,6 +292,14 @@ export const HatoConfigSchema = Type.Object({
       ),
     }),
   }),
+  updates: Type.Optional(
+    Type.Object({
+      check_enabled: Type.Optional(Type.Boolean()),
+      channel: Type.Optional(Type.Union([Type.Literal("stable"), Type.Literal("nightly")])),
+      im_notify_enabled: Type.Optional(Type.Boolean()),
+      check_interval_hours: Type.Optional(Type.Number({ minimum: 1, maximum: 168 })),
+    }),
+  ),
 });
 
 export type ExternalCliPermissionPreset = Static<typeof ExternalCliPermissionPresetSchema>;
@@ -320,6 +328,26 @@ export function resolveWebConsoleConfig(config: HatoConfig): ResolvedWebConsoleC
     host: c?.host ?? "127.0.0.1",
     port: c?.port ?? 3820,
     authTokenEnv: c?.auth_token_env,
+  };
+}
+
+export interface ResolvedUpdatesConfig {
+  checkEnabled: boolean;
+  channel: "stable" | "nightly";
+  imNotifyEnabled: boolean;
+  checkIntervalHours: number;
+}
+
+/**
+ * Resolve version update check and IM notification settings (IM push defaults to off).
+ */
+export function resolveUpdatesConfig(config: HatoConfig): ResolvedUpdatesConfig {
+  const u = config.updates;
+  return {
+    checkEnabled: u?.check_enabled ?? true,
+    channel: u?.channel ?? "stable",
+    imNotifyEnabled: u?.im_notify_enabled ?? false,
+    checkIntervalHours: u?.check_interval_hours ?? 24,
   };
 }
 

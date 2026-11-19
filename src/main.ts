@@ -9,6 +9,7 @@ import {
   resolveMemoryProvider,
   resolveMemoryRecallConfig,
   resolveTavilySearchConfig,
+  resolveUpdatesConfig,
   resolveWebBrowserConfig,
   type HatoConfig,
 } from "./config/app.js";
@@ -35,6 +36,7 @@ import { QqOpenApiClient } from "./gateway/qq-client.js";
 import { TelegramAdapter } from "./gateway/tg.js";
 import type { ChannelAdapter, ChannelName, InboundBatch } from "./gateway/types.js";
 import { MarkdownImageRenderer } from "./render/markdown-image.js";
+import { buildUpdateNotificationKey, checkForUpdates } from "./utils/update-check.js";
 import { McpClientPool } from "./mcp/pool.js";
 import { CompactionManager } from "./memory/compaction.js";
 import { MemoryCurator } from "./memory/curator.js";
@@ -1163,8 +1165,49 @@ async function main(): Promise<void> {
   });
   await webConsoleServer.start();
 
+  const runUpdateNotificationCheck = async () => {
+    const updatesCfg = resolveUpdatesConfig(hatoConfig);
+    if (!updatesCfg.checkEnabled || !updatesCfg.imNotifyEnabled) return;
+    const res = await checkForUpdates({
+      channel: updatesCfg.channel,
+      ttlHours: updatesCfg.checkIntervalHours,
+      fetchFn: proxyRouter.createScopedFetch("updates.github"),
+    });
+    const notifyKey = buildUpdateNotificationKey(res);
+    if (!notifyKey || !res.latestTag) return;
+    if (repo.getRuntimeSetting("last_notified_update_key") === notifyKey) return;
+
+    const outbound = resolveOutboundTarget();
+    if (!outbound) return;
+    const lines = [
+      `Hato 发现新版本 ${res.latestTag}（当前 v${res.currentVersion}，渠道 ${res.channel}）`,
+      `发布页: ${res.releaseUrl}`,
+    ];
+    if (res.notesPreview) {
+      lines.push(`更新摘要:\n${res.notesPreview}`);
+    }
+    await outbound.adapter.sendText(outbound.targetId, lines.join("\n"));
+    repo.setRuntimeSetting("last_notified_update_key", notifyKey);
+  };
+
+  const updateStartupTimer = setTimeout(() => {
+    void runUpdateNotificationCheck().catch((err) => {
+      logWarn("UPDATE", `update check failed: ${summarizeError(err)}`);
+    });
+  }, 15_000);
+  updateStartupTimer.unref?.();
+
+  const updatePeriodicTimer = setInterval(() => {
+    void runUpdateNotificationCheck().catch((err) => {
+      logWarn("UPDATE", `periodic update check failed: ${summarizeError(err)}`);
+    });
+  }, 6 * 3600 * 1000);
+  updatePeriodicTimer.unref?.();
+
   const shutdown = async () => {
     logInfo("HATO", "shutting down...");
+    clearTimeout(updateStartupTimer);
+    clearInterval(updatePeriodicTimer);
     debouncer.dispose();
     compactionManager.dispose();
     memoryCurator.dispose();

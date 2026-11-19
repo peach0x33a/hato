@@ -1,5 +1,13 @@
 export interface HealthResponse {
   ok: boolean;
+  version?: string;
+  githubUrl?: string;
+  update?: {
+    channel: "stable" | "nightly";
+    hasUpdate: boolean;
+    latestTag: string | null;
+    releaseUrl: string;
+  };
   uptimeSec: number;
   telegramEnabled: boolean;
   pendingTakeover: boolean;
@@ -486,6 +494,14 @@ export interface SaveConfigResponse {
 
 export interface OverviewResponse {
   ok: boolean;
+  version?: string;
+  githubUrl?: string;
+  update?: {
+    channel: "stable" | "nightly";
+    hasUpdate: boolean;
+    latestTag: string | null;
+    releaseUrl: string;
+  };
   uptimeSec: number;
   gateways: {
     telegram: {
