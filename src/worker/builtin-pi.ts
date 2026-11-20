@@ -184,6 +184,14 @@ const AskUserParams = obj({
   question: str({ description: "Clear question for the user to answer before resuming" }),
 });
 
+const RegisterScriptParams = obj({
+  name: str({ description: "Short human-readable name for the scheduled script" }),
+  script_path: str({ description: "Path to the executable/script file inside workspace" }),
+  cron_expr: str({ description: "5-field cron expression, e.g. '0 9 * * *'" }),
+  notify_channel: opt(oneOf(["tg", "qq"], { description: "Optional notification channel (defaults to owner proactive_channel)" })),
+  required_secrets: opt(arr(str())),
+});
+
 const FinishTaskParams = obj({
   status: oneOf(["done", "failed"]),
   narration_hint: str({ description: "Concise factual summary for the user" }),
@@ -715,6 +723,38 @@ export class BuiltinPiRunner implements ExecutionRunner {
               model: result.model,
               files: result.files,
             },
+          };
+        },
+      },
+      {
+        name: "register_script",
+        label: "注册常驻定时脚本",
+        description: "Register a verified script into Hato's cron script_registry so it runs periodically.",
+        parameters: RegisterScriptParams,
+        execute: async (_id, input) => {
+          const abs = resolveSafeWorkspacePath(input.script_path);
+          if (!existsSync(abs)) {
+            throw new Error(`脚本文件不存在: ${abs}`);
+          }
+          const notify =
+            input.notify_channel ??
+            (hatoConfig.owner.proactive_channel === "qq" ? "qq" : "tg");
+          const created = this.deps.repo.registerScript({
+            ticketId: ticket.ticketId,
+            name: input.name,
+            scriptPath: abs,
+            cronExpr: input.cron_expr,
+            notifyChannel: notify,
+            requiredSecrets: input.required_secrets ?? [],
+          });
+          return {
+            content: [
+              {
+                type: "text",
+                text: `已注册常驻脚本 [${created.id}] "${created.name}" (${created.cronExpr}) -> ${created.notifyChannel}`,
+              },
+            ],
+            details: { ok: true, id: created.id, scriptPath: abs },
           };
         },
       },

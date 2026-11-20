@@ -30,6 +30,7 @@ import {
 } from "./dispatch/artifact-delivery.js";
 import { TicketCoordinator } from "./dispatch/coordinator.js";
 import { ProactiveCareScheduler } from "./dispatch/proactive-care.js";
+import { ScriptScheduler } from "./dispatch/script-scheduler.js";
 import { cleanupExpiredWorkspaces } from "./dispatch/workspace-gc.js";
 import { NeutralRouter } from "./dispatch/router.js";
 import { parseWorkerMandate } from "./dispatch/schema.js";
@@ -1267,11 +1268,33 @@ async function main(): Promise<void> {
   });
   proactiveCareScheduler.start(60_000);
 
+  const scriptScheduler = new ScriptScheduler({
+    getHatoConfig: () => hatoConfig,
+    repo,
+    onScriptOutput: async ({ name, notifyChannel, exitCode, stdoutTail, stderrTail }) => {
+      const preferred: ChannelName | undefined =
+        notifyChannel === "tg" || notifyChannel === "qq" ? notifyChannel : undefined;
+      const outbound = resolveOutboundTarget(preferred);
+      if (!outbound) return;
+      const body =
+        exitCode === 0
+          ? stdoutTail.trim()
+          : `退出码=${exitCode}\n${(stderrTail || stdoutTail).trim()}`;
+      if (!body) return;
+      await outbound.adapter.sendText(
+        outbound.targetId,
+        `[定时脚本: ${name}] ${exitCode === 0 ? "执行输出" : "执行异常"}\n${body}`,
+      );
+    },
+  });
+  scriptScheduler.start(60_000);
+
   const shutdown = async () => {
     logInfo("HATO", "shutting down...");
     clearTimeout(updateStartupTimer);
     clearInterval(updatePeriodicTimer);
     proactiveCareScheduler.dispose();
+    scriptScheduler.dispose();
     debouncer.dispose();
     compactionManager.dispose();
     memoryCurator.dispose();

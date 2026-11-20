@@ -4,6 +4,7 @@ import type { HatoDb } from "./client.js";
 import { computeTurnMetrics, type TraceStepRecord } from "../stats/metrics.js";
 import {
   chatSessions,
+  jobRuns,
   memorySyncRecords,
   openLoops,
   owners,
@@ -1007,6 +1008,93 @@ export class HatoRepository {
       .select()
       .from(scriptRegistry)
       .orderBy(desc(scriptRegistry.updatedAt))
+      .limit(limit)
+      .all();
+  }
+
+  listEnabledScripts(limit = 50) {
+    return this.db
+      .select()
+      .from(scriptRegistry)
+      .where(eq(scriptRegistry.enabled, true))
+      .orderBy(desc(scriptRegistry.updatedAt))
+      .limit(limit)
+      .all();
+  }
+
+  registerScript(params: {
+    id?: string;
+    ticketId: string;
+    name: string;
+    scriptPath: string;
+    cronExpr: string;
+    notifyChannel: string;
+    enabled?: boolean;
+    requiredSecrets?: string[];
+  }) {
+    const now = Date.now();
+    const row = {
+      id: params.id ?? `scr_${randomBytes(4).toString("hex")}`,
+      ticketId: params.ticketId,
+      name: params.name.trim(),
+      scriptPath: params.scriptPath.trim(),
+      cronExpr: params.cronExpr.trim(),
+      notifyChannel: params.notifyChannel,
+      enabled: params.enabled ?? true,
+      requiredSecretsJson: JSON.stringify(params.requiredSecrets ?? []),
+      consecutiveFailures: 0,
+      createdAt: now,
+      updatedAt: now,
+    };
+    this.db.insert(scriptRegistry).values(row).run();
+    return row;
+  }
+
+  recordScriptRun(params: {
+    scriptId: string;
+    exitCode: number;
+    stdoutTail: string;
+    stderrTail: string;
+    ranAt?: number;
+  }) {
+    const ranAt = params.ranAt ?? Date.now();
+    const runRow = {
+      id: `run_${randomBytes(4).toString("hex")}`,
+      scriptId: params.scriptId,
+      exitCode: params.exitCode,
+      stdoutTail: params.stdoutTail.slice(-2000),
+      stderrTail: params.stderrTail.slice(-2000),
+      ranAt,
+    };
+    this.db.insert(jobRuns).values(runRow).run();
+
+    const script = this.db
+      .select()
+      .from(scriptRegistry)
+      .where(eq(scriptRegistry.id, params.scriptId))
+      .get();
+    if (script) {
+      const nextFailures = params.exitCode === 0 ? 0 : script.consecutiveFailures + 1;
+      const nextEnabled = nextFailures >= 5 ? false : script.enabled;
+      this.db
+        .update(scriptRegistry)
+        .set({
+          consecutiveFailures: nextFailures,
+          enabled: nextEnabled,
+          updatedAt: ranAt,
+        })
+        .where(eq(scriptRegistry.id, params.scriptId))
+        .run();
+    }
+    return runRow;
+  }
+
+  listJobRuns(scriptId: string, limit = 20) {
+    return this.db
+      .select()
+      .from(jobRuns)
+      .where(eq(jobRuns.scriptId, scriptId))
+      .orderBy(desc(jobRuns.ranAt))
       .limit(limit)
       .all();
   }
