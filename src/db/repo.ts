@@ -674,6 +674,35 @@ export class HatoRepository {
     );
   }
 
+  createScheduleOverride(params: {
+    id?: string;
+    canonicalUserId: string;
+    tempTimezone?: string | null;
+    statusNote?: string | null;
+    expiresAt: number;
+    createdAt?: number;
+  }) {
+    const row = {
+      id: params.id ?? `so_${randomBytes(4).toString("hex")}`,
+      canonicalUserId: params.canonicalUserId,
+      tempTimezone: params.tempTimezone?.trim() || null,
+      statusNote: params.statusNote?.trim() || null,
+      expiresAt: Math.round(params.expiresAt),
+      createdAt: params.createdAt ?? Date.now(),
+    };
+    this.db.insert(scheduleOverrides).values(row).run();
+    return row;
+  }
+
+  clearScheduleOverrides(canonicalUserId: string): number {
+    const res = this.db
+      .delete(scheduleOverrides)
+      .where(eq(scheduleOverrides.canonicalUserId, canonicalUserId))
+      .returning({ id: scheduleOverrides.id })
+      .all();
+    return res.length;
+  }
+
   listRelationshipFacts(): Array<{ key: string; value: string }> {
     return this.db
       .select({ key: relationshipFacts.key, value: relationshipFacts.value })

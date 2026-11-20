@@ -121,4 +121,38 @@ describe("proactive-care", () => {
       rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  test("repo.createScheduleOverride and clearScheduleOverrides manage temporary timezone/status overrides", () => {
+    const dir = mkdtempSync(join(tmpdir(), "hato-override-"));
+    try {
+      const dbHandle = openDatabase(join(dir, "test.db"));
+      const repo = new HatoRepository(dbHandle.db);
+      repo.ensureOwner({
+        canonicalUserId: "u1",
+        timezone: "Asia/Singapore",
+        proactiveChannel: "tg",
+      });
+
+      const now = Date.now();
+      const created = repo.createScheduleOverride({
+        canonicalUserId: "u1",
+        tempTimezone: "Asia/Tokyo",
+        statusNote: "出差中",
+        expiresAt: now + 3600_000,
+      });
+
+      const active = repo.getActiveScheduleOverride("u1", now);
+      expect(active?.id).toBe(created.id);
+      expect(active?.tempTimezone).toBe("Asia/Tokyo");
+      expect(active?.statusNote).toBe("出差中");
+
+      expect(repo.getActiveScheduleOverride("u1", now + 7200_000)).toBeNull();
+      expect(repo.clearScheduleOverrides("u1")).toBe(1);
+      expect(repo.getActiveScheduleOverride("u1", now)).toBeNull();
+
+      dbHandle.close();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });

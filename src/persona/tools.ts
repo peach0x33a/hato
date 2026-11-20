@@ -65,6 +65,13 @@ const ScheduleCareParams = obj({
   due_at: opt(str({ description: "Optional local time 'YYYY-MM-DD HH:mm' in the user's timezone" })),
 });
 
+const SetScheduleOverrideParams = obj({
+  action: opt(oneOf(["set", "clear"], { description: "Set (default) or clear active temporary override" })),
+  temp_timezone: opt(str({ description: "Optional IANA timezone (e.g. Asia/Tokyo, America/New_York)" })),
+  status_note: opt(str({ description: "Optional temporary status note (e.g. 出差中, 倒时差)" })),
+  duration_hours: opt(num({ description: "How many hours the override remains active (default 24)" })),
+});
+
 const WebSearchParams = obj({
   query: str({ description: "Search query keywords or question for Tavily web search" }),
   topic: opt(oneOf(["general", "news", "finance"])),
@@ -419,6 +426,58 @@ export function createPersonaReadOnlyTools(params: {
     },
   };
 
+  const setScheduleOverrideTool: AgentTool<typeof SetScheduleOverrideParams> = {
+    name: "set_schedule_override",
+    label: "Set Schedule Override",
+    description:
+      "Temporarily override the user's timezone (e.g. traveling) and/or status note for a duration, or clear active overrides.",
+    parameters: SetScheduleOverrideParams,
+    async execute(_toolCallId, input) {
+      if (input.action === "clear") {
+        const cleared = params.repo.clearScheduleOverrides(params.canonicalUserId);
+        return {
+          content: [{ type: "text", text: cleared > 0 ? "已清除临时时区/状态覆盖。" : "当前没有生效的临时覆盖。" }],
+          details: { ok: true, cleared },
+        };
+      }
+      const tz = input.temp_timezone?.trim();
+      const note = input.status_note?.trim();
+      if (!tz && !note) {
+        return {
+          content: [{ type: "text", text: "请至少提供 temp_timezone 或 status_note。" }],
+          details: { ok: false },
+        };
+      }
+      if (tz) {
+        try {
+          new Intl.DateTimeFormat("en-US", { timeZone: tz });
+        } catch {
+          return {
+            content: [{ type: "text", text: `无效的 IANA 时区: ${tz}` }],
+            details: { ok: false },
+          };
+        }
+      }
+      const hours = Math.min(Math.max(Number(input.duration_hours) || 24, 1), 24 * 30);
+      const expiresAt = Date.now() + hours * 3600 * 1000;
+      const created = params.repo.createScheduleOverride({
+        canonicalUserId: params.canonicalUserId,
+        tempTimezone: tz ?? null,
+        statusNote: note ?? null,
+        expiresAt,
+      });
+      return {
+        content: [
+          {
+            type: "text",
+            text: `已设置临时覆盖 [${created.id}]：${tz ? `时区=${tz} ` : ""}${note ? `状态=${note} ` : ""}（有效期 ${hours} 小时）。`,
+          },
+        ],
+        details: { ok: true, id: created.id, expiresAt: created.expiresAt },
+      };
+    },
+  };
+
   const searchPastSessionsTool: AgentTool<typeof SearchPastSessionsParams> = {
     name: "search_past_sessions",
     label: "Search Past Sessions",
@@ -631,6 +690,7 @@ export function createPersonaReadOnlyTools(params: {
     readArtifactTool,
     listSchedulesTool,
     scheduleCareTool,
+    setScheduleOverrideTool,
     searchPastSessionsTool,
     webSearchTool,
     webFetchTool,
