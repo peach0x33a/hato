@@ -97,6 +97,13 @@ const SETTINGS_NAV_ITEMS: SettingsNavItem[] = [
       "身份",
       "时区",
       "timezone",
+      "热区",
+      "热区清空时机",
+      "清空",
+      "归档",
+      "定时",
+      "缓存",
+      "clear_mode",
       "白名单",
       "telegram",
       "主题",
@@ -1220,6 +1227,125 @@ export function SettingsPanel({
                   />
                 </div>
               </SettingsRow>
+            </SettingsCardGroup>
+
+            <SettingsCardGroup
+              title="热区清空时机"
+              description="控制工作记忆热区何时归档长期记忆并清空"
+            >
+              <SettingsRow
+                title="清空模式"
+                description="定时模式按每日固定时间清空（聊天时自动顺延）；缓存模式趁提示词缓存未过期时预摘要并在闲置后归档"
+              >
+                <div className="w-full sm:w-64">
+                  <ConsoleSelect
+                    size="sm"
+                    value={draft.context.clear_mode ?? "cache"}
+                    onValueChange={(v) =>
+                      setDraft((p) => ({
+                        ...p,
+                        context: {
+                          ...p.context,
+                          clear_mode: v === "scheduled" ? "scheduled" : "cache",
+                        },
+                      }))
+                    }
+                    options={[
+                      { value: "cache", label: "缓存模式（趁缓存未过期归档）" },
+                      { value: "scheduled", label: "定时模式（每日定时清空归档）" },
+                    ]}
+                  />
+                </div>
+              </SettingsRow>
+
+              {(draft.context.clear_mode ?? "cache") === "scheduled" ? (
+                <>
+                  <SettingsRow
+                    title="每日清空时间"
+                    description={`按主人时区（${draft.owner.timezone || "Asia/Shanghai"}）触发，格式 HH:MM`}
+                  >
+                    <div className="w-full sm:w-40">
+                      <ConsoleInput
+                        size="sm"
+                        value={draft.context.scheduled_clear_time ?? "01:00"}
+                        onChange={(v) =>
+                          setDraft((p) => ({
+                            ...p,
+                            context: { ...p.context, scheduled_clear_time: v },
+                          }))
+                        }
+                        placeholder="01:00"
+                      />
+                    </div>
+                  </SettingsRow>
+                  <SettingsRow
+                    title="活跃聊天顺延（分钟）"
+                    description="到达清空时间或顺延期内有新消息时，每发一条消息向后顺延的分钟数"
+                  >
+                    <div className="w-full sm:w-40">
+                      <ConsoleInput
+                        size="sm"
+                        type="number"
+                        min={1}
+                        value={String(draft.context.scheduled_defer_minutes ?? 30)}
+                        onChange={(v) => {
+                          const num = Math.max(1, Number(v) || 30);
+                          setDraft((p) => ({
+                            ...p,
+                            context: { ...p.context, scheduled_defer_minutes: num },
+                          }));
+                        }}
+                        placeholder="30"
+                      />
+                    </div>
+                  </SettingsRow>
+                </>
+              ) : (
+                <>
+                  <SettingsRow
+                    title="热缓存预摘要时间（分钟）"
+                    description="无新消息后趁提示词缓存未失效生成过渡摘要草稿"
+                  >
+                    <div className="w-full sm:w-40">
+                      <ConsoleInput
+                        size="sm"
+                        type="number"
+                        min={1}
+                        value={String(draft.context.pre_compact_after_minutes)}
+                        onChange={(v) => {
+                          const num = Math.max(1, Number(v) || 50);
+                          setDraft((p) => ({
+                            ...p,
+                            context: { ...p.context, pre_compact_after_minutes: num },
+                          }));
+                        }}
+                        placeholder="50"
+                      />
+                    </div>
+                  </SettingsRow>
+                  <SettingsRow
+                    title="闲置归档提交时间（分钟）"
+                    description="无新消息后将旧热区写入长期记忆并提交压缩摘要"
+                  >
+                    <div className="w-full sm:w-40">
+                      <ConsoleInput
+                        size="sm"
+                        type="number"
+                        min={1}
+                        value={String(draft.context.idle_commit_after_minutes)}
+                        onChange={(v) => {
+                          const num = Math.max(1, Number(v) || 60);
+                          setDraft((p) => ({
+                            ...p,
+                            context: { ...p.context, idle_commit_after_minutes: num },
+                          }));
+                        }}
+                        placeholder="60"
+                      />
+                    </div>
+                  </SettingsRow>
+                </>
+              )}
             </SettingsCardGroup>
 
             <SettingsCardGroup

@@ -227,6 +227,9 @@ export interface HatoConfig {
     min_messages_to_compact: number;
     pre_compact_after_minutes: number;
     idle_commit_after_minutes: number;
+    clear_mode?: "cache" | "scheduled";
+    scheduled_clear_time?: string;
+    scheduled_defer_minutes?: number;
     gap_marker_threshold_minutes: number;
     lookback: {
       max_step_count: number;

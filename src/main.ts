@@ -4,6 +4,7 @@ import { BrowserRuntime } from "./browser/runtime.js";
 import { tryExecuteSlashCommand } from "./commands/slash.js";
 import {
   loadHatoConfig,
+  resolveContextClearConfig,
   resolveMemoryCuratorConfig,
   resolveHindsightConfig,
   resolveMemoryEchoConfig,
@@ -430,14 +431,37 @@ async function main(): Promise<void> {
     };
   });
 
+  const buildCompactionConfig = (cfg: HatoConfig) => {
+    const clearCfg = resolveContextClearConfig(cfg);
+    return {
+      hotMessagesHighWatermark: cfg.context.hot_messages_high_watermark,
+      hotMessagesKeepAfterCompact: cfg.context.hot_messages_keep_after_compact,
+      minMessagesToCompact: cfg.context.min_messages_to_compact,
+      preCompactAfterMinutes: cfg.context.pre_compact_after_minutes,
+      idleCommitAfterMinutes: cfg.context.idle_commit_after_minutes,
+      clearMode: clearCfg.clearMode,
+      scheduledClearTime: clearCfg.scheduledClearTime,
+      scheduledDeferMinutes: clearCfg.scheduledDeferMinutes,
+      timezone: cfg.owner.timezone,
+    };
+  };
+
+  const archiveAndResetHotZone = async (uid: string) => {
+    debouncer.discardUser(uid);
+    queuedBatchesByUser.delete(uid);
+    return actorLock.run(uid, async () => {
+      compactionManager.resetUser(uid);
+      await memoryCurator.retainPending(uid).catch((err) => {
+        logError("CURATOR", `pre-reset retain failed for ${uid}`, err);
+      });
+      const res = repo.resetWorkingContext(uid);
+      personaRuntime.resetSession();
+      return res;
+    });
+  };
+
   const compactionManager = new CompactionManager(
-    {
-      hotMessagesHighWatermark: hatoConfig.context.hot_messages_high_watermark,
-      hotMessagesKeepAfterCompact: hatoConfig.context.hot_messages_keep_after_compact,
-      minMessagesToCompact: hatoConfig.context.min_messages_to_compact,
-      preCompactAfterMinutes: hatoConfig.context.pre_compact_after_minutes,
-      idleCommitAfterMinutes: hatoConfig.context.idle_commit_after_minutes,
-    },
+    buildCompactionConfig(hatoConfig),
     repo,
     actorLock,
     {
@@ -445,6 +469,11 @@ async function main(): Promise<void> {
       ensureRetained: async (canonicalUserId, messages) => {
         await memoryCurator.retainBeforeCompaction(canonicalUserId, messages);
       },
+      clearHotZoneAndArchive: async (canonicalUserId) => {
+        const res = await archiveAndResetHotZone(canonicalUserId);
+        return res.clearedHotMessages > 0 || res.hadSummary;
+      },
+      listActiveUserIds: () => repo.listWorkingMemoryUserIds(),
     },
   );
 
@@ -466,13 +495,7 @@ async function main(): Promise<void> {
     proxyRouter.reload(nextConfig.network?.proxies ?? []);
     hatoConfig = nextConfig;
     debouncer.updateDelay(nextConfig.gateway.debounce_ms);
-    compactionManager.updateConfig({
-      hotMessagesHighWatermark: nextConfig.context.hot_messages_high_watermark,
-      hotMessagesKeepAfterCompact: nextConfig.context.hot_messages_keep_after_compact,
-      minMessagesToCompact: nextConfig.context.min_messages_to_compact,
-      preCompactAfterMinutes: nextConfig.context.pre_compact_after_minutes,
-      idleCommitAfterMinutes: nextConfig.context.idle_commit_after_minutes,
-    });
+    compactionManager.updateConfig(buildCompactionConfig(nextConfig));
     memoryStore = buildMemoryStore(nextConfig, proxyRouter, repo, memoryStore);
     mcpConfig = loadMcpConfig(MCP_CONFIG_PATH);
     await mcpPool.syncConfig(mcpConfig, { eagerZones: ["personal"] });
@@ -533,19 +556,7 @@ async function main(): Promise<void> {
     forceCompact: (uid: string) => compactionManager.runIdleCommit(uid),
     renderMarkdownImage: (markdown: string, options?: { theme?: "light" | "dark" }) =>
       markdownRenderer.render(markdown, options),
-    resetContext: async (uid: string) => {
-      debouncer.discardUser(uid);
-      queuedBatchesByUser.delete(uid);
-      return actorLock.run(uid, async () => {
-        compactionManager.resetUser(uid);
-        await memoryCurator.retainPending(uid).catch((err) => {
-          logError("CURATOR", `pre-reset retain failed for ${uid}`, err);
-        });
-        const res = repo.resetWorkingContext(uid);
-        personaRuntime.resetSession();
-        return res;
-      });
-    },
+    resetContext: archiveAndResetHotZone,
     getMemoryStatus: async (uid: string) => {
       const provider = resolveMemoryProvider(hatoConfig);
       const recallCfg = resolveMemoryRecallConfig(hatoConfig);

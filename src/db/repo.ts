@@ -231,6 +231,17 @@ export class HatoRepository {
   }
 
   /**
+   * List all canonical user IDs that currently have a working memory block.
+   */
+  listWorkingMemoryUserIds(): string[] {
+    const rows = this.db
+      .select({ canonicalUserId: workingMemoryBlocks.canonicalUserId })
+      .from(workingMemoryBlocks)
+      .all();
+    return rows.map((r) => r.canonicalUserId);
+  }
+
+  /**
    * Fetch all messages after the compaction watermark in chronological order.
    */
   getHotMessages(canonicalUserId: string, compactedUntilTs: number): RawMessageRecord[] {

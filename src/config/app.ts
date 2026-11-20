@@ -155,6 +155,9 @@ export const HatoConfigSchema = Type.Object({
     min_messages_to_compact: Type.Number({ minimum: 2 }),
     pre_compact_after_minutes: Type.Number({ minimum: 1 }),
     idle_commit_after_minutes: Type.Number({ minimum: 1 }),
+    clear_mode: Type.Optional(Type.Union([Type.Literal("cache"), Type.Literal("scheduled")])),
+    scheduled_clear_time: Type.Optional(Type.String()),
+    scheduled_defer_minutes: Type.Optional(Type.Number({ minimum: 1 })),
     gap_marker_threshold_minutes: Type.Number({ minimum: 1 }),
     lookback: Type.Object({
       max_step_count: Type.Number({ minimum: 1 }),
@@ -566,6 +569,26 @@ export function resolveMemoryRecallConfig(config: HatoConfig): ResolvedMemoryRec
     mode: r?.mode ?? "hybrid",
     maxResults: r?.max_results ?? 6,
     minQueryChars: r?.min_query_chars ?? 4,
+  };
+}
+
+export interface ResolvedContextClearConfig {
+  clearMode: "cache" | "scheduled";
+  scheduledClearTime: string;
+  scheduledDeferMinutes: number;
+}
+
+/**
+ * Resolve effective hot-zone clear timing config ("cache" vs "scheduled").
+ */
+export function resolveContextClearConfig(config: HatoConfig): ResolvedContextClearConfig {
+  const rawTime = config.context.scheduled_clear_time?.trim() ?? "";
+  const validTime = /^([01]?\d|2[0-3]):([0-5]\d)$/.test(rawTime) ? rawTime : "01:00";
+  const [hh, mm] = validTime.split(":");
+  return {
+    clearMode: config.context.clear_mode ?? "cache",
+    scheduledClearTime: `${hh!.padStart(2, "0")}:${mm!}`,
+    scheduledDeferMinutes: Math.max(1, config.context.scheduled_defer_minutes ?? 30),
   };
 }
 
