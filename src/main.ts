@@ -30,6 +30,7 @@ import {
 } from "./dispatch/artifact-delivery.js";
 import { TicketCoordinator } from "./dispatch/coordinator.js";
 import { ProactiveCareScheduler } from "./dispatch/proactive-care.js";
+import { cleanupExpiredWorkspaces } from "./dispatch/workspace-gc.js";
 import { NeutralRouter } from "./dispatch/router.js";
 import { parseWorkerMandate } from "./dispatch/schema.js";
 import { MessageDebouncer, mergeInboundBatches } from "./gateway/debouncer.js";
@@ -1208,8 +1209,28 @@ async function main(): Promise<void> {
     void runUpdateNotificationCheck().catch((err) => {
       logWarn("UPDATE", `periodic update check failed: ${summarizeError(err)}`);
     });
+    try {
+      const gc = cleanupExpiredWorkspaces({
+        repo,
+        workspacesDir: hatoConfig.paths.workspaces_dir,
+      });
+      if (gc.removedCount > 0) {
+        logInfo("HATO", `cleaned up ${gc.removedCount} expired workspace(s)`);
+      }
+    } catch (err) {
+      logWarn("HATO", `workspace cleanup failed: ${summarizeError(err)}`);
+    }
   }, 6 * 3600 * 1000);
   updatePeriodicTimer.unref?.();
+
+  try {
+    cleanupExpiredWorkspaces({
+      repo,
+      workspacesDir: hatoConfig.paths.workspaces_dir,
+    });
+  } catch (err) {
+    logWarn("HATO", `startup workspace cleanup failed: ${summarizeError(err)}`);
+  }
 
   const proactiveCareScheduler = new ProactiveCareScheduler({
     getHatoConfig: () => hatoConfig,

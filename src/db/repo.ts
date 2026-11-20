@@ -833,6 +833,24 @@ export class HatoRepository {
       .all();
   }
 
+  listExpiredWorkspaceTickets(nowMs = Date.now(), limit = 50) {
+    return this.db
+      .select()
+      .from(tickets)
+      .where(lte(tickets.workspaceExpiresAt, nowMs))
+      .orderBy(asc(tickets.workspaceExpiresAt))
+      .limit(limit)
+      .all();
+  }
+
+  clearTicketWorkspaceExpiry(ticketId: string): void {
+    this.db
+      .update(tickets)
+      .set({ workspaceExpiresAt: null, updatedAt: Date.now() })
+      .where(eq(tickets.id, ticketId))
+      .run();
+  }
+
   createTicket(params: {
     id?: string;
     canonicalUserId: string;
