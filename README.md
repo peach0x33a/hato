@@ -20,14 +20,16 @@
 
 - **防污染「三道墙」架构**
   将对话入口拆分为 **Persona（人设陪伴）** 与 **Neutral Router（中立轻路由器）**；Worker 凭借签发的只读 `context_id` 按需拉取原始上下文区间，避免传话筒失真，同时物理隔离人设提示词、情感记忆与宿主机执行权限。
-- **多渠道网关**
-  内置 Telegram (`grammY`) 私聊适配器，支持防抖聚批、拟真气泡分段发送、Inline 确认按钮与媒体附件处理。
+- **多渠道网关与跨端投递**
+  内置 **Telegram (`grammY`)**、**QQ 官方 Bot** 与 **Web Console**，支持防抖聚批、拟真气泡分段发送、Inline 确认按钮、富媒体收发及 `send_file` / `send_message` 跨端投递。
+- **Persona 渐进式工具与创作表达**
+  通过 `activate_tools` 按需披露工具，支持异步 `image_gen`（不阻塞聊天、成图自动多模态回流给 Persona 验收）、`read_artifact`、`render_markdown_image`（`/render2img`）、表情包收藏与斗图、`web_search` / `web_fetch`、Playwright 浏览器接管（`browser_task`）及 `self_config` / `bot_profile`。
 - **5 角色槽位模型路由**
-  支持为 `persona` / `router` / `worker` / `curator` / `vision` 等槽位独立配置 Provider 与模型，支持 `/model` 热切换与自动重试。
+  支持为 `persona` / `router` / `worker` / `curator` / `vision` 等槽位独立配置 Provider 与模型，支持 `/model` 热切换、`/reload` 配置重载与自动重试。
 - **双区能力 & 外部 CLI 调度**
-  Skills 与 MCP 按 `personal` / `worker` 物理隔离；Worker 支持内置 `builtin-pi` 与外部 CLI（`codex-cli`、`claude-code`、`antigravity-cli`、`opencode-v2`、`external-pi`），通过 Overlay 隔离个人凭据。
-- **长期记忆 & 定时关怀**
-  支持 MemoryEcho / Hindsight 双 Bank 记忆提炼与按关键词级联遗忘，配合 Croner 定时任务与 Open Loops 主动关怀。
+  Skills 与 MCP 按 `personal` / `worker` 物理隔离；Worker 支持内置 `builtin-pi` 与外部 CLI（`codex-cli`、`claude-code`、`antigravity-cli`、`opencode-v2`、`external-pi`），通过 Overlay 隔离个人凭据，并支持过期隔离工作区自动回收（`workspace_ttl_days`）。
+- **长期记忆、主动关怀 & 常驻定时脚本**
+  以 **MemoryEcho** 为主力云端记忆后端（`persona` / `tech` 双 Vault 隔离）配合 `MemoryCurator` 自动提炼与 `/forget` 级联遗忘；支持 `ProactiveCareScheduler`（`open_loops` + `quiet_hours` / 聊后顺延 / 未回复退避）、`schedule_care` / `set_schedule_override` 临时时区覆盖，以及 `ScriptScheduler` 5 段 Cron 常驻脚本调度与 `job_runs` 失败自动停用保护。
 - **内置 Web Console**
   开箱即用的可视化控制台（默认 `http://127.0.0.1:3820`），支持实时对话、Prompt 分块预览编辑、Provider/模型管理、MCP 配置与 Token 用量统计。
 
@@ -36,17 +38,19 @@
 ## 🧭 架构概览
 
 ```text
-Telegram / Web Console
+Telegram / QQ 官方 Bot / Web Console
         │  (防抖聚批 + Actor Lock)
         ▼
-  Persona Agent (pi-agent-core) ──▶ 只读微工具 / Personal MCP / read_skill
+  Persona Agent (pi-agent-core) ──▶ 渐进式微工具 / 异步 image_gen / Personal MCP / read_skill
         │
-        │ delegate(hint)
+        │ delegate(hint, deliver_files)
         ▼
   Neutral Router ──▶ 圈定 [from_msg_id .. to_msg_id] 区间 & 签发 context_id
         │
         ▼
-  Worker Dispatcher (builtin-pi / external-cli) ──▶ 按 context_id 拉取原文切片执行
+  Worker Dispatcher (builtin-pi / external-cli) ──▶ 按 context_id 拉取原文切片执行 & 产物回流
+
+后台调度：ProactiveCareScheduler (open_loops) · ScriptScheduler (script_registry) · Workspace GC
 ```
 
 > 详细设计请参阅 [系统架构与工程设计文档](docs/architecture.md)。
@@ -140,6 +144,7 @@ hato              # 启动服务
 - `/compact`：手动触发一次热区上下文压缩
 - `/memory [sync|retry]`：查看长期记忆状态/配额，或立即提炼同步
 - `/forget <关键词>`：按关键词级联遗忘长期记忆
+- `/render2img [--dark|--light] [内容]`：将 Markdown / 表格 / 公式渲染为图片发送
 
 </details>
 
