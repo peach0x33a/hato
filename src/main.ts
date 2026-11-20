@@ -5,6 +5,7 @@ import { tryExecuteSlashCommand } from "./commands/slash.js";
 import {
   loadHatoConfig,
   resolveMemoryCuratorConfig,
+  resolveHindsightConfig,
   resolveMemoryEchoConfig,
   resolveMemoryProvider,
   resolveMemoryRecallConfig,
@@ -44,6 +45,7 @@ import { buildUpdateNotificationKey, checkForUpdates } from "./utils/update-chec
 import { McpClientPool } from "./mcp/pool.js";
 import { CompactionManager } from "./memory/compaction.js";
 import { MemoryCurator } from "./memory/curator.js";
+import { HindsightStore } from "./memory/hindsight.js";
 import { MemoryEchoStore } from "./memory/memoryecho.js";
 import type { MemoryStore } from "./memory/store.js";
 import { PersonaRuntime } from "./persona/agent.js";
@@ -1369,7 +1371,12 @@ function buildMemoryStore(
     return new MemoryEchoStore(meConfig, proxyRouter, repo);
   }
   if (provider === "hindsight") {
-    logInfo("MEMORY", "memory.provider = hindsight 暂未实现，长期记忆处于未激活状态");
+    const hsConfig = resolveHindsightConfig(config);
+    if (existing instanceof HindsightStore) {
+      existing.updateConfig(hsConfig);
+      return existing;
+    }
+    return new HindsightStore(hsConfig, proxyRouter, repo);
   }
   return null;
 }

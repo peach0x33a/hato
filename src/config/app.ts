@@ -458,6 +458,18 @@ export interface ResolvedMemoryEchoConfig {
   };
 }
 
+export interface ResolvedHindsightConfig {
+  enabled: boolean;
+  baseUrl: string;
+  apiKeyEnv: string;
+  timeoutMs: number;
+  embeddingDimensions: number;
+  banks: {
+    persona: string;
+    tech: string;
+  };
+}
+
 export interface ResolvedMemoryRecallConfig {
   mode: MemoryRecallMode;
   maxResults: number;
@@ -496,6 +508,25 @@ export function resolveMemoryEchoConfig(config: HatoConfig): ResolvedMemoryEchoC
     vaults: {
       persona: me?.vaults?.persona?.trim() ?? "",
       tech: me?.vaults?.tech?.trim() ?? "",
+    },
+  };
+}
+
+/**
+ * Resolve effective Hindsight provider config with safe defaults.
+ */
+export function resolveHindsightConfig(config: HatoConfig): ResolvedHindsightConfig {
+  const hs = config.memory.hindsight;
+  const provider = resolveMemoryProvider(config);
+  return {
+    enabled: provider === "hindsight",
+    baseUrl: hs?.base_url ?? "http://127.0.0.1:8888",
+    apiKeyEnv: "HINDSIGHT_API_KEY",
+    timeoutMs: 15_000,
+    embeddingDimensions: hs?.embedding_dimensions ?? 1024,
+    banks: {
+      persona: hs?.banks?.persona?.trim() || "persona",
+      tech: hs?.banks?.tech?.trim() || "tech",
     },
   };
 }

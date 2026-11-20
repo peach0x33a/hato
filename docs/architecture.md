@@ -716,8 +716,8 @@ Hato/
 * 已接入第二梯队 **`external-pi`** 与第三梯队 **`claude-code`**、`needs_input` 中立追问路由与 `resume` 断点续跑、TG Inline Keyboard `confirm_before` 确认流。
 * 已实现 `cleanupExpiredWorkspaces`（14 天过期隔离工作区自动回收）；Docker `hato-t_<id>` 容器沙箱为预留规划（当前使用进程内 `isolated` / `vm_unrestricted`）。
 
-### Phase 4：MemoryEcho 记忆系统与主动关怀闭环（已实现）
-* 主力云端记忆后端已切换为 **`MemoryEcho`**（`src/memory/memoryecho.ts`），打通 `persona` / `tech` 双 Vault 隔离；`hindsight` 保留接口占位（暂未实现）。
+### Phase 4：MemoryEcho / Hindsight 记忆系统与主动关怀闭环（已实现）
+* 主力云端记忆后端为 **`MemoryEcho`**（`src/memory/memoryecho.ts`），同时已实现 **`HindsightStore`**（`src/memory/hindsight.ts`，通过 REST API 对接自托管 Hindsight 服务），均打通 `persona` / `tech` 双 Vault/Bank 隔离。
 * 已打通异步 `MemoryCurator`（同时提炼 `persona`/`tech` 记忆与 `open_loops`）、Persona 即时工具 `schedule_care` 与 `set_schedule_override`（`schedule_overrides` 临时时区/状态覆盖）、`ProactiveCareScheduler`（遵守 `quiet_hours`、`defer_after_chat_minutes` 与 `max_unanswered_streak` 退避及用户回复自动消解）以及 `/memory` `/forget`。
 
 ### Phase 5：常驻脚本运维闭环（已实现本机进程调度）
