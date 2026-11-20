@@ -575,12 +575,12 @@ Hato 在业务层定义统一的 `MemoryStore` 接口，底层默认接 **Hindsi
 3. **非交互下的 `needs_input` 与 4 信号联合判定：** 外部 CLI 缺信息时通常提问后即 exit 0 退出。进程退出后，由 **Result Normalizer** 结合 **(1) 退出码与信号、(2) JSONL 末轮终态与错误/权限拒绝字段、(3) 可选约定产物与工作区 `git diff`、(4) 轻量文本分类** 联合判定：若在向用户提问，则置为 `needs_input` 并保留 `external_session_id` 等待回复后 `resume`；否则组装为标准 `Result JSON`（`agy` 同时可用 `--json-schema` 直接约束终态 JSON）。
 
 ### 8.3 工作区清理与常驻脚本生命周期
-* **工作区与容器清理策略：**
-  * `builtin-pi` 工单结束后，**临时沙箱容器立即销毁**释放内存；
-  * 宿主机对应的工作目录 `data/workspaces/t_<id>`：**临时一次性工单保留 14 天后自动回收，已被纳入脚本注册表的任务目录永久保留**，便于后续“在旧脚本基础上改一下”。
-* **常驻脚本与“故障温柔通报”：**
-  * 经过确认部署的定时脚本登记进 `script_registry`，放入常驻容器 `hato-jobs` 由 `croner` 调度。
-  * 若脚本运行退出码非 0，写入 `job_runs` 日志并触发 `JobFailedEvent`：连续失败 2 次（或标记为关键的任务首次失败）时，通过 Event Bus 推送给 Persona，由 Persona 用自然口吻提醒用户并附带摘要卡片；用户回一句“修一下”，Router 即可将脚本路径、报错日志所在消息及关联上下文区间直接派发修复工单。
+* **工作区清理策略（已实现）：**
+  * 宿主机对应的隔离工作目录 `data/workspaces/t_<id>` 在工单创建时记录 `workspace_expires_at`（默认 14 天）；由 `src/dispatch/workspace-gc.ts` (`cleanupExpiredWorkspaces`) 在启动时及每 6 小时周期清理过期且非活跃的隔离目录（跳过 `host_repo` 与活跃工单）。
+  * *注：`[worker.sandbox]` Docker 容器沙箱（`hato-sandbox:latest` / `hato-jobs`）目前仅保留配置项，尚未接入容器执行器，`builtin-pi` 当前以进程内工作区隔离（`isolated` / `vm_unrestricted`）运行。*
+* **常驻脚本与运行记录（已实现）：**
+  * 由 `builtin-pi` 通过 `register_script` 将已验证的脚本登记进 `script_registry`，由 `src/dispatch/script-scheduler.ts` (`ScriptScheduler`) 每 60 秒按标准 5 段 Cron 表达式（支持用户时区）巡检并执行（支持 `.py` / `.sh` / `.ts` / `.js` / 可执行文件）。
+  * 每次执行结果写入 `job_runs`；当脚本有标准输出或退出码非 0 时自动向 `notify_channel` 推送通知，连续失败 5 次自动停用（`enabled = false`）。
 
 ---
 
@@ -712,18 +712,17 @@ Hato/
 * 实现 `delegate()` 快速入队、中立轻路由器 **Router**（TypeBox 校验 + 区间圈定 + `Mandate` 能力授权）与 `ScheduleOps` 分流、`context_slice`（原样保留 + `reply_to` 穿透 + 有限回溯）及 **Result 三分流**（`narration_hint` + `verbatim_blocks` + `artifacts`）。
 * 实现 `ExecutionRunner`、`Scoped Context MCP`（`src/mcp/context-server.ts`）、`cli-probe` 动态模式探测与 Web Console 模式配置（`permission_preset` + 单后端原生模式覆写，**仅对 Hato 生效**）、`overlay` 本机配置继承剥离，优先打通第一梯队 **`codex-cli` → `antigravity-cli` → `opencode-v2`**（强制校验 V2 版本，拒绝裸 `opencode`）及 `builtin-pi` 轻量模式。
 
-### Phase 3：第二/三梯队 External CLI、异步追问路由与容器沙箱
-* 接入第二梯队 **`external-pi`**（独立安装的 `pi` CLI）与第三梯队 **`claude-code`**。
-* 接入 Rootless Docker `hato-t_<id>` 沙箱、`needs_input` 中立追问路由与 `resume` 断点续跑、TG Inline Keyboard `confirm_before` 确认流。
-* 上线 Watchdog 重启恢复、脚本注册表与 14 天工作区回收策略；按需评估 `agy acp` / `opencode acp` 实时拦截能力升级。
+### Phase 3：第二/三梯队 External CLI、异步追问路由与工作区回收（已实现，容器沙箱待接）
+* 已接入第二梯队 **`external-pi`** 与第三梯队 **`claude-code`**、`needs_input` 中立追问路由与 `resume` 断点续跑、TG Inline Keyboard `confirm_before` 确认流。
+* 已实现 `cleanupExpiredWorkspaces`（14 天过期隔离工作区自动回收）；Docker `hato-t_<id>` 容器沙箱为预留规划（当前使用进程内 `isolated` / `vm_unrestricted`）。
 
-### Phase 4：Hindsight 记忆系统与主动关怀
-* 部署 Hindsight Slim（`qwen3-embedding` + `qwen3-reranker`），打通 `persona` / `tech` 双 Bank。
-* 完成 **50 条真实中文对话召回验证**（必要时补中文分词或本地 BM25）。
-* 接入异步 Memory Curator、临时作息覆盖、Open Loops 扫描（含防插嘴与 2 次未回退避）及 `/memory` `/forget`。
+### Phase 4：MemoryEcho 记忆系统与主动关怀闭环（已实现）
+* 主力云端记忆后端已切换为 **`MemoryEcho`**（`src/memory/memoryecho.ts`），打通 `persona` / `tech` 双 Vault 隔离；`hindsight` 保留接口占位（暂未实现）。
+* 已打通异步 `MemoryCurator`（同时提炼 `persona`/`tech` 记忆与 `open_loops`）、Persona 即时工具 `schedule_care` 与 `set_schedule_override`（`schedule_overrides` 临时时区/状态覆盖）、`ProactiveCareScheduler`（遵守 `quiet_hours`、`defer_after_chat_minutes` 与 `max_unanswered_streak` 退避及用户回复自动消解）以及 `/memory` `/forget`。
 
-### Phase 5：常驻脚本运维闭环
-* 上线 `hato-jobs` 常驻容器、`croner` 统一调度、`required_secrets` 安全注入规范及 `JobFailedEvent` 温柔报错与带上下文一键修复。
+### Phase 5：常驻脚本运维闭环（已实现本机进程调度）
+* 已实现 `builtin-pi` 的 `register_script`、`ScriptScheduler`（5 段 Cron + `job_runs` 记录 + 输出/异常通知 + 连续失败 5 次自动停用）；容器化 `hato-jobs` 为后续可选演进。
 
-### Phase 6（Planned）：QQ 官方 Bot 通道接入
-* 参考 Hermes / OpenClaw 成熟适配实现 `src/gateway/qq.ts`，接通 C2C 消息收发、富媒体 `file_info` 上传、`msg_seq` 气泡上限裁剪与跨端兜底路由。
+### Phase 6：QQ 官方 Bot 通道、Web Console 与 Persona 能力演进（已实现）
+* 已实现 `src/gateway/qq.ts`（QQ 官方 Bot C2C 收发、富媒体上传、`msg_seq` 裁剪与跨端兜底）与 `src/web-console/server.ts`（Web 控制台与调试面板）。
+* Persona 层已升级为**渐进式工具披露**（`src/persona/tool-disclosure.ts` + `activate_tools`），并补齐异步 `image_gen`（创作生图归 Persona、异步走 `ticket_result` 结算）、`read_artifact`（文本/图片产物验收）、`deliver_files` 多模态回流、`render_markdown_image`、`self_config` / `bot_profile` 及完整表情包系统（`src/stickers/`）。
