@@ -74,7 +74,7 @@ export const TOOL_DOMAIN_PACKS: readonly ToolDomainPack[] = [
       "bot_profile",
     ],
     matches: ({ userText }) =>
-      /写代码|写个|编写|脚本|代码|运行|执行|修改文件|改一下|重构|修\s*bug|部署|定时|提醒|每天|每周|cron|schedule|delegate|python|bash|shell|\.py\b|\.ts\b|\.js\b|\.sh\b|工单|任务|进度|状态|日志|后台|执行详情|\bticket\b|\bt_\d+\b|日程|闹钟|周期|人设|设定|性格|提示词|配置|模型|切换模型|代理|气泡|安静时间|少用|多用|语气|\bsoul\b|\bconfig\b|\bmodel\b|\bproxy\b|头像|昵称|名字|简介|资料|机器人资料|\bbot\b|\bprofile\b|\bavatar\b/i.test(
+      /写代码|写个|编写|脚本|代码|运行|执行|修改文件|改一下|重构|修\s*bug|部署|定时|提醒|每天|每周|cron|schedule|delegate|python|bash|shell|\.py\b|\.ts\b|\.js\b|\.sh\b|ip地址|\bip\b|本机|服务器|主机|端口|进程|磁盘|内存|\bcpu\b|内置\s*pi|builtin-pi|命令行|终端|\bcli\b|\bssh\b|工单|任务|进度|状态|日志|后台|执行详情|\bticket\b|\bt_\d+\b|日程|闹钟|周期|人设|设定|性格|提示词|配置|模型|切换模型|代理|气泡|安静时间|少用|多用|语气|\bsoul\b|\bconfig\b|\bmodel\b|\bproxy\b|头像|昵称|名字|简介|资料|机器人资料|\bbot\b|\bprofile\b|\bavatar\b/i.test(
         userText,
       ),
   },

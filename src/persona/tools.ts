@@ -945,7 +945,7 @@ export function createPersonaReadOnlyTools(params: {
       name: "delegate",
       label: "Delegate Background Task",
       description:
-        "Delegate engineering or local-execution tasks (coding, scripts, file/repo edits, shell commands, worker skills/MCP, or schedule mutations) to a background worker. Never use this for math (calc), online lookups (web_search/web_fetch), or standalone creative image generation (use image_gen).",
+        "Delegate local execution, system/env checks, scripts, coding, or investigative tasks to a background worker (shell/files/worker skills/MCP) to figure out and complete. Never use for math (calc), online lookups (web_search/web_fetch), or standalone image_gen.",
       parameters: DelegateParams,
       async execute(_toolCallId, input) {
         const accepted = delegateFn({
