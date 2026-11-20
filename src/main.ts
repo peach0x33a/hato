@@ -29,6 +29,7 @@ import {
   partitionTicketArtifacts,
 } from "./dispatch/artifact-delivery.js";
 import { TicketCoordinator } from "./dispatch/coordinator.js";
+import { ProactiveCareScheduler } from "./dispatch/proactive-care.js";
 import { NeutralRouter } from "./dispatch/router.js";
 import { parseWorkerMandate } from "./dispatch/schema.js";
 import { MessageDebouncer, mergeInboundBatches } from "./gateway/debouncer.js";
@@ -1210,10 +1211,46 @@ async function main(): Promise<void> {
   }, 6 * 3600 * 1000);
   updatePeriodicTimer.unref?.();
 
+  const proactiveCareScheduler = new ProactiveCareScheduler({
+    getHatoConfig: () => hatoConfig,
+    repo,
+    actorLock,
+    deliverOpenLoop: async ({ canonicalUserId, notifyChannel, loopId, content }) => {
+      const preferred: ChannelName | undefined =
+        notifyChannel === "tg" || notifyChannel === "qq"
+          ? notifyChannel
+          : hatoConfig.owner.proactive_channel === "tg" || hatoConfig.owner.proactive_channel === "qq"
+            ? hatoConfig.owner.proactive_channel
+            : undefined;
+      const outbound = resolveOutboundTarget(preferred);
+      if (!outbound) {
+        return "no_outbound";
+      }
+      const bubbles = await personaRuntime.narrateBackgroundEvent({
+        canonicalUserId,
+        channel: outbound.channel,
+        eventSummary: `[主动关怀 ${loopId}] ${content}`,
+        promptInstruction: `[系统事件：现在到了主动关怀/跟进时间：${content}。请结合你们的聊天记忆，用自然、温暖、不生硬的日常口吻主动发消息关心或提醒用户（不要提“工单”“open_loop”“系统提醒”等词汇）。如果觉得此刻不适合打扰，输出 [NO_REPLY]。]`,
+      });
+      const nonEmpty = bubbles.filter((b) => b.trim() && b.trim() !== "[NO_REPLY]");
+      if (nonEmpty.length === 0) {
+        return "no_reply";
+      }
+      await outbound.adapter.sendBubbles(
+        outbound.targetId,
+        nonEmpty,
+        hatoConfig.gateway.bubbles.delay_ms_range,
+      );
+      return "sent";
+    },
+  });
+  proactiveCareScheduler.start(60_000);
+
   const shutdown = async () => {
     logInfo("HATO", "shutting down...");
     clearTimeout(updateStartupTimer);
     clearInterval(updatePeriodicTimer);
+    proactiveCareScheduler.dispose();
     debouncer.dispose();
     compactionManager.dispose();
     memoryCurator.dispose();

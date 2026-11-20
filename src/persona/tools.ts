@@ -16,7 +16,7 @@ import type { ScopedProxyRouter } from "../config/proxy.js";
 import type { HatoRepository } from "../db/repo.js";
 import type { MemoryRecallItem, MemoryStore } from "../memory/store.js";
 import { loadZoneSkills, readSkillContent } from "../skills/loader.js";
-import { formatLocalDateTime } from "../time/clock.js";
+import { formatLocalDateTime, parseLocalDateTimeToEpochMs } from "../time/clock.js";
 import {
   evaluateSafeMath,
   runDateMath,
@@ -58,6 +58,12 @@ const InspectTicketsParams = obj({
 });
 
 const ListSchedulesParams = obj({});
+
+const ScheduleCareParams = obj({
+  content: str({ description: "What to care about, follow up on, or remind the user about" }),
+  delay_minutes: opt(num({ description: "Optional minutes from now to follow up (e.g. 30)" })),
+  due_at: opt(str({ description: "Optional local time 'YYYY-MM-DD HH:mm' in the user's timezone" })),
+});
 
 const WebSearchParams = obj({
   query: str({ description: "Search query keywords or question for Tavily web search" }),
@@ -378,6 +384,41 @@ export function createPersonaReadOnlyTools(params: {
     },
   };
 
+  const scheduleCareTool: AgentTool<typeof ScheduleCareParams> = {
+    name: "schedule_care",
+    label: "Schedule Proactive Care",
+    description:
+      "Record a lightweight proactive-care follow-up or reminder (open loop) for the user at a future time (via delay_minutes or due_at 'YYYY-MM-DD HH:mm').",
+    parameters: ScheduleCareParams,
+    async execute(_toolCallId, input) {
+      const tz = params.getTimezone();
+      let dueAt: number | null = null;
+      if (typeof input.delay_minutes === "number" && Number.isFinite(input.delay_minutes) && input.delay_minutes > 0) {
+        dueAt = Date.now() + input.delay_minutes * 60_000;
+      } else if (input.due_at?.trim()) {
+        dueAt = parseLocalDateTimeToEpochMs(input.due_at, tz, 9, 30);
+      }
+      if (dueAt === null) {
+        return {
+          content: [{ type: "text", text: "请提供有效的 delay_minutes 或 due_at（格式 YYYY-MM-DD HH:mm）。" }],
+          details: { ok: false },
+        };
+      }
+      const cfg = params.getHatoConfig();
+      const created = params.repo.createOpenLoop({
+        canonicalUserId: params.canonicalUserId,
+        content: input.content,
+        dueAt,
+        notifyChannel: cfg.owner.proactive_channel,
+      });
+      const dueStr = formatLocalDateTime(created.dueAt, tz).fullStamp;
+      return {
+        content: [{ type: "text", text: `已记录主动关怀提醒 [${created.id}]：${created.content}（预计 ${dueStr} 跟进）。` }],
+        details: { ok: true, id: created.id, dueAt: created.dueAt },
+      };
+    },
+  };
+
   const searchPastSessionsTool: AgentTool<typeof SearchPastSessionsParams> = {
     name: "search_past_sessions",
     label: "Search Past Sessions",
@@ -589,6 +630,7 @@ export function createPersonaReadOnlyTools(params: {
     inspectTicketsTool,
     readArtifactTool,
     listSchedulesTool,
+    scheduleCareTool,
     searchPastSessionsTool,
     webSearchTool,
     webFetchTool,

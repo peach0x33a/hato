@@ -17,25 +17,32 @@ import type {
 } from "../db/repo.js";
 import { computeTurnMetrics, extractTraceSteps, formatLlmTelemetryLog } from "../stats/metrics.js";
 import { stripErrorInterruptionNotices } from "../persona/interruption.js";
-import { formatLocalDateTime } from "../time/clock.js";
+import { formatLocalDateTime, parseLocalDateTimeToEpochMs } from "../time/clock.js";
 import { logInfo, logWarn } from "../utils/logger.js";
 import type { MemoryStore } from "./store.js";
 
-const DEFAULT_CURATOR_PROMPT = `You are Hato's neutral, asynchronous Memory Curator. Objectively extract facts worth retaining long-term from timestamped conversation logs and route them strictly into two isolated banks: persona (personal life, preferences, events) and tech (tech stack, environment, engineering habits).
+const DEFAULT_CURATOR_PROMPT = `You are Hato's neutral, asynchronous Memory Curator. Objectively extract facts worth retaining long-term from timestamped conversation logs and route them strictly into two isolated banks: persona (personal life, preferences, events) and tech (tech stack, environment, engineering habits), plus optional upcoming proactive care follow-ups (open_loops).
 Rules:
-1. [CHAT_RELAY] lines are ONLY for coreference disambiguation; never record the assistant's own banter, suggestions, or unconfirmed claims as user facts.
+1. [CHAT_RELAY] lines are ONLY for coreference disambiguation; never record the assistant's own banter, suggestions, or unconfirmed claims as user facts or open_loops.
 2. Resolve relative time expressions (tomorrow, next week, etc.) into explicit YYYY-MM-DD dates using each message's timestamp.
 3. Ignore low-value greetings/filler; write concise standalone third-person objective statements in the user's primary language.
-4. Output JSON only: { "persona": [{ "fact": "...", "occurred_at": "YYYY-MM-DD HH:mm" }], "tech": [...] }.`;
+4. Only add an item to open_loops when [USER] explicitly mentions an upcoming personal event, appointment, exam, trip, illness/recovery, or follow-up worth checking in on later, with resolved local "due_at" ("YYYY-MM-DD HH:mm").
+5. Output JSON only: { "persona": [{ "fact": "...", "occurred_at": "YYYY-MM-DD HH:mm" }], "tech": [...], "open_loops": [{ "content": "...", "due_at": "YYYY-MM-DD HH:mm" }] }.`;
 
 export interface CuratorFactItem {
   fact: string;
   occurredAt?: string;
 }
 
+export interface CuratorOpenLoopItem {
+  content: string;
+  dueAt?: string;
+}
+
 export interface CuratorExtractionOutput {
   persona: CuratorFactItem[];
   tech: CuratorFactItem[];
+  openLoops?: CuratorOpenLoopItem[];
 }
 
 export interface RetainRunSummary {
@@ -434,6 +441,33 @@ export class MemoryCurator {
       await persistBankItems("persona", extracted.persona);
       await persistBankItems("tech", extracted.tech);
 
+      if (extracted.openLoops && extracted.openLoops.length > 0) {
+        const tz = this.getEffectiveTimezone(canonicalUserId);
+        const existingPending = new Set(
+          this.repo
+            .listOpenLoops(canonicalUserId, 50)
+            .filter((l) => l.status === "pending")
+            .map((l) => l.content.trim().toLowerCase()),
+        );
+        const notifyChannel = this.hatoConfig.owner.proactive_channel;
+        const staleCutoff = Date.now() - 12 * 3600 * 1000;
+        for (const loop of extracted.openLoops) {
+          if (!loop.dueAt) continue;
+          const dueMs = parseLocalDateTimeToEpochMs(loop.dueAt, tz, 9, 30);
+          if (dueMs === null || dueMs < staleCutoff) continue;
+          const key = loop.content.trim().toLowerCase();
+          if (!key || existingPending.has(key)) continue;
+          existingPending.add(key);
+          this.repo.createOpenLoop({
+            canonicalUserId,
+            content: loop.content,
+            dueAt: dueMs,
+            notifyChannel,
+            sourceMsgId: lastMsg.id,
+          });
+        }
+      }
+
       this.repo.markRetainedUntil(canonicalUserId, lastMsg.id);
       summary.processedMessages += chunk.length;
     }
@@ -693,12 +727,32 @@ export function parseCuratorExtractionJson(rawText: string): CuratorExtractionOu
   const parsed = JSON.parse(jsonText) as {
     persona?: unknown;
     tech?: unknown;
+    open_loops?: unknown;
   };
 
   return {
     persona: normalizeFactList(parsed.persona),
     tech: normalizeFactList(parsed.tech),
+    openLoops: normalizeOpenLoopList(parsed.open_loops),
   };
+}
+
+function normalizeOpenLoopList(raw: unknown): CuratorOpenLoopItem[] {
+  if (!Array.isArray(raw)) return [];
+  const out: CuratorOpenLoopItem[] = [];
+  const seen = new Set<string>();
+  for (const item of raw) {
+    if (!item || typeof item !== "object") continue;
+    const rec = item as { content?: unknown; due_at?: unknown };
+    const content = typeof rec.content === "string" ? rec.content.trim() : "";
+    const dueAt = typeof rec.due_at === "string" ? rec.due_at.trim() : "";
+    if (!content || !dueAt) continue;
+    const key = content.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push({ content, dueAt });
+  }
+  return out;
 }
 
 function normalizeFactList(raw: unknown): CuratorFactItem[] {

@@ -767,6 +767,7 @@ export class PersonaRuntime {
       attachments: batch.attachments,
       createdAt: userCreatedAt,
     });
+    this.repo.resolveFiredOpenLoopsOnUserReply(canonicalUserId);
 
     const priorImages = this.pendingSupersededImages.get(canonicalUserId) ?? [];
     const effectiveImages = [...priorImages, ...loadedImages].slice(0, 4);

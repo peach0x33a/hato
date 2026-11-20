@@ -146,6 +146,56 @@ export function diffCalendarDays(nowMs: number, targetIsoDate: string, timeZone:
 }
 
 /**
+ * Parse `YYYY-MM-DD[ HH:mm]` (or ISO string with timezone) into epoch milliseconds
+ * in the specified IANA timezone.
+ */
+export function parseLocalDateTimeToEpochMs(
+  raw: string,
+  timeZone: string,
+  defaultHour = 9,
+  defaultMinute = 30,
+): number | null {
+  const clean = raw.trim();
+  if (!clean) return null;
+  // If explicit timezone offset or Z is present, parse directly.
+  if (/(?:Z|[+-]\d{2}:?\d{2})$/i.test(clean)) {
+    const parsed = Date.parse(clean);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+
+  const m = /^(\d{4})-(\d{2})-(\d{2})(?:[ T](\d{1,2}):(\d{2})(?::(\d{2}))?)?$/.exec(clean);
+  if (!m) return null;
+
+  const year = Number(m[1]);
+  const month = Number(m[2]);
+  const day = Number(m[3]);
+  const hour = m[4] !== undefined ? Number(m[4]) : defaultHour;
+  const minute = m[5] !== undefined ? Number(m[5]) : defaultMinute;
+  const second = m[6] !== undefined ? Number(m[6]) : 0;
+
+  if (
+    month < 1 || month > 12 ||
+    day < 1 || day > 31 ||
+    hour < 0 || hour > 23 ||
+    minute < 0 || minute > 59 ||
+    second < 0 || second > 59
+  ) {
+    return null;
+  }
+
+  const targetWallMs = Date.UTC(year, month - 1, day, hour, minute, second);
+  let guess = targetWallMs;
+  for (let i = 0; i < 2; i++) {
+    const p = formatLocalDateTime(guess, timeZone);
+    const actualWallMs = Date.UTC(p.year, p.month - 1, p.day, p.hour, p.minute, p.second);
+    const diff = targetWallMs - actualWallMs;
+    if (diff === 0) break;
+    guess += diff;
+  }
+  return guess;
+}
+
+/**
  * Format an elapsed millisecond duration into concise Chinese text.
  */
 export function formatDurationZh(durationMs: number): string {

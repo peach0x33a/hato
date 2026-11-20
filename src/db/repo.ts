@@ -728,6 +728,57 @@ export class HatoRepository {
       .all();
   }
 
+  listDueOpenLoops(nowMs: number, limit = 20) {
+    return this.db
+      .select()
+      .from(openLoops)
+      .where(and(eq(openLoops.status, "pending"), lte(openLoops.dueAt, nowMs)))
+      .orderBy(asc(openLoops.dueAt))
+      .limit(limit)
+      .all();
+  }
+
+  createOpenLoop(params: {
+    id?: string;
+    canonicalUserId: string;
+    content: string;
+    dueAt: number;
+    notifyChannel: string;
+    status?: string;
+    sourceMsgId?: string | null;
+    createdAt?: number;
+  }) {
+    const id = params.id ?? `ol_${randomBytes(4).toString("hex")}`;
+    const row = {
+      id,
+      canonicalUserId: params.canonicalUserId,
+      content: params.content.trim(),
+      dueAt: Math.round(params.dueAt),
+      notifyChannel: params.notifyChannel,
+      status: params.status ?? "pending",
+      unansweredStreak: 0,
+      sourceMsgId: params.sourceMsgId ?? null,
+      createdAt: params.createdAt ?? Date.now(),
+    };
+    this.db.insert(openLoops).values(row).run();
+    return row;
+  }
+
+  getOpenLoop(loopId: string) {
+    return this.db.select().from(openLoops).where(eq(openLoops.id, loopId)).get() ?? null;
+  }
+
+  getLastUserMessageTimestamp(canonicalUserId: string): number | null {
+    const row = this.db
+      .select({ createdAt: rawMessages.createdAt })
+      .from(rawMessages)
+      .where(and(eq(rawMessages.canonicalUserId, canonicalUserId), eq(rawMessages.role, "user")))
+      .orderBy(desc(rawMessages.createdAt))
+      .limit(1)
+      .get();
+    return row ? row.createdAt : null;
+  }
+
   listTickets(canonicalUserId: string, limit = 15) {
     return this.db
       .select()
@@ -868,6 +919,40 @@ export class HatoRepository {
       .returning({ id: openLoops.id })
       .all();
     return res.length > 0;
+  }
+
+  updateOpenLoop(
+    loopId: string,
+    patch: { status?: string; dueAt?: number; unansweredStreak?: number },
+  ): boolean {
+    const setObj: Partial<{ status: string; dueAt: number; unansweredStreak: number }> = {};
+    if (patch.status !== undefined) setObj.status = patch.status;
+    if (patch.dueAt !== undefined) setObj.dueAt = Math.round(patch.dueAt);
+    if (patch.unansweredStreak !== undefined) setObj.unansweredStreak = patch.unansweredStreak;
+    if (Object.keys(setObj).length === 0) return false;
+    const res = this.db
+      .update(openLoops)
+      .set(setObj)
+      .where(eq(openLoops.id, loopId))
+      .returning({ id: openLoops.id })
+      .all();
+    return res.length > 0;
+  }
+
+  resolveFiredOpenLoopsOnUserReply(canonicalUserId: string): number {
+    const res = this.db
+      .update(openLoops)
+      .set({ status: "done" })
+      .where(
+        and(
+          eq(openLoops.canonicalUserId, canonicalUserId),
+          eq(openLoops.status, "pending"),
+          gt(openLoops.unansweredStreak, 0),
+        ),
+      )
+      .returning({ id: openLoops.id })
+      .all();
+    return res.length;
   }
 
   listScripts(limit = 20) {
