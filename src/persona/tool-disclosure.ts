@@ -46,6 +46,7 @@ export const TOOL_DOMAIN_PACKS: readonly ToolDomainPack[] = [
   {
     id: "media",
     tools: [
+      "image_gen",
       "render_markdown_image",
       "sticker_search",
       "send_sticker",
@@ -56,13 +57,13 @@ export const TOOL_DOMAIN_PACKS: readonly ToolDomainPack[] = [
     ],
     matches: ({ userText, hasImages, hasAttachments }) =>
       Boolean(hasImages || hasAttachments) ||
-      /渲染|生成图片|转图片|长图|卡片|表格|markdown|\brender\b|\bimage\b|表情|贴纸|斗图|梗图|表情包|保存表情|收图|批量.*表情|\bsticker\b|\bemoji\b|发给我|发文件|导出|下载|附件|传给我|发到|发给|qq|telegram|tg|转发|通知|\bsend_file\b|\bfile\b/i.test(
+      /画|画画|画一|画张|绘制|绘图|生图|出图|配图|插画|自拍|照片|改图|图生图|\bdraw\b|\bpaint\b|渲染|生成图片|转图片|长图|卡片|表格|markdown|\brender\b|\bimage\b|表情|贴纸|斗图|梗图|表情包|保存表情|收图|批量.*表情|\bsticker\b|\bemoji\b|发给我|发文件|导出|下载|附件|传给我|发到|发给|qq|telegram|tg|转发|通知|\bsend_file\b|\bfile\b/i.test(
         userText,
       ),
   },
   {
     id: "ops",
-    tools: ["delegate", "inspect_tickets", "list_schedules", "self_config", "bot_profile"],
+    tools: ["delegate", "inspect_tickets", "read_artifact", "list_schedules", "self_config", "bot_profile"],
     matches: ({ userText }) =>
       /写代码|写个|编写|脚本|代码|运行|执行|修改文件|改一下|重构|修\s*bug|部署|定时|提醒|每天|每周|cron|schedule|delegate|python|bash|shell|\.py\b|\.ts\b|\.js\b|\.sh\b|工单|任务|进度|状态|日志|后台|执行详情|\bticket\b|\bt_\d+\b|日程|闹钟|周期|人设|设定|性格|提示词|配置|模型|切换模型|代理|气泡|安静时间|少用|多用|语气|\bsoul\b|\bconfig\b|\bmodel\b|\bproxy\b|头像|昵称|名字|简介|资料|机器人资料|\bbot\b|\bprofile\b|\bavatar\b/i.test(
         userText,

@@ -122,6 +122,20 @@ export class PersonaRuntime {
         deliverFiles?: boolean;
       }) => { ticketId: string; status: string })
     | null = null;
+  private imageGenHandler:
+    | ((input: {
+        canonicalUserId: string;
+        originChannel: InboundBatch["originChannel"];
+        prompt: string;
+        model?: string;
+        size?: string;
+        quality?: string;
+        n?: number;
+        filename?: string;
+        referenceImagePaths?: string[];
+        deliverFiles?: boolean;
+      }) => { ticketId: string; status: string })
+    | null = null;
   private sendFileHandler:
     | ((input: {
         channel: InboundBatch["originChannel"];
@@ -281,6 +295,29 @@ export class PersonaRuntime {
       | null,
   ): void {
     this.delegateHandler = handler;
+    if (!this.activeTurn) {
+      this.syncTools();
+      this.refreshTranscriptFromDb();
+    }
+  }
+
+  setImageGenHandler(
+    handler:
+      | ((input: {
+          canonicalUserId: string;
+          originChannel: InboundBatch["originChannel"];
+          prompt: string;
+          model?: string;
+          size?: string;
+          quality?: string;
+          n?: number;
+          filename?: string;
+          referenceImagePaths?: string[];
+          deliverFiles?: boolean;
+        }) => { ticketId: string; status: string })
+      | null,
+  ): void {
+    this.imageGenHandler = handler;
     if (!this.activeTurn) {
       this.syncTools();
       this.refreshTranscriptFromDb();
@@ -453,6 +490,32 @@ export class PersonaRuntime {
                 originChannel: this.activeTurnOriginChannel,
                 hint: input.hint,
                 urgency: input.urgency,
+                deliverFiles: input.deliverFiles,
+              }),
+          }
+        : {}),
+      ...(this.imageGenHandler
+        ? {
+            onImageGen: (input: {
+              prompt: string;
+              model?: string;
+              size?: string;
+              quality?: string;
+              n?: number;
+              filename?: string;
+              referenceImagePaths?: string[];
+              deliverFiles?: boolean;
+            }) =>
+              this.imageGenHandler!({
+                canonicalUserId,
+                originChannel: this.activeTurnOriginChannel,
+                prompt: input.prompt,
+                model: input.model,
+                size: input.size,
+                quality: input.quality,
+                n: input.n,
+                filename: input.filename,
+                referenceImagePaths: input.referenceImagePaths,
                 deliverFiles: input.deliverFiles,
               }),
           }
@@ -1197,6 +1260,7 @@ export class PersonaRuntime {
     channel: InboundBatch["originChannel"];
     eventSummary: string;
     promptInstruction: string;
+    images?: ImageContent[];
   }): Promise<string[]> {
     this.repo.appendRawMessage({
       canonicalUserId: params.canonicalUserId,
@@ -1217,7 +1281,12 @@ export class PersonaRuntime {
     const startIndex = this.agent.state.messages.length;
     const startPerf = performance.now();
     try {
-      await this.agent.prompt(params.promptInstruction);
+      const attachedImages = params.images?.slice(0, 4) ?? [];
+      if (attachedImages.length > 0) {
+        await this.agent.prompt(params.promptInstruction, attachedImages);
+      } else {
+        await this.agent.prompt(params.promptInstruction);
+      }
     } catch {
       this.refreshTranscriptFromDb();
       return [params.eventSummary];

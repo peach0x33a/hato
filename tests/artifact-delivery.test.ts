@@ -1,11 +1,15 @@
 import { describe, expect, test } from "bun:test";
-import { resolve } from "node:path";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
 import {
   filterPendingAutoArtifacts,
   formatTicketArtifactPromptHint,
+  loadArtifactImagesForModel,
   partitionTicketArtifacts,
 } from "../src/dispatch/artifact-delivery.js";
 import type { ResultArtifact } from "../src/dispatch/schema.js";
+import { normalizeExternalCliResult } from "../src/worker/result-normalizer.js";
 
 describe("artifact-delivery", () => {
   const photoArtifact: ResultArtifact = {
@@ -71,5 +75,69 @@ describe("artifact-delivery", () => {
     });
 
     expect(pending).toEqual([docArtifact]);
+  });
+
+  test("loadArtifactImagesForModel loads image artifacts and skips missing or non-image files", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "hato-artifact-img-"));
+    try {
+      // 1x1 transparent PNG
+      const pngBytes = Buffer.from(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=",
+        "base64",
+      );
+      const imgPath = join(dir, "generated.png");
+      const txtPath = join(dir, "notes.txt");
+      writeFileSync(imgPath, pngBytes);
+      writeFileSync(txtPath, "hello");
+
+      const images = await loadArtifactImagesForModel([
+        { path: txtPath, filename: "notes.txt", send_as: "file" },
+        { path: join(dir, "missing.png"), filename: "missing.png", send_as: "photo" },
+        { path: imgPath, filename: "generated.png", send_as: "file" },
+      ]);
+
+      expect(images).toHaveLength(1);
+      expect(images[0]?.type).toBe("image");
+      expect(images[0]?.mimeType).toBe("image/png");
+      expect(images[0]?.data.length).toBeGreaterThan(0);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("normalizeExternalCliResult resolves relative artifact paths in _hato_result.json", () => {
+    const dir = mkdtempSync(join(tmpdir(), "hato-norm-rel-"));
+    try {
+      writeFileSync(
+        join(dir, "_hato_result.json"),
+        JSON.stringify({
+          status: "done",
+          narration_hint: "ok",
+          verbatim_blocks: [],
+          artifacts: [{ path: "out/pic.png", filename: "pic.png", send_as: "file" }],
+          required_secrets: [],
+          caveats: [],
+          question: null,
+        }),
+      );
+      const result = normalizeExternalCliResult({
+        ticketId: "t_rel_1",
+        workspaceDir: dir,
+        isHostRepo: false,
+        exitCode: 0,
+        signal: null,
+        finalText: "",
+        stderrText: "",
+      });
+      expect(result.artifacts).toEqual([
+        {
+          path: resolve(dir, "out/pic.png"),
+          filename: "pic.png",
+          send_as: "photo",
+        },
+      ]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

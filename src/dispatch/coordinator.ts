@@ -1,6 +1,6 @@
 import { randomBytes } from "node:crypto";
-import { existsSync } from "node:fs";
-import { resolve, sep } from "node:path";
+import { existsSync, mkdirSync } from "node:fs";
+import { basename, resolve, sep } from "node:path";
 import type { EventBus } from "../bus/actor-bus.js";
 import {
   resolveWorkerExecutionMode,
@@ -8,10 +8,17 @@ import {
   resolveWorkerVmWorkdir,
   type HatoConfig,
 } from "../config/app.js";
+import type { ModelRegistry } from "../config/models.js";
+import type { ScopedProxyRouter } from "../config/proxy.js";
 import type { HatoRepository } from "../db/repo.js";
 import type { ChannelName, InboundBatch } from "../gateway/types.js";
 import { logError, logInfo, summarizeError } from "../utils/logger.js";
 import type { WorkerDispatcher } from "../worker/backend.js";
+import {
+  generateOpenAiImage,
+  resolveImageGenProvider,
+  resolveProviderApiKey,
+} from "../worker/image-gen.js";
 import type { NeutralRouter } from "./router.js";
 import {
   parseWorkerMandate,
@@ -26,6 +33,8 @@ export interface TicketCoordinatorDeps {
   router: NeutralRouter;
   dispatcher: WorkerDispatcher;
   bus: EventBus;
+  getModelRegistry?: () => ModelRegistry;
+  proxyRouter?: ScopedProxyRouter;
 }
 
 /**
@@ -64,6 +73,150 @@ export class TicketCoordinator {
     this.trackPending(job);
 
     return { ticketId, status: "routing" };
+  }
+
+  /**
+   * Queues an asynchronous image generation job directly from Persona's `image_gen`
+   * tool (bypassing NeutralRouter and worker LLM overhead) and delivers via `ticket_result`.
+   */
+  enqueueImageGeneration(params: {
+    canonicalUserId: string;
+    originChannel: ChannelName;
+    prompt: string;
+    model?: string;
+    size?: string;
+    quality?: string;
+    n?: number;
+    filename?: string;
+    referenceImagePaths?: string[];
+    deliverFiles?: boolean;
+  }): { ticketId: string; status: "running" } {
+    const cfg = this.deps.getHatoConfig();
+    const ticketId = `t_${randomBytes(4).toString("hex")}`;
+    const briefTitle = `绘制图片: ${params.prompt.trim().slice(0, 32) || "image"}`;
+    const workspaceDir = resolve(cfg.paths.workspaces_dir, ticketId);
+    const mandate = buildDefaultMandate(cfg, ticketId);
+    mandate.workspace_dir = workspaceDir;
+    if (params.deliverFiles) {
+      mandate.deliver_files = true;
+    }
+
+    this.deps.repo.createTicket({
+      id: ticketId,
+      canonicalUserId: params.canonicalUserId,
+      status: "running",
+      backend: "builtin-pi",
+      briefTitle,
+      originChannel: params.originChannel,
+      progressNote: "正在生成图片",
+    });
+    this.deps.repo.updateTicket(ticketId, {
+      mandateJson: JSON.stringify(mandate),
+      workspaceExpiresAt: Date.now() + cfg.worker.workspace_ttl_days * 24 * 60 * 60 * 1000,
+    });
+
+    const job = this.processImageGeneration(ticketId, briefTitle, workspaceDir, params).catch((err) => {
+      logError("DISPATCH", `image_gen ${ticketId} crashed`, err);
+    });
+    this.trackPending(job);
+
+    return { ticketId, status: "running" };
+  }
+
+  private async processImageGeneration(
+    ticketId: string,
+    briefTitle: string,
+    workspaceDir: string,
+    params: {
+      canonicalUserId: string;
+      originChannel: ChannelName;
+      prompt: string;
+      model?: string;
+      size?: string;
+      quality?: string;
+      n?: number;
+      filename?: string;
+      referenceImagePaths?: string[];
+    },
+  ): Promise<void> {
+    let result: WorkerResult;
+    const modelRegistry = this.deps.getModelRegistry?.();
+    const proxyRouter = this.deps.proxyRouter;
+    const provider = modelRegistry ? resolveImageGenProvider(modelRegistry) : null;
+
+    if (!provider || !proxyRouter) {
+      result = {
+        ticket_id: ticketId,
+        status: "failed",
+        narration_hint: "未找到可用的 OpenAI 兼容图片生成供应商配置。",
+        verbatim_blocks: [],
+        artifacts: [],
+        required_secrets: [],
+        caveats: ["image_gen provider unavailable"],
+      };
+    } else {
+      try {
+        mkdirSync(workspaceDir, { recursive: true });
+        const apiKey = resolveProviderApiKey(provider);
+        const gen = await generateOpenAiImage({
+          prompt: params.prompt,
+          model: params.model,
+          size: params.size,
+          quality: params.quality,
+          n: params.n,
+          filename: params.filename,
+          referenceImagePaths: params.referenceImagePaths,
+          workspaceDir,
+          providerSlug: provider.slug,
+          baseUrl: provider.baseUrl,
+          apiKey,
+          proxyRouter,
+        });
+        if (!gen.ok) {
+          result = {
+            ticket_id: ticketId,
+            status: "failed",
+            narration_hint: `图片生成失败 (${gen.model}): ${gen.error ?? "unknown error"}`,
+            verbatim_blocks: [],
+            artifacts: [],
+            required_secrets: [],
+            caveats: gen.error ? [gen.error] : [],
+          };
+        } else {
+          result = {
+            ticket_id: ticketId,
+            status: "done",
+            narration_hint: `已完成图片生成 (${gen.providerSlug}/${gen.model})，共 ${gen.files.length} 张。`,
+            verbatim_blocks: [],
+            artifacts: gen.files.map((f) => ({
+              path: f.path,
+              filename: basename(f.path),
+              send_as: "photo" as const,
+            })),
+            required_secrets: [],
+            caveats: [],
+          };
+        }
+      } catch (err) {
+        result = {
+          ticket_id: ticketId,
+          status: "failed",
+          narration_hint: `图片生成异常：${summarizeError(err)}`,
+          verbatim_blocks: [],
+          artifacts: [],
+          required_secrets: [],
+          caveats: [summarizeError(err)],
+        };
+      }
+    }
+
+    await this.handleWorkerOutcome(
+      ticketId,
+      params.canonicalUserId,
+      params.originChannel,
+      briefTitle,
+      result,
+    );
   }
 
   /**

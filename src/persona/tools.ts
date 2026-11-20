@@ -1,7 +1,9 @@
-import { existsSync, statSync } from "node:fs";
-import { resolve } from "node:path";
+import { existsSync, readFileSync, statSync } from "node:fs";
+import { basename, extname, resolve, sep } from "node:path";
 import type { AgentTool } from "@earendil-works/pi-agent-core";
+import type { ImageContent, TextContent } from "@earendil-works/pi-ai";
 import { arr, bool, num, obj, oneOf, opt, str } from "@earendil-works/pi-schema";
+import { convertBufferToModelImage } from "../gateway/media.js";
 import type { BrowserRuntime } from "../browser/runtime.js";
 import {
   resolveMemoryRecallConfig,
@@ -149,6 +151,29 @@ const SendFileParams = obj({
   ),
 });
 
+const ReadArtifactParams = obj({
+  path: str({ description: "Artifact file path from ticket output or inspect_tickets" }),
+  max_chars: opt(num({ description: "Optional max characters for text artifacts (default 24000)" })),
+});
+
+const ImageGenParams = obj({
+  prompt: str({ description: "Detailed prompt describing the image to generate or edit" }),
+  model: opt(str({ description: "Optional image model ID (e.g. gpt-image-2.5, gpt-image-2, gpt-image-1)" })),
+  size: opt(str({ description: "Optional image size, e.g. 1024x1024, 1536x1024, 1024x1536" })),
+  quality: opt(str({ description: "Optional image quality, e.g. low, medium, high, auto" })),
+  n: opt(num({ description: "Optional number of images (1-4), defaults to 1" })),
+  filename: opt(str({ description: "Optional output filename, e.g. drawing.png" })),
+  reference_image_paths: opt(
+    arr(str({ description: "Optional local reference image path(s) for image editing/reference generation" })),
+  ),
+  deliver_files: opt(
+    bool({
+      description:
+        "Whether to auto-send generated image(s) right after your completion reply (true), or let you inspect first and send via send_file/send_message (false, default).",
+    }),
+  ),
+});
+
 const SendMessageParams = obj({
   channel: oneOf(["tg", "qq", "web"], {
     description: "Target platform to send the message to: 'tg', 'qq', or 'web'.",
@@ -223,6 +248,19 @@ export function createPersonaReadOnlyTools(params: {
   enableReadSkillTool?: boolean;
   extraTools?: readonly AgentTool<any>[];
   onDelegate?: (input: { hint: string; urgency?: "normal" | "high"; deliverFiles?: boolean }) => {
+    ticketId: string;
+    status: string;
+  };
+  onImageGen?: (input: {
+    prompt: string;
+    model?: string;
+    size?: string;
+    quality?: string;
+    n?: number;
+    filename?: string;
+    referenceImagePaths?: string[];
+    deliverFiles?: boolean;
+  }) => {
     ticketId: string;
     status: string;
   };
@@ -466,10 +504,90 @@ export function createPersonaReadOnlyTools(params: {
     },
   };
 
+  const readArtifactTool: AgentTool<typeof ReadArtifactParams> = {
+    name: "read_artifact",
+    label: "Read Worker Artifact",
+    description:
+      "Read a worker-delivered text/code/report artifact or inspect a generated image artifact by path.",
+    parameters: ReadArtifactParams,
+    async execute(_toolCallId, input) {
+      const resolved = resolve(input.path.trim());
+      if (basename(resolved).startsWith(".env")) {
+        return {
+          content: [{ type: "text", text: `禁止读取敏感配置文件: ${resolved}` }],
+          details: { ok: false, path: resolved },
+        };
+      }
+      const workspacesRoot = resolve(params.getHatoConfig().paths.workspaces_dir);
+      const inWorkspace =
+        resolved === workspacesRoot || resolved.startsWith(`${workspacesRoot}${sep}`);
+      const knownArtifact = params.repo.listTickets(params.canonicalUserId, 50).some((t) => {
+        if (!t.resultJson) return false;
+        try {
+          const parsed = JSON.parse(t.resultJson) as {
+            artifacts?: Array<{ path?: string }>;
+          };
+          return (parsed.artifacts ?? []).some((a) => a.path && resolve(a.path) === resolved);
+        } catch {
+          return false;
+        }
+      });
+      if (!inWorkspace && !knownArtifact) {
+        return {
+          content: [{ type: "text", text: `路径不在工单产物或工作区范围内: ${resolved}` }],
+          details: { ok: false, path: resolved },
+        };
+      }
+      if (!existsSync(resolved) || !statSync(resolved).isFile()) {
+        return {
+          content: [{ type: "text", text: `产物文件不存在: ${resolved}` }],
+          details: { ok: false, path: resolved },
+        };
+      }
+      const buffer = readFileSync(resolved);
+      const ext = extname(resolved).toLowerCase();
+      if ([".png", ".jpg", ".jpeg", ".webp", ".gif"].includes(ext)) {
+        const image = await convertBufferToModelImage({ buffer, filePath: resolved });
+        if (image) {
+          const content: (TextContent | ImageContent)[] = [
+            { type: "text", text: `已读取图片产物: ${basename(resolved)} (${resolved}, ${buffer.length} bytes)` },
+            image,
+          ];
+          return {
+            content,
+            details: { ok: true, path: resolved, kind: "image", bytes: buffer.length },
+          };
+        }
+      }
+      if (buffer.subarray(0, 4096).includes(0)) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: `二进制产物文件: ${basename(resolved)} (${resolved}, ${buffer.length} bytes)，无法以纯文本展开。`,
+            },
+          ],
+          details: { ok: true, path: resolved, kind: "binary", bytes: buffer.length },
+        };
+      }
+      const maxChars = Math.min(Math.max(Number(input.max_chars) || 24_000, 500), 60_000);
+      const rawText = buffer.toString("utf8");
+      const text =
+        rawText.length > maxChars
+          ? `${rawText.slice(0, maxChars)}\n\n... [已截断，共 ${rawText.length} 字符]`
+          : rawText;
+      return {
+        content: [{ type: "text", text: `[产物: ${basename(resolved)} (${resolved})]\n${text}` }],
+        details: { ok: true, path: resolved, kind: "text", chars: rawText.length },
+      };
+    },
+  };
+
   const tools: AgentTool<any>[] = [
     calcTool,
     dateMathTool,
     inspectTicketsTool,
+    readArtifactTool,
     listSchedulesTool,
     searchPastSessionsTool,
     webSearchTool,
@@ -725,7 +843,7 @@ export function createPersonaReadOnlyTools(params: {
       name: "delegate",
       label: "Delegate Background Task",
       description:
-        "Delegate coding, scripts (Python/Shell/etc.), file/repo edits, shell commands, or schedule mutations to a background worker. Never use this for math (use calc) or online lookups (use web_search/web_fetch).",
+        "Delegate engineering or local-execution tasks (coding, scripts, file/repo edits, shell commands, worker skills/MCP, or schedule mutations) to a background worker. Never use this for math (calc), online lookups (web_search/web_fetch), or standalone creative image generation (use image_gen).",
       parameters: DelegateParams,
       async execute(_toolCallId, input) {
         const accepted = delegateFn({
@@ -745,6 +863,39 @@ export function createPersonaReadOnlyTools(params: {
       },
     };
     tools.push(delegateTool);
+  }
+
+  if (params.onImageGen) {
+    const imageGenFn = params.onImageGen;
+    const imageGenTool: AgentTool<typeof ImageGenParams> = {
+      name: "image_gen",
+      label: "Generate Image (Async)",
+      description:
+        "Generate or edit image(s) asynchronously in the background via OpenAI-compatible Images API. Returns immediately without blocking chat; once finished, you will receive the generated image(s) to inspect and deliver.",
+      parameters: ImageGenParams,
+      async execute(_toolCallId, input) {
+        const accepted = imageGenFn({
+          prompt: input.prompt,
+          model: input.model,
+          size: input.size,
+          quality: input.quality,
+          n: input.n,
+          filename: input.filename,
+          referenceImagePaths: input.reference_image_paths,
+          deliverFiles: input.deliver_files,
+        });
+        return {
+          content: [
+            {
+              type: "text",
+              text: `已开始后台生图 (internal_id=${accepted.ticketId}, status=${accepted.status})。请用自然日常口吻简短回应（例如“这就去画，画好了马上发给你”），不要报出内部工单号。`,
+            },
+          ],
+          details: accepted,
+        };
+      },
+    };
+    tools.push(imageGenTool);
   }
 
   if (params.onSendFile) {

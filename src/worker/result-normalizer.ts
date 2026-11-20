@@ -18,7 +18,7 @@ export interface NormalizeExternalCliResultParams {
   timedOut?: boolean;
 }
 
-const IMAGE_EXTENSIONS = new Set([".png", ".jpg", ".jpeg", ".webp", ".gif"]);
+export const IMAGE_EXTENSIONS = new Set([".png", ".jpg", ".jpeg", ".webp", ".gif"]);
 const IGNORED_ARTIFACT_NAMES = new Set([
   "_hato_result.json",
   "_hato_stream.jsonl",
@@ -66,7 +66,11 @@ export function normalizeExternalCliResult(
     return explicit;
   }
 
-  const parsedJsonText = tryParseJsonWorkerResult(params.ticketId, params.finalText);
+  const parsedJsonText = tryParseJsonWorkerResult(
+    params.ticketId,
+    params.finalText,
+    params.workspaceDir,
+  );
   if (parsedJsonText) {
     return parsedJsonText;
   }
@@ -163,18 +167,22 @@ function tryReadExplicitResultFile(ticketId: string, workspaceDir: string): Work
   if (!existsSync(path)) return null;
   try {
     const parsed = JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>;
-    return coerceWorkerResult(ticketId, parsed);
+    return coerceWorkerResult(ticketId, parsed, workspaceDir);
   } catch {
     return null;
   }
 }
 
-function tryParseJsonWorkerResult(ticketId: string, finalText: string): WorkerResult | null {
+function tryParseJsonWorkerResult(
+  ticketId: string,
+  finalText: string,
+  workspaceDir?: string,
+): WorkerResult | null {
   const trimmed = finalText.trim();
   if (!trimmed.startsWith("{") || !trimmed.endsWith("}")) return null;
   try {
     const parsed = JSON.parse(trimmed) as Record<string, unknown>;
-    return coerceWorkerResult(ticketId, parsed);
+    return coerceWorkerResult(ticketId, parsed, workspaceDir);
   } catch {
     return null;
   }
@@ -183,13 +191,35 @@ function tryParseJsonWorkerResult(ticketId: string, finalText: string): WorkerRe
 function coerceWorkerResult(
   ticketId: string,
   raw: Record<string, unknown>,
+  workspaceDir?: string,
 ): WorkerResult | null {
+  const rawArtifacts = Array.isArray(raw.artifacts) ? raw.artifacts : [];
+  const normalizedArtifacts = rawArtifacts.map((item) => {
+    if (!item || typeof item !== "object") return item;
+    const rec = item as Record<string, unknown>;
+    const rawPath = typeof rec.path === "string" ? rec.path.trim() : "";
+    const resolvedPath =
+      rawPath && workspaceDir ? resolve(workspaceDir, rawPath) : rawPath;
+    const filename =
+      typeof rec.filename === "string" && rec.filename
+        ? rec.filename
+        : resolvedPath.split("/").pop() ?? rawPath;
+    const ext = filename.includes(".") ? `.${filename.split(".").pop()!.toLowerCase()}` : "";
+    const sendAs =
+      rec.send_as === "photo" || IMAGE_EXTENSIONS.has(ext) ? "photo" : "file";
+    return {
+      ...rec,
+      path: resolvedPath,
+      filename,
+      send_as: sendAs,
+    };
+  });
   const candidate: Record<string, unknown> = {
     ticket_id: typeof raw.ticket_id === "string" && raw.ticket_id ? raw.ticket_id : ticketId,
     status: raw.status ?? "done",
     narration_hint: typeof raw.narration_hint === "string" ? raw.narration_hint : "",
     verbatim_blocks: Array.isArray(raw.verbatim_blocks) ? raw.verbatim_blocks : [],
-    artifacts: Array.isArray(raw.artifacts) ? raw.artifacts : [],
+    artifacts: normalizedArtifacts,
     required_secrets: Array.isArray(raw.required_secrets) ? raw.required_secrets : [],
     caveats: Array.isArray(raw.caveats) ? raw.caveats : [],
     ...(typeof raw.question === "string" ? { question: raw.question } : {}),
@@ -198,7 +228,7 @@ function coerceWorkerResult(
   return Value.Check(WorkerResultSchema, candidate) ? (candidate as WorkerResult) : null;
 }
 
-function collectNewArtifacts(
+export function collectNewArtifacts(
   workspaceDir: string,
   beforeSnapshot?: ReadonlySet<string>,
 ): WorkerResult["artifacts"] {

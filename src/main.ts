@@ -25,6 +25,7 @@ import { HatoRepository } from "./db/repo.js";
 import {
   filterPendingAutoArtifacts,
   formatTicketArtifactPromptHint,
+  loadArtifactImagesForModel,
   partitionTicketArtifacts,
 } from "./dispatch/artifact-delivery.js";
 import { TicketCoordinator } from "./dispatch/coordinator.js";
@@ -139,8 +140,11 @@ async function main(): Promise<void> {
     router: neutralRouter,
     dispatcher: workerDispatcher,
     bus,
+    getModelRegistry: () => modelRegistry,
+    proxyRouter,
   });
   personaRuntime.setDelegateHandler((input) => ticketCoordinator.enqueueDelegation(input));
+  personaRuntime.setImageGenHandler((input) => ticketCoordinator.enqueueImageGeneration(input));
   personaRuntime.setStickerHandlers({
     onSearch: async ({ canonicalUserId, query, emotion, limit }) => {
       const matches = stickerStore.search(canonicalUserId, query, { emotion, limit });
@@ -767,6 +771,7 @@ async function main(): Promise<void> {
         deliverFiles,
       });
       const artifactNames = formatTicketArtifactPromptHint(artifactPartition);
+      const artifactImages = await loadArtifactImagesForModel(result.artifacts);
       const summary = `[工单 ${result.ticket_id} · ${briefTitle}] (${result.status}): ${result.narration_hint}${caveatText}${secretsNote}`;
 
       const narrationKey = outbound ? `${outbound.channel}:${outbound.targetId}` : null;
@@ -781,6 +786,7 @@ async function main(): Promise<void> {
           channel: deliveryChannel,
           eventSummary: summary,
           promptInstruction: `[系统事件：后台任务 "${briefTitle}" (${result.ticket_id}) 已结束，状态=${result.status}。请用自然日常口吻直接告诉用户结果要点（除非出错或用户要求，不要主动报工单号，也不要倾倒冗长执行日志）：${result.narration_hint}${artifactNames}${caveatText}${secretsNote}]`,
+          images: artifactImages,
         });
       } finally {
         if (narrationKey) {

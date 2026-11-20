@@ -1,5 +1,43 @@
-import { resolve } from "node:path";
+import { existsSync, readFileSync } from "node:fs";
+import { extname, resolve } from "node:path";
+import type { ImageContent } from "@earendil-works/pi-ai";
+import { convertBufferToModelImage } from "../gateway/media.js";
 import type { ResultArtifact } from "./schema.js";
+
+const IMAGE_ARTIFACT_EXTENSIONS = new Set([".png", ".jpg", ".jpeg", ".webp", ".gif"]);
+
+export function isImageArtifact(artifact: Pick<ResultArtifact, "path" | "filename" | "send_as">): boolean {
+  if (artifact.send_as === "photo") return true;
+  const ext = extname(artifact.filename || artifact.path).toLowerCase();
+  return IMAGE_ARTIFACT_EXTENSIONS.has(ext);
+}
+
+/**
+ * Loads up to `maxImages` image artifacts as multimodal `ImageContent` blocks
+ * so Persona can inspect generated images during background event narration.
+ */
+export async function loadArtifactImagesForModel(
+  artifacts: readonly ResultArtifact[],
+  maxImages = 4,
+): Promise<ImageContent[]> {
+  const images: ImageContent[] = [];
+  for (const artifact of artifacts) {
+    if (images.length >= maxImages) break;
+    if (!isImageArtifact(artifact)) continue;
+    const resolvedPath = resolve(artifact.path);
+    if (!existsSync(resolvedPath)) continue;
+    try {
+      const buffer = readFileSync(resolvedPath);
+      const image = await convertBufferToModelImage({ buffer, filePath: resolvedPath });
+      if (image) {
+        images.push(image);
+      }
+    } catch {
+      // ignore unreadable or unsupported image artifact
+    }
+  }
+  return images;
+}
 
 export interface ArtifactDeliveryPartition {
   autoDelivered: ResultArtifact[];

@@ -19,7 +19,7 @@ Rules:
      ```
      - `backend`: choose from `enabled_backends`:
        - When `[routing_mode]` is `smart` (and `default_backend` is an external CLI):
-         - Choose `"builtin-pi"` for lightweight isolated tasks: writing or running a single standalone script (e.g. small Python/Shell utility), quick formatting/data transformation, or simple isolated checks that do NOT modify `allowed_repos` or require multi-file engineering.
+         - Choose `"builtin-pi"` for lightweight isolated tasks: writing or running a single standalone script (e.g. small Python/Shell utility), quick formatting/data transformation, simple isolated checks, or tasks centered on `worker` skills / `worker` MCP tools or generating assets alongside a script that do NOT modify `allowed_repos` or require multi-file engineering.
          - Choose `default_backend` for heavy or repository tasks: `host_repo` changes in `allowed_repos`, multi-file projects, dependency installation + build/test debugging loops, or complex research/coding workflows (or honor an explicitly requested backend from `enabled_backends`).
        - When `[routing_mode]` is `always_default`: choose `default_backend` (unless the user explicitly names another enabled backend).
      - `context_range`: contiguous `[from_msg_id .. to_msg_id]` covering all relevant constraints (err slightly wider rather than dropping context).

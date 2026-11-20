@@ -21,6 +21,11 @@ import {
   resolveImageGenProvider,
   resolveProviderApiKey,
 } from "./image-gen.js";
+import {
+  collectNewArtifacts,
+  IMAGE_EXTENSIONS,
+  snapshotWorkspaceFiles,
+} from "./result-normalizer.js";
 import type {
   ExecutionProgressCallback,
   ExecutionRunner,
@@ -326,6 +331,11 @@ export class BuiltinPiRunner implements ExecutionRunner {
     }, mandate.timeout_ms);
     timeoutTimer.unref();
 
+    const beforeFilesSnapshot =
+      mandate.workspace_mode === "isolated"
+        ? snapshotWorkspaceFiles(mandate.workspace_dir)
+        : undefined;
+
     try {
       await agent.prompt(promptText);
     } catch (err) {
@@ -345,7 +355,11 @@ export class BuiltinPiRunner implements ExecutionRunner {
       unsubscribe();
     }
 
-    return this.finalizeOutcome(ticket.ticketId, outcome.result, agent.state.messages);
+    return this.finalizeOutcome(ticket.ticketId, outcome.result, agent.state.messages, {
+      workspaceDir: mandate.workspace_dir,
+      workspaceMode: mandate.workspace_mode,
+      beforeFilesSnapshot,
+    });
   }
 
   async resume(
@@ -410,6 +424,11 @@ export class BuiltinPiRunner implements ExecutionRunner {
     ticketId: string,
     explicitResult: WorkerResult | undefined,
     messages: readonly AgentMessage[],
+    fallbackContext?: {
+      workspaceDir: string;
+      workspaceMode: WorkerMandate["workspace_mode"];
+      beforeFilesSnapshot?: ReadonlySet<string>;
+    },
   ): WorkerResult {
     if (this.activeAborts.delete(ticketId)) {
       this.sessions.delete(ticketId);
@@ -428,6 +447,19 @@ export class BuiltinPiRunner implements ExecutionRunner {
       if (explicitResult.status !== "needs_input") {
         this.sessions.delete(ticketId);
       }
+      if (
+        explicitResult.status === "done" &&
+        explicitResult.artifacts.length === 0 &&
+        fallbackContext?.workspaceMode === "isolated"
+      ) {
+        const discovered = collectNewArtifacts(
+          fallbackContext.workspaceDir,
+          fallbackContext.beforeFilesSnapshot,
+        );
+        if (discovered.length > 0) {
+          return { ...explicitResult, artifacts: discovered };
+        }
+      }
       return explicitResult;
     }
 
@@ -442,13 +474,18 @@ export class BuiltinPiRunner implements ExecutionRunner {
           .trim()
       : "";
 
+    const discovered =
+      fallbackContext?.workspaceMode === "isolated"
+        ? collectNewArtifacts(fallbackContext.workspaceDir, fallbackContext.beforeFilesSnapshot)
+        : [];
+
     this.sessions.delete(ticketId);
     return {
       ticket_id: ticketId,
       status: "done",
       narration_hint: text || "后台任务已结束。",
       verbatim_blocks: [],
-      artifacts: [],
+      artifacts: discovered,
       required_secrets: [],
       caveats: [],
     };
@@ -703,7 +740,9 @@ export class BuiltinPiRunner implements ExecutionRunner {
           const artifacts = (input.artifact_paths ?? []).map((p: string) => {
             const abs = resolveSafeWorkspacePath(p);
             const filename = abs.split("/").pop() ?? p;
-            return { path: abs, filename, send_as: "file" as const };
+            const ext = filename.includes(".") ? `.${filename.split(".").pop()!.toLowerCase()}` : "";
+            const sendAs = IMAGE_EXTENSIONS.has(ext) ? ("photo" as const) : ("file" as const);
+            return { path: abs, filename, send_as: sendAs };
           });
           params.onFinishTask({
             ticket_id: ticket.ticketId,
