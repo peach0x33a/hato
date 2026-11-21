@@ -36,6 +36,8 @@ export interface OpenAiImageGenResult {
 }
 
 const DEFAULT_IMAGE_MODEL = "gpt-image-2";
+export const DEFAULT_IMAGE_GEN_TIMEOUT_MS = 300_000;
+export const DEFAULT_IMAGE_DOWNLOAD_TIMEOUT_MS = 60_000;
 
 /**
  * Pick an OpenAI-compatible provider for image generation, preferring `claudeflare`,
@@ -120,7 +122,7 @@ export async function generateOpenAiImage(
   const endpoint = buildImagesGenerationsUrl(params.baseUrl, isEdit);
   const scope = `llm-calling.${params.providerSlug}`;
   const count = Math.max(1, Math.min(4, Math.floor(params.n ?? 1)));
-  const timeoutMs = params.timeoutMs ?? 90_000;
+  const timeoutMs = params.timeoutMs ?? DEFAULT_IMAGE_GEN_TIMEOUT_MS;
 
   const callApi = async (includeResponseFormat: boolean) => {
     let headers: Record<string, string> = {
@@ -221,7 +223,7 @@ export async function generateOpenAiImage(
         const imgRes = await params.proxyRouter.runWithScope(scope, () =>
           params.proxyRouter.scopedFetch(
             item.url!,
-            { method: "GET", signal: AbortSignal.timeout(30_000) },
+            { method: "GET", signal: AbortSignal.timeout(DEFAULT_IMAGE_DOWNLOAD_TIMEOUT_MS) },
             scope,
           ),
         );

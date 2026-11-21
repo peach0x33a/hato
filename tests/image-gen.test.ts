@@ -6,9 +6,18 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
 import { ScopedProxyRouter } from "../src/config/proxy.js";
-import { buildImagesGenerationsUrl, generateOpenAiImage } from "../src/worker/image-gen.js";
+import {
+  buildImagesGenerationsUrl,
+  DEFAULT_IMAGE_DOWNLOAD_TIMEOUT_MS,
+  DEFAULT_IMAGE_GEN_TIMEOUT_MS,
+  generateOpenAiImage,
+} from "../src/worker/image-gen.js";
 
 describe("OpenAI-compatible image_gen", () => {
+  it("uses relaxed default generation and download timeouts", () => {
+    assert.equal(DEFAULT_IMAGE_GEN_TIMEOUT_MS, 300_000);
+    assert.equal(DEFAULT_IMAGE_DOWNLOAD_TIMEOUT_MS, 60_000);
+  });
   it("builds /v1/images/generations URLs cleanly", () => {
     assert.equal(
       buildImagesGenerationsUrl("https://claudeflare.top/v1"),
