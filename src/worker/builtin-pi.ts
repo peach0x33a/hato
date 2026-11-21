@@ -4,11 +4,13 @@ import { homedir } from "node:os";
 import { basename, dirname, resolve, sep } from "node:path";
 import { promisify } from "node:util";
 import { Agent, type AgentMessage, type AgentTool } from "@earendil-works/pi-agent-core";
-import { clampThinkingLevel, type AssistantMessage, type TextContent } from "@earendil-works/pi-ai";
+import { type AssistantMessage, type TextContent } from "@earendil-works/pi-ai";
 import { arr, num, obj, opt, oneOf, str } from "@earendil-works/pi-schema";
-import { resolveSkillsDir, type HatoConfig } from "../config/app.js";
+import { resolveLlmRetryConfig, resolveSkillsDir, type HatoConfig } from "../config/app.js";
 import { resolveHatoHomeDir } from "../config/paths.js";
 import { supportsCustomFetchOption, type ModelRegistry } from "../config/models.js";
+import { aggregateAssistantTraceMetrics, formatLlmTelemetryLog } from "../stats/metrics.js";
+import type { LiveTraceTracker } from "../stats/live-trace.js";
 import { streamSimpleWithRetry } from "../utils/llm-retry.js";
 import type { ScopedProxyRouter } from "../config/proxy.js";
 import type { HatoRepository } from "../db/repo.js";
@@ -210,6 +212,12 @@ const FinishTaskParams = obj({
 
 interface BuiltinSessionState {
   agent: Agent;
+  modelMeta: {
+    provider: string;
+    modelId: string;
+    api: string;
+  };
+  activeCallStartPerf: number | null;
   lookedBackTotal: number;
   lastActiveAt: number;
   pendingConfirmKey?: string;
@@ -253,6 +261,7 @@ export class BuiltinPiRunner implements ExecutionRunner {
       proxyRouter: ScopedProxyRouter;
       repo: HatoRepository;
       mcpPool?: McpClientPool;
+      liveTraceTracker?: LiveTraceTracker;
     },
   ) {}
 
@@ -274,25 +283,130 @@ export class BuiltinPiRunner implements ExecutionRunner {
 
     const hatoConfig = this.deps.getHatoConfig();
     const resolved = this.deps.modelRegistry.resolveSlot("worker");
+    const modelMeta = {
+      provider: resolved.providerSlug,
+      modelId: resolved.model.id,
+      api: String(resolved.model.api),
+    };
 
     // Lock the model snapshot onto the ticket row so mid-flight slot switches never break protocol.
     this.deps.repo.updateTicket(ticket.ticketId, {
       modelSnapshotJson: JSON.stringify({
         slot: "worker",
         target: resolved.target,
-        api: String(resolved.model.api),
+        api: modelMeta.api,
       }),
     });
 
-    const outcome: { result?: WorkerResult } = {};
     const state: BuiltinSessionState = {
       agent: null as unknown as Agent,
+      modelMeta,
+      activeCallStartPerf: null,
       lookedBackTotal: 0,
       lastActiveAt: Date.now(),
       approvedConfirmKeys: new Set(),
     };
 
-    const tools = await this.buildWorkerTools({
+    const systemPrompt =
+      mandate.execution_mode === "vm_unrestricted"
+        ? WORKER_SYSTEM_PROMPT + VM_UNRESTRICTED_PROMPT_SUFFIX
+        : WORKER_SYSTEM_PROMPT;
+
+    const agent = new Agent({
+      initialState: {
+        systemPrompt,
+        model: resolved.model,
+        thinkingLevel: this.deps.modelRegistry.resolveSlotThinkingLevel("worker"),
+        tools: [],
+        messages: [],
+      },
+      sessionId: ticket.ticketId,
+      getApiKey: (provider) => this.deps.modelRegistry.resolveApiKeyForProvider(provider),
+      streamFn: (model, context, options) => {
+        const scopedFetch = this.deps.proxyRouter.createScopedFetch(`llm-calling.${model.provider}`);
+        return streamSimpleWithRetry(
+          () => {
+            state.activeCallStartPerf = performance.now();
+            return this.deps.proxyRouter.runWithScope(`llm-calling.${model.provider}`, () =>
+              Promise.resolve(
+                this.deps.modelRegistry.models.streamSimple(model, context, {
+                  ...options,
+                  ...(supportsCustomFetchOption(model.api) ? { fetch: scopedFetch } : {}),
+                }),
+              ),
+            );
+          },
+          {
+            policy: resolveLlmRetryConfig(this.deps.getHatoConfig()),
+            signal: options?.signal,
+            model,
+            slot: "WORKER",
+          },
+        );
+      },
+    });
+
+    state.agent = agent;
+    this.sessions.set(ticket.ticketId, state);
+
+    const workerSkills = selectWorkerSkills(resolveSkillsDir(hatoConfig), mandate.skills);
+    const skillLines =
+      workerSkills.length > 0
+        ? `\n已授权 Worker Skills（可用 read_worker_skill 读取）：${workerSkills.map((s) => s.name).join(", ")}`
+        : "";
+
+    const promptText = [
+      `工单编号：${ticket.ticketId}`,
+      `任务抬头：${ticket.briefTitle}`,
+      `上下文引用：context_id="${ticket.contextId}"`,
+      `工作目录：${mandate.workspace_dir}`,
+      skillLines,
+      "请先调用 `read_task_context` 拉取任务上下文，完成工作后调用 `finish_task`。",
+    ]
+      .filter(Boolean)
+      .join("\n");
+
+    return this.runAgentTurn(ticket, mandate, state, promptText, callbacks);
+  }
+
+  async resume(
+    ticket: TicketExecutionHandle,
+    mandate: WorkerMandate,
+    userReply: string,
+    callbacks?: ExecutionProgressCallback,
+  ): Promise<WorkerResult> {
+    this.pruneExpiredSessions();
+    const existing = this.sessions.get(ticket.ticketId);
+    if (!existing) {
+      return this.execute(ticket, mandate, callbacks);
+    }
+
+    if (existing.pendingConfirmKey) {
+      existing.approvedConfirmKeys.add(existing.pendingConfirmKey);
+      existing.pendingConfirmKey = undefined;
+    }
+    existing.lastActiveAt = Date.now();
+
+    return this.runAgentTurn(
+      ticket,
+      mandate,
+      existing,
+      `[USER 补充回复]\n${userReply}`,
+      callbacks,
+    );
+  }
+
+  private async runAgentTurn(
+    ticket: TicketExecutionHandle,
+    mandate: WorkerMandate,
+    state: BuiltinSessionState,
+    promptText: string,
+    callbacks?: ExecutionProgressCallback,
+  ): Promise<WorkerResult> {
+    const hatoConfig = this.deps.getHatoConfig();
+    const outcome: { result?: WorkerResult } = {};
+
+    state.agent.state.tools = await this.buildWorkerTools({
       ticket,
       mandate,
       hatoConfig,
@@ -330,70 +444,117 @@ export class BuiltinPiRunner implements ExecutionRunner {
       },
     });
 
-    const systemPrompt =
-      mandate.execution_mode === "vm_unrestricted"
-        ? WORKER_SYSTEM_PROMPT + VM_UNRESTRICTED_PROMPT_SUFFIX
-        : WORKER_SYSTEM_PROMPT;
+    const liveTraceId = `live_worker_${ticket.ticketId}`;
+    this.deps.liveTraceTracker?.start({
+      id: liveTraceId,
+      canonicalUserId: ticket.canonicalUserId,
+      slot: "worker",
+      provider: state.modelMeta.provider,
+      modelId: state.modelMeta.modelId,
+      api: state.modelMeta.api,
+      userPreview: `[工单 ${ticket.ticketId}] ${ticket.briefTitle}`,
+      startedAt: Date.now(),
+      progressNote: "后台 Worker 执行中",
+    });
 
-    const agent = new Agent({
-      initialState: {
-        systemPrompt,
-        model: resolved.model,
-        thinkingLevel: clampThinkingLevel(resolved.model, resolved.model.reasoning ? "medium" : "off"),
-        tools,
-        messages: [],
-      },
-      sessionId: ticket.ticketId,
-      getApiKey: (provider) => this.deps.modelRegistry.resolveApiKeyForProvider(provider),
-      streamFn: (model, context, options) => {
-        const scopedFetch = this.deps.proxyRouter.createScopedFetch(`llm-calling.${model.provider}`);
-        return streamSimpleWithRetry(
-          () =>
-            this.deps.proxyRouter.runWithScope(`llm-calling.${model.provider}`, () =>
-              Promise.resolve(
-                this.deps.modelRegistry.models.streamSimple(model, context, {
-                  ...options,
-                  ...(supportsCustomFetchOption(model.api) ? { fetch: scopedFetch } : {}),
-                }),
-              ),
-            ),
-          {
-            signal: options?.signal,
-            model,
-            slot: "WORKER",
-          },
+    const syncLiveTrace = (progressNote?: string) => {
+      if (!this.deps.liveTraceTracker) return;
+      const agg = aggregateAssistantTraceMetrics(state.agent.state.messages);
+      this.deps.liveTraceTracker.update(liveTraceId, {
+        ...(progressNote !== undefined ? { progressNote } : {}),
+        steps: agg.steps,
+        toolCalls: agg.toolCalls,
+      });
+    };
+
+    let msgStartPerf = performance.now();
+    let msgFirstDeltaPerf: number | null = null;
+
+    const unsubscribe = state.agent.subscribe((ev) => {
+      if (ev.type === "message_start" && ev.message.role === "assistant") {
+        msgStartPerf = state.activeCallStartPerf ?? performance.now();
+        msgFirstDeltaPerf = null;
+        return;
+      }
+
+      if (ev.type === "message_update") {
+        const sub = ev.assistantMessageEvent;
+        if (
+          (sub.type === "text_delta" || sub.type === "thinking_delta" || sub.type === "toolcall_delta") &&
+          sub.delta.length > 0 &&
+          msgFirstDeltaPerf === null
+        ) {
+          msgFirstDeltaPerf = performance.now();
+        }
+        return;
+      }
+
+      if (ev.type === "tool_execution_start") {
+        const note = `正在执行: ${ev.toolName}`;
+        callbacks?.onProgress?.(note);
+        syncLiveTrace(note);
+        return;
+      }
+
+      if (ev.type === "tool_execution_end") {
+        syncLiveTrace();
+        return;
+      }
+
+      if (ev.type === "message_end" && ev.message.role === "assistant") {
+        const msg = ev.message;
+        if (msg.stopReason === "aborted" && outcome.result) {
+          state.activeCallStartPerf = null;
+          msgFirstDeltaPerf = null;
+          return;
+        }
+        const nowPerf = performance.now();
+        const callStart = state.activeCallStartPerf ?? msgStartPerf;
+        const callTotalMs = Math.max(1, Math.round(nowPerf - callStart));
+        const callTtftMs =
+          msgFirstDeltaPerf !== null ? Math.max(0, Math.round(msgFirstDeltaPerf - callStart)) : callTotalMs;
+        const callDecodeMs =
+          msgFirstDeltaPerf !== null ? Math.max(1, nowPerf - msgFirstDeltaPerf) : undefined;
+        state.activeCallStartPerf = null;
+        msgFirstDeltaPerf = null;
+
+        const msgTools = msg.content
+          .filter((b): b is Extract<AssistantMessage["content"][number], { type: "toolCall" }> => b.type === "toolCall")
+          .map((b) => b.name);
+
+        console.log(
+          formatLlmTelemetryLog({
+            slot: "worker",
+            provider: msg.provider,
+            modelId: msg.model,
+            responseModel: msg.responseModel,
+            responseId: msg.responseId,
+            api: String(msg.api),
+            stopReason: msg.stopReason,
+            rawStopReason: msg.rawStopReason,
+            thinkingLevel: msg.providerThinkingLevel ?? msg.thinkingLevel,
+            inputTokens: msg.usage.input,
+            outputTokens: msg.usage.output,
+            reasoningTokens: msg.usage.reasoning,
+            cacheReadTokens: msg.usage.cacheRead,
+            cacheWriteTokens: msg.usage.cacheWrite,
+            cacheWrite1hTokens: msg.usage.cacheWrite1h,
+            costTotal: msg.usage.cost.total,
+            ttftMs: callTtftMs,
+            decodeMs: callDecodeMs,
+            latencyMs: callTotalMs,
+            toolCalls: msgTools,
+            timeZone: hatoConfig.owner.timezone,
+          }),
         );
-      },
-    });
-
-    state.agent = agent;
-    this.sessions.set(ticket.ticketId, state);
-
-    const unsubscribe = agent.subscribe((ev) => {
-      if (ev.type === "tool_execution_start") {
-        callbacks?.onProgress?.(`正在执行: ${ev.toolName}`);
+        syncLiveTrace();
       }
     });
 
-    const workerSkills = selectWorkerSkills(resolveSkillsDir(hatoConfig), mandate.skills);
-    const skillLines =
-      workerSkills.length > 0
-        ? `\n已授权 Worker Skills（可用 read_worker_skill 读取）：${workerSkills.map((s) => s.name).join(", ")}`
-        : "";
-
-    const promptText = [
-      `工单编号：${ticket.ticketId}`,
-      `任务抬头：${ticket.briefTitle}`,
-      `上下文引用：context_id="${ticket.contextId}"`,
-      `工作目录：${mandate.workspace_dir}`,
-      skillLines,
-      "请先调用 `read_task_context` 拉取任务上下文，完成工作后调用 `finish_task`。",
-    ]
-      .filter(Boolean)
-      .join("\n");
-
+    let timedOut = false;
     const timeoutTimer = setTimeout(() => {
-      agent.abort();
+      timedOut = true;
+      state.agent.abort();
     }, mandate.timeout_ms);
     timeoutTimer.unref();
 
@@ -402,133 +563,27 @@ export class BuiltinPiRunner implements ExecutionRunner {
         ? snapshotWorkspaceFiles(mandate.workspace_dir)
         : undefined;
 
+    let promptError: unknown = null;
     try {
-      await agent.prompt(promptText);
+      await state.agent.prompt(promptText);
     } catch (err) {
-      if (!outcome.result) {
-        this.sessions.delete(ticket.ticketId);
-        return {
-          ticket_id: ticket.ticketId,
-          status: "failed",
-          narration_hint: err instanceof Error ? err.message : String(err),
-          verbatim_blocks: [],
-          artifacts: [],
-          required_secrets: [],
-          caveats: [],
-        };
-      }
+      promptError = err;
     } finally {
       clearTimeout(timeoutTimer);
       unsubscribe();
+      state.activeCallStartPerf = null;
       state.lastActiveAt = Date.now();
+      this.deps.liveTraceTracker?.finish(liveTraceId);
     }
 
-    return this.finalizeOutcome(ticket.ticketId, outcome.result, agent.state.messages, {
+    return this.finalizeOutcome(ticket.ticketId, outcome.result, state.agent.state.messages, {
       workspaceDir: mandate.workspace_dir,
       workspaceMode: mandate.workspace_mode,
       beforeFilesSnapshot,
-    });
-  }
-
-  async resume(
-    ticket: TicketExecutionHandle,
-    mandate: WorkerMandate,
-    userReply: string,
-    callbacks?: ExecutionProgressCallback,
-  ): Promise<WorkerResult> {
-    this.pruneExpiredSessions();
-    const existing = this.sessions.get(ticket.ticketId);
-    if (!existing) {
-      return this.execute(ticket, mandate, callbacks);
-    }
-
-    if (existing.pendingConfirmKey) {
-      existing.approvedConfirmKeys.add(existing.pendingConfirmKey);
-      existing.pendingConfirmKey = undefined;
-    }
-    existing.lastActiveAt = Date.now();
-
-    const outcome: { result?: WorkerResult } = {};
-    const hatoConfig = this.deps.getHatoConfig();
-    existing.agent.state.tools = await this.buildWorkerTools({
-      ticket,
-      mandate,
-      hatoConfig,
-      state: existing,
-      onAskUser: (question) => {
-        outcome.result = {
-          ticket_id: ticket.ticketId,
-          status: "needs_input",
-          narration_hint: question,
-          verbatim_blocks: [],
-          artifacts: [],
-          required_secrets: [],
-          caveats: [],
-          question,
-        };
-        existing.agent.abort();
-      },
-      onRequestConfirm: (action, confirmKey) => {
-        if (confirmKey) existing.pendingConfirmKey = confirmKey;
-        outcome.result = {
-          ticket_id: ticket.ticketId,
-          status: "awaiting_confirm",
-          narration_hint: action,
-          verbatim_blocks: [],
-          artifacts: [],
-          required_secrets: [],
-          caveats: [],
-          confirm_action: action,
-        };
-        existing.agent.abort();
-      },
-      onFinishTask: (res) => {
-        outcome.result = res;
-        existing.agent.abort();
-      },
-    });
-
-    const unsubscribe = existing.agent.subscribe((ev) => {
-      if (ev.type === "tool_execution_start") {
-        callbacks?.onProgress?.(`正在执行: ${ev.toolName}`);
-      }
-    });
-
-    const timeoutTimer = setTimeout(() => {
-      existing.agent.abort();
-    }, mandate.timeout_ms);
-    timeoutTimer.unref();
-
-    const beforeFilesSnapshot =
-      mandate.workspace_mode === "isolated"
-        ? snapshotWorkspaceFiles(mandate.workspace_dir)
-        : undefined;
-
-    try {
-      await existing.agent.prompt(`[USER 补充回复]\n${userReply}`);
-    } catch (err) {
-      if (!outcome.result) {
-        this.sessions.delete(ticket.ticketId);
-        return {
-          ticket_id: ticket.ticketId,
-          status: "failed",
-          narration_hint: err instanceof Error ? err.message : String(err),
-          verbatim_blocks: [],
-          artifacts: [],
-          required_secrets: [],
-          caveats: [],
-        };
-      }
-    } finally {
-      clearTimeout(timeoutTimer);
-      unsubscribe();
-      existing.lastActiveAt = Date.now();
-    }
-
-    return this.finalizeOutcome(ticket.ticketId, outcome.result, existing.agent.state.messages, {
-      workspaceDir: mandate.workspace_dir,
-      workspaceMode: mandate.workspace_mode,
-      beforeFilesSnapshot,
+      timedOut,
+      promptError,
+      agentErrorMessage: state.agent.state.errorMessage,
+      modelMeta: state.modelMeta,
     });
   }
 
@@ -546,12 +601,31 @@ export class BuiltinPiRunner implements ExecutionRunner {
     ticketId: string,
     explicitResult: WorkerResult | undefined,
     messages: readonly AgentMessage[],
-    fallbackContext?: {
+    context?: {
       workspaceDir: string;
       workspaceMode: WorkerMandate["workspace_mode"];
       beforeFilesSnapshot?: ReadonlySet<string>;
+      timedOut?: boolean;
+      promptError?: unknown;
+      agentErrorMessage?: string;
+      modelMeta?: { provider: string; modelId: string; api: string };
     },
   ): WorkerResult {
+    const agg = aggregateAssistantTraceMetrics(messages);
+    const trace = context?.modelMeta
+      ? {
+          provider: context.modelMeta.provider,
+          modelId: context.modelMeta.modelId,
+          api: context.modelMeta.api,
+          inputTokens: agg.inputTokens,
+          outputTokens: agg.outputTokens,
+          cacheReadTokens: agg.cacheReadTokens,
+          cacheWriteTokens: agg.cacheWriteTokens,
+          toolCalls: agg.toolCalls,
+          steps: agg.steps,
+        }
+      : undefined;
+
     if (this.activeAborts.delete(ticketId)) {
       this.sessions.delete(ticketId);
       return {
@@ -562,6 +636,7 @@ export class BuiltinPiRunner implements ExecutionRunner {
         artifacts: [],
         required_secrets: [],
         caveats: ["任务中止"],
+        ...(trace ? { trace } : {}),
       };
     }
 
@@ -572,22 +647,65 @@ export class BuiltinPiRunner implements ExecutionRunner {
       if (
         explicitResult.status === "done" &&
         explicitResult.artifacts.length === 0 &&
-        fallbackContext?.workspaceMode === "isolated"
+        context?.workspaceMode === "isolated"
       ) {
         const discovered = collectNewArtifacts(
-          fallbackContext.workspaceDir,
-          fallbackContext.beforeFilesSnapshot,
+          context.workspaceDir,
+          context.beforeFilesSnapshot,
         );
         if (discovered.length > 0) {
-          return { ...explicitResult, artifacts: discovered };
+          return { ...explicitResult, artifacts: discovered, ...(trace ? { trace } : {}) };
         }
       }
-      return explicitResult;
+      return { ...explicitResult, ...(trace ? { trace } : {}) };
     }
 
     const lastAssistant = [...messages]
       .reverse()
       .find((m) => m.role === "assistant") as AssistantMessage | undefined;
+
+    if (context?.timedOut) {
+      this.sessions.delete(ticketId);
+      return {
+        ticket_id: ticketId,
+        status: "failed",
+        narration_hint: "后台任务执行超时已中止。",
+        verbatim_blocks: [],
+        artifacts: [],
+        required_secrets: [],
+        caveats: ["timeout"],
+        ...(trace ? { trace } : {}),
+      };
+    }
+
+    const promptErrorMessage =
+      context?.promptError instanceof Error
+        ? context.promptError.message
+        : context?.promptError
+          ? String(context.promptError)
+          : "";
+    const agentErrorMessage = context?.agentErrorMessage?.trim() ?? "";
+    const assistantFailed =
+      lastAssistant?.stopReason === "error" || lastAssistant?.stopReason === "aborted";
+    const assistantErrorDetail = assistantFailed
+      ? lastAssistant?.errorMessage?.trim() || String(lastAssistant?.stopReason)
+      : "";
+
+    if (promptErrorMessage || agentErrorMessage || assistantFailed) {
+      this.sessions.delete(ticketId);
+      const reason = promptErrorMessage || agentErrorMessage || assistantErrorDetail || "unknown_error";
+      return {
+        ticket_id: ticketId,
+        status: "failed",
+        narration_hint: `后台任务执行异常中断：${reason}`,
+        verbatim_blocks: [],
+        artifacts: [],
+        required_secrets: [],
+        caveats: [reason],
+        ...(trace ? { trace } : {}),
+      };
+    }
+
     const text = lastAssistant
       ? lastAssistant.content
           .filter((b): b is TextContent => b.type === "text")
@@ -597,8 +715,8 @@ export class BuiltinPiRunner implements ExecutionRunner {
       : "";
 
     const discovered =
-      fallbackContext?.workspaceMode === "isolated"
-        ? collectNewArtifacts(fallbackContext.workspaceDir, fallbackContext.beforeFilesSnapshot)
+      context?.workspaceMode === "isolated"
+        ? collectNewArtifacts(context.workspaceDir, context.beforeFilesSnapshot)
         : [];
 
     this.sessions.delete(ticketId);
@@ -610,6 +728,7 @@ export class BuiltinPiRunner implements ExecutionRunner {
       artifacts: discovered,
       required_secrets: [],
       caveats: [],
+      ...(trace ? { trace } : {}),
     };
   }
 

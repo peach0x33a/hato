@@ -246,3 +246,69 @@ test("resolveLlmRetryConfig returns 5 retries / notify 3 by default and respects
   assert.equal(resolved.notifyAfterRetry, 4);
   assert.equal(resolved.initialDelayMs, DEFAULT_LLM_RETRY_CONFIG.initialDelayMs);
 });
+
+test("streamSimpleWithRetry retries ECONNRESET/503 after thinking_delta and text_start before visible text without leaking duplicate thinking", async () => {
+  let calls = 0;
+
+  const stream = streamSimpleWithRetry(
+    () => {
+      calls++;
+      const s = createAssistantMessageEventStream();
+      queueMicrotask(() => {
+        const partial = makeAssistantMessage();
+        s.push({ type: "start", partial });
+        if (calls === 1) {
+          s.push({ type: "thinking_start", contentIndex: 0, partial });
+          s.push({ type: "thinking_delta", contentIndex: 0, delta: "stale thinking", partial });
+          s.push({ type: "thinking_end", contentIndex: 0, content: "stale thinking", partial });
+          s.push({ type: "text_start", contentIndex: 1, partial });
+          s.push({ type: "text_delta", contentIndex: 1, delta: "", partial });
+          s.push({
+            type: "error",
+            reason: "error",
+            error: makeAssistantMessage({
+              stopReason: "error",
+              errorMessage: "ECONNRESET: The socket connection was closed unexpectedly.",
+            }),
+          });
+        } else {
+          const okMsg = makeAssistantMessage({
+            stopReason: "stop",
+            content: [
+              { type: "thinking", thinking: "fresh thinking" },
+              { type: "text", text: "最终回答" },
+            ],
+          });
+          s.push({ type: "thinking_start", contentIndex: 0, partial: okMsg });
+          s.push({ type: "thinking_delta", contentIndex: 0, delta: "fresh thinking", partial: okMsg });
+          s.push({ type: "thinking_end", contentIndex: 0, content: "fresh thinking", partial: okMsg });
+          s.push({ type: "text_start", contentIndex: 1, partial: okMsg });
+          s.push({ type: "text_delta", contentIndex: 1, delta: "最终回答", partial: okMsg });
+          s.push({ type: "text_end", contentIndex: 1, content: "最终回答", partial: okMsg });
+          s.push({ type: "done", reason: "stop", message: okMsg });
+        }
+        s.end();
+      });
+      return s;
+    },
+    {
+      policy: { initialDelayMs: 1, jitter: false },
+      sleepFn: async () => {},
+    },
+  );
+
+  const events: AssistantMessageEvent[] = [];
+  for await (const ev of stream) {
+    events.push(ev);
+  }
+  const finalMsg = await stream.result();
+
+  assert.equal(calls, 2);
+  assert.equal(finalMsg.stopReason, "stop");
+  const thinkingDeltas = events
+    .filter((e): e is Extract<AssistantMessageEvent, { type: "thinking_delta" }> => e.type === "thinking_delta")
+    .map((e) => e.delta);
+  assert.deepEqual(thinkingDeltas, ["fresh thinking"]);
+  const textBlock = finalMsg.content.find((b) => b.type === "text");
+  assert.equal(textBlock?.type === "text" ? textBlock.text : "", "最终回答");
+});

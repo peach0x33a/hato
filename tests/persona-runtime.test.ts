@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { fauxAssistantMessage, fauxProvider, fauxToolCall } from "@earendil-works/pi-ai";
+import { fauxAssistantMessage, fauxProvider, fauxToolCall, getCurrentTools } from "@earendil-works/pi-ai";
 import { loadHatoConfig } from "../src/config/app.js";
 import { ModelRegistry } from "../src/config/models.js";
 import { ScopedProxyRouter } from "../src/config/proxy.js";
@@ -387,6 +387,251 @@ hindsight_llm = "faux-provider/faux-persona-1"
     assert.deepEqual(steerTurn.bubbles, ["100+20=120，加上10和5总共是135"]);
     // M1 ("帮我算 100 + 20") + M2 ("顺便加 10") + M3 ("还要再加 5") + unified assistant reply = +4 rows
     assert.equal(repo.getHotMessages("owner", 0).length, hotBeforeSteer + 4);
+  } finally {
+    dbHandle.close();
+    rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("PersonaRuntime activates tools mid-turn, preserves multi-turn tool calls, prunes batch images, and adjusts thinking level", async () => {
+  const faux = fauxProvider({
+    api: "hato-faux-api",
+    provider: "faux-provider",
+    models: [{ id: "faux-persona-thinking", name: "Faux Thinking", reasoning: true }],
+    tokensPerSecond: 10000,
+  });
+
+  const tempDir = mkdtempSync(join(tmpdir(), "hato-test-phase2-"));
+  const hatoTomlPath = join(tempDir, "hato.toml");
+  const modelsTomlPath = join(tempDir, "models.toml");
+
+  writeHatoConfig(hatoTomlPath, createDefaultHatoConfig(), { backup: false });
+  writeFileSync(
+    modelsTomlPath,
+    `
+[slots]
+persona = "faux-provider/faux-persona-thinking"
+router = "faux-provider/faux-persona-thinking"
+curator = "faux-provider/faux-persona-thinking"
+worker = "faux-provider/faux-persona-thinking"
+hindsight_llm = "faux-provider/faux-persona-thinking"
+
+[providers]
+`,
+    "utf8",
+  );
+
+  const dbHandle = openDatabase(":memory:");
+  try {
+    const repo = new HatoRepository(dbHandle.db);
+    const config = loadHatoConfig(hatoTomlPath);
+    const registry = new ModelRegistry(modelsTomlPath, repo, {
+      extraProviders: [faux.provider],
+    });
+    const proxyRouter = new ScopedProxyRouter(config.network?.proxies ?? []);
+    const runtime = new PersonaRuntime(config, registry, proxyRouter, repo);
+
+    // 1) Mid-turn activate_tools exposes newly activated tool on Step 2 of the SAME turn
+    let step1HasCalc = false;
+    let step2HasCalc = false;
+    faux.setResponses([
+      (ctx) => {
+        step1HasCalc = getCurrentTools(ctx.messages).some((t) => t.name === "calc");
+        return fauxAssistantMessage(
+          [fauxToolCall("activate_tools", { tools: ["calc"] })],
+          { stopReason: "toolUse" },
+        );
+      },
+      (ctx) => {
+        step2HasCalc = getCurrentTools(ctx.messages).some((t) => t.name === "calc");
+        return fauxAssistantMessage(
+          [fauxToolCall("calc", { expression: "21 + 21" })],
+          { stopReason: "toolUse" },
+        );
+      },
+      () => fauxAssistantMessage("算出来是 42"),
+    ]);
+
+    const t1 = await runtime.handleUserBatch({
+      canonicalUserId: "owner",
+      originChannel: "tg",
+      originPlatformUserId: "123",
+      platformMsgIds: ["m1"],
+      latestPlatformMsgId: "m1",
+      combinedText: "帮我看一下那个东西",
+      attachments: [],
+      firstTimestampMs: Date.now(),
+      lastTimestampMs: Date.now(),
+    });
+    assert.equal(step1HasCalc, false);
+    assert.equal(step2HasCalc, true);
+    assert.deepEqual(t1.toolCalls, ["activate_tools", "calc"]);
+    assert.deepEqual(t1.bubbles, ["算出来是 42"]);
+
+    // 2) Turn 2 preserves Turn 1 toolCall + toolResult blocks and handles inline image without crashing on Turn 3
+    let turn2SawPriorToolCalls = false;
+    let turn2SawPriorToolResult = false;
+    faux.setResponses([
+      (ctx) => {
+        turn2SawPriorToolCalls = ctx.messages.some(
+          (m) =>
+            m.role === "assistant" &&
+            Array.isArray(m.content) &&
+            m.content.some((c) => c.type === "toolCall" && c.name === "calc"),
+        );
+        turn2SawPriorToolResult = ctx.messages.some(
+          (m) => m.role === "toolResult" && m.toolName === "calc",
+        );
+        return fauxAssistantMessage("看见图片啦");
+      },
+    ]);
+
+    const tinyPngBase64 =
+      "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
+    await runtime.handleUserBatch(
+      {
+        canonicalUserId: "owner",
+        originChannel: "tg",
+        originPlatformUserId: "123",
+        platformMsgIds: ["m2"],
+        latestPlatformMsgId: "m2",
+        combinedText: "看看这张图",
+        attachments: [],
+        firstTimestampMs: Date.now() + 10,
+        lastTimestampMs: Date.now() + 10,
+      },
+      [{ type: "image", data: tinyPngBase64, mimeType: "image/png" }],
+    );
+    assert.equal(turn2SawPriorToolCalls, true);
+    assert.equal(turn2SawPriorToolResult, true);
+
+    // Turn 3 must not throw TypeError from pruned images and must not retain inline image payload
+    let turn3HasInlineImage = true;
+    faux.setResponses([
+      (ctx) => {
+        turn3HasInlineImage = ctx.messages.some(
+          (m) =>
+            m.role === "user" &&
+            Array.isArray(m.content) &&
+            m.content.some((part) => part.type === "image"),
+        );
+        return fauxAssistantMessage("继续聊");
+      },
+    ]);
+    const t3 = await runtime.handleUserBatch({
+      canonicalUserId: "owner",
+      originChannel: "tg",
+      originPlatformUserId: "123",
+      platformMsgIds: ["m3"],
+      latestPlatformMsgId: "m3",
+      combinedText: "下一句",
+      attachments: [],
+      firstTimestampMs: Date.now() + 20,
+      lastTimestampMs: Date.now() + 20,
+    });
+    assert.equal(turn3HasInlineImage, false);
+    assert.deepEqual(t3.bubbles, ["继续聊"]);
+
+    // resetSession() clears prior live toolCall/toolResult messages
+    runtime.resetSession();
+    let afterResetHasToolResult = true;
+    faux.setResponses([
+      (ctx) => {
+        afterResetHasToolResult = ctx.messages.some((m) => m.role === "toolResult");
+        return fauxAssistantMessage("新会话开始");
+      },
+    ]);
+    await runtime.handleUserBatch({
+      canonicalUserId: "owner",
+      originChannel: "tg",
+      originPlatformUserId: "123",
+      platformMsgIds: ["m4"],
+      latestPlatformMsgId: "m4",
+      combinedText: "重新开始",
+      attachments: [],
+      firstTimestampMs: Date.now() + 30,
+      lastTimestampMs: Date.now() + 30,
+    });
+    assert.equal(afterResetHasToolResult, false);
+
+    // 3) Autonomous set_thinking_level: scope="turn" vs scope="persist"
+    const seenReasonings: Array<string | undefined> = [];
+    faux.setResponses([
+      (_ctx, opts) => {
+        seenReasonings.push(opts?.reasoning);
+        return fauxAssistantMessage(
+          [fauxToolCall("set_thinking_level", { level: "high", scope: "turn", reason: "complex" })],
+          { stopReason: "toolUse" },
+        );
+      },
+      (_ctx, opts) => {
+        seenReasonings.push(opts?.reasoning);
+        return fauxAssistantMessage("单轮深度思考完成");
+      },
+    ]);
+    await runtime.handleUserBatch({
+      canonicalUserId: "owner",
+      originChannel: "tg",
+      originPlatformUserId: "123",
+      platformMsgIds: ["m5"],
+      latestPlatformMsgId: "m5",
+      combinedText: "认真思考一下这个问题",
+      attachments: [],
+      firstTimestampMs: Date.now() + 40,
+      lastTimestampMs: Date.now() + 40,
+    });
+    assert.deepEqual(seenReasonings, ["medium", "high"]);
+
+    // Next turn reverts to default medium after scope="turn"
+    let revertedReasoning: string | undefined;
+    faux.setResponses([
+      (_ctx, opts) => {
+        revertedReasoning = opts?.reasoning;
+        return fauxAssistantMessage(
+          [fauxToolCall("set_thinking_level", { level: "high", scope: "persist" })],
+          { stopReason: "toolUse" },
+        );
+      },
+      (_ctx, opts) => {
+        seenReasonings.push(opts?.reasoning);
+        return fauxAssistantMessage("已持久化切换");
+      },
+    ]);
+    await runtime.handleUserBatch({
+      canonicalUserId: "owner",
+      originChannel: "tg",
+      originPlatformUserId: "123",
+      platformMsgIds: ["m6"],
+      latestPlatformMsgId: "m6",
+      combinedText: "以后都深度思考",
+      attachments: [],
+      firstTimestampMs: Date.now() + 50,
+      lastTimestampMs: Date.now() + 50,
+    });
+    assert.equal(revertedReasoning, "medium");
+    assert.equal(seenReasonings[2], "high");
+    assert.equal(registry.resolveSlotThinkingLevel("persona"), "high");
+
+    // Subsequent turn retains persisted "high"
+    let persistedTurnReasoning: string | undefined;
+    faux.setResponses([
+      (_ctx, opts) => {
+        persistedTurnReasoning = opts?.reasoning;
+        return fauxAssistantMessage("保持 high");
+      },
+    ]);
+    await runtime.handleUserBatch({
+      canonicalUserId: "owner",
+      originChannel: "tg",
+      originPlatformUserId: "123",
+      platformMsgIds: ["m7"],
+      latestPlatformMsgId: "m7",
+      combinedText: "再试一次",
+      attachments: [],
+      firstTimestampMs: Date.now() + 60,
+      lastTimestampMs: Date.now() + 60,
+    });
+    assert.equal(persistedTurnReasoning, "high");
   } finally {
     dbHandle.close();
     rmSync(tempDir, { recursive: true, force: true });

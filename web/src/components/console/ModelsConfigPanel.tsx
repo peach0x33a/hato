@@ -13,7 +13,13 @@ import {
 } from "lucide-react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { api, type ModelsFileConfig, type SecretState } from "@/api";
+import {
+  api,
+  type ModelsFileConfig,
+  type SecretState,
+  type SlotThinkingMap,
+  type ThinkingLevel,
+} from "@/api";
 import { Button } from "@/components/motion/button";
 import { EASE_OUT, SPRING_LAYOUT, SPRING_SWAP } from "@/lib/ease";
 import { FunctionSlotsPanel } from "./models/FunctionSlotsPanel";
@@ -31,6 +37,7 @@ import {
   buildApiModelsConfig,
   createUid,
   generateUniqueModelId,
+  normalizeSlotThinkingMap,
   parseHeadersJson,
   serializeComparableState,
   SLOT_DEFINITIONS,
@@ -176,18 +183,24 @@ export function ModelsConfigPanel({
   const [slots, setSlots] = useState<ModelsFileConfig["slots"]>(() => ({
     ...initialConfig.slots,
   }));
+  const [slotThinking, setSlotThinking] = useState<SlotThinkingMap>(() =>
+    normalizeSlotThinkingMap(initialConfig.slot_thinking),
+  );
   const [providers, setProviders] = useState<UiProviderConfig[]>(() =>
     toUiProviders(initialConfig),
   );
   const [savedSnapshot, setSavedSnapshot] = useState<{
     comparable: string;
     slots: ModelsFileConfig["slots"];
+    slotThinking: SlotThinkingMap;
     providers: UiProviderConfig[];
   }>(() => {
     const uiProviders = toUiProviders(initialConfig);
+    const initialThinking = normalizeSlotThinkingMap(initialConfig.slot_thinking);
     return {
-      comparable: serializeComparableState(initialConfig.slots, uiProviders),
+      comparable: serializeComparableState(initialConfig.slots, uiProviders, initialThinking),
       slots: { ...initialConfig.slots },
+      slotThinking: initialThinking,
       providers: uiProviders,
     };
   });
@@ -216,12 +229,15 @@ export function ModelsConfigPanel({
 
   useEffect(() => {
     const nextSlots = { ...initialConfig.slots };
+    const nextThinking = normalizeSlotThinkingMap(initialConfig.slot_thinking);
     const nextProviders = toUiProviders(initialConfig);
     setSlots(nextSlots);
+    setSlotThinking(nextThinking);
     setProviders(nextProviders);
     setSavedSnapshot({
-      comparable: serializeComparableState(nextSlots, nextProviders),
+      comparable: serializeComparableState(nextSlots, nextProviders, nextThinking),
       slots: nextSlots,
+      slotThinking: nextThinking,
       providers: nextProviders,
     });
     setSelectedModelRef((prev) => {
@@ -242,8 +258,8 @@ export function ModelsConfigPanel({
 
   const isDirty = useMemo(() => {
     if (Object.keys(pendingSecrets).length > 0) return true;
-    return serializeComparableState(slots, providers) !== savedSnapshot.comparable;
-  }, [slots, providers, savedSnapshot.comparable, pendingSecrets]);
+    return serializeComparableState(slots, providers, slotThinking) !== savedSnapshot.comparable;
+  }, [slots, slotThinking, providers, savedSnapshot.comparable, pendingSecrets]);
 
   useEffect(() => {
     onDirtyChange?.(isDirty);
@@ -277,6 +293,11 @@ export function ModelsConfigPanel({
       const after = slots[def.key]?.trim() ?? "";
       if (before !== after) {
         items.push(`槽位 ${def.key}：${before || "未指定"} → ${after || "自动回退"}`);
+      }
+      const beforeThinking = savedSnapshot.slotThinking[def.key] ?? "自动";
+      const afterThinking = slotThinking[def.key] ?? "自动";
+      if (beforeThinking !== afterThinking) {
+        items.push(`槽位 ${def.key} 思考强度：${beforeThinking} → ${afterThinking}`);
       }
     }
 
@@ -327,7 +348,7 @@ export function ModelsConfigPanel({
     }
 
     return { modifiedModelUids: modUids, changeSummaryList: items };
-  }, [slots, providers, savedSnapshot, pendingSecrets, hindsightEnabled]);
+  }, [slots, slotThinking, providers, savedSnapshot, pendingSecrets, hindsightEnabled]);
 
   const slotIndex = useMemo(() => {
     const byTarget = new Map<string, SlotKey[]>();
@@ -409,8 +430,10 @@ export function ModelsConfigPanel({
 
   const handleResetChanges = () => {
     const nextSlots = { ...savedSnapshot.slots };
+    const nextThinking = { ...savedSnapshot.slotThinking };
     const nextProviders = toUiProviders(initialConfig);
     setSlots(nextSlots);
+    setSlotThinking(nextThinking);
     setProviders(nextProviders);
     setPendingSecrets({});
     setChangeListOpen(false);
@@ -428,6 +451,18 @@ export function ModelsConfigPanel({
 
   const handleChangeSlot = (slotKey: SlotKey, value: string) => {
     setSlots((prev) => ({ ...prev, [slotKey]: value }));
+  };
+
+  const handleChangeSlotThinking = (slotKey: SlotKey, value: ThinkingLevel | undefined) => {
+    setSlotThinking((prev) => {
+      const next = { ...prev };
+      if (!value) {
+        delete next[slotKey];
+      } else {
+        next[slotKey] = value;
+      }
+      return next;
+    });
   };
 
   const handleSaveProviderDraft = (draft: ProviderDraft) => {
@@ -923,7 +958,7 @@ export function ModelsConfigPanel({
   const handleSaveConfig = useCallback(async () => {
     if (savePhase === "saving") return;
 
-    const built = buildApiModelsConfig(slots, providers);
+    const built = buildApiModelsConfig(slots, providers, slotThinking);
     if (!built.ok) {
       if (built.providerUid) {
         setCollapsedProviderIds((prev) => {
@@ -979,7 +1014,7 @@ export function ModelsConfigPanel({
         status: "error",
       });
     }
-  }, [savePhase, slots, providers, pendingSecrets, onSecretsUpdated, onSaved, onToast]);
+  }, [savePhase, slots, slotThinking, providers, pendingSecrets, onSecretsUpdated, onSaved, onToast]);
 
   // Close modals on Escape
   useEffect(() => {
@@ -1046,11 +1081,13 @@ export function ModelsConfigPanel({
         {/* Section 1: Function Slots Routing Table */}
         <FunctionSlotsPanel
           slots={slots}
+          slotThinking={slotThinking}
           providers={providers}
           secretStates={secretStates}
           pendingSecrets={pendingSecrets}
           hindsightEnabled={hindsightEnabled}
           onChangeSlot={handleChangeSlot}
+          onChangeSlotThinking={handleChangeSlotThinking}
           onConfigureProvider={(providerUid) =>
             setDrawerState({ open: true, mode: "edit", providerUid })
           }

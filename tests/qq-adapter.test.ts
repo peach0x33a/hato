@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
+import { mkdtempSync, rmSync } from "node:fs";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, it } from "node:test";
 import { ScopedProxyRouter } from "../src/config/proxy.js";
 import { createDefaultHatoConfig } from "../src/setup/presets.js";
@@ -148,6 +151,73 @@ describe("QQ Official Bot adapter", () => {
       assert.equal(parts.length, 2);
     } finally {
       server.close();
+    }
+  });
+
+  it("detects PNG sent as content_type='file' as image and converts it for model vision", async () => {
+    const tinyPng = Buffer.from(
+      "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+      "base64",
+    );
+    const tempDir = mkdtempSync(join(tmpdir(), "hato-qq-att-"));
+    const server = createServer((req, res) => {
+      if (req.url === "/files/07_ref.png") {
+        res.writeHead(200, { "Content-Type": "application/octet-stream" });
+        res.end(tinyPng);
+        return;
+      }
+      res.writeHead(404);
+      res.end();
+    });
+
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", () => resolve()));
+    const port = (server.address() as AddressInfo).port;
+    const baseUrl = `http://127.0.0.1:${port}`;
+
+    try {
+      const cfg = createDefaultHatoConfig();
+      cfg.paths.sqlite = join(tempDir, "hato.db");
+      cfg.gateway.qq.base_url = baseUrl;
+      cfg.owner.channels.qq.open_ids = ["owner_qq_1"];
+
+      const inbound: Array<{
+        attachments: Array<{ kind: string; mimeType?: string; localPath?: string }>;
+        imagesCount: number;
+      }> = [];
+      const adapter = new QqAdapter({
+        config: cfg,
+        appId: "102000001",
+        clientSecret: "sec_xyz",
+        proxyRouter: new ScopedProxyRouter([]),
+        onInboundMessage: (msg) =>
+          inbound.push({
+            attachments: msg.attachments,
+            imagesCount: msg.images?.length ?? 0,
+          }),
+      });
+
+      await (adapter as unknown as { handleC2CMessage: (evt: unknown) => Promise<void> }).handleC2CMessage({
+        id: "inbound_file_img_1",
+        content: "你自己看看",
+        timestamp: "2026-11-21T08:57:05Z",
+        author: { user_openid: "owner_qq_1" },
+        attachments: [
+          {
+            filename: "07_服装02_居家休闲.png",
+            content_type: "file",
+            url: `${baseUrl}/files/07_ref.png`,
+          },
+        ],
+      });
+
+      assert.equal(inbound.length, 1);
+      assert.equal(inbound[0]?.imagesCount, 1);
+      assert.equal(inbound[0]?.attachments[0]?.kind, "image");
+      assert.equal(inbound[0]?.attachments[0]?.mimeType, "image/png");
+      assert.ok(inbound[0]?.attachments[0]?.localPath);
+    } finally {
+      server.close();
+      rmSync(tempDir, { recursive: true, force: true });
     }
   });
 });

@@ -1,12 +1,13 @@
 import { AlertTriangle, Brain, ChevronDown, Eye, KeyRound } from "lucide-react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import { useMemo, useState } from "react";
-import type { ModelsFileConfig, SecretState } from "@/api";
+import type { ModelsFileConfig, SecretState, SlotThinkingMap, ThinkingLevel } from "@/api";
 import { ConsoleSelect } from "@/components/console/ConsolePrimitives";
 import { EASE_OUT } from "@/lib/ease";
 import {
   resolveProviderKeyStatus,
   SLOT_DEFINITIONS,
+  THINKING_LEVEL_SELECT_OPTIONS,
   type SlotKey,
   type UiModelEntry,
   type UiProviderConfig,
@@ -14,11 +15,13 @@ import {
 
 interface FunctionSlotsPanelProps {
   slots: ModelsFileConfig["slots"];
+  slotThinking: SlotThinkingMap;
   providers: UiProviderConfig[];
   secretStates: SecretState[];
   pendingSecrets: Record<string, string>;
   hindsightEnabled?: boolean;
   onChangeSlot: (slotKey: SlotKey, value: string) => void;
+  onChangeSlotThinking: (slotKey: SlotKey, value: ThinkingLevel | undefined) => void;
   onConfigureProvider?: (providerUid: string) => void;
 }
 
@@ -86,11 +89,13 @@ function SlotStatusBadge({
 
 export function FunctionSlotsPanel({
   slots,
+  slotThinking,
   providers,
   secretStates,
   pendingSecrets,
   hindsightEnabled = false,
   onChangeSlot,
+  onChangeSlotThinking,
   onConfigureProvider,
 }: FunctionSlotsPanelProps) {
   const reduceMotion = useReducedMotion() ?? false;
@@ -202,6 +207,7 @@ export function FunctionSlotsPanel({
               <th className="px-5 py-2.5 font-medium">槽位</th>
               <th className="px-3 py-2.5 font-medium">用途</th>
               <th className="px-3 py-2.5 font-medium">当前模型</th>
+              <th className="px-3 py-2.5 font-medium">思考强度</th>
               <th className="px-3 py-2.5 font-medium">供应商</th>
               <th className="px-3 py-2.5 font-medium">能力</th>
               <th className="px-5 py-2.5 text-right font-medium">状态</th>
@@ -273,6 +279,24 @@ export function FunctionSlotsPanel({
                               ? "border-amber-500/60 dark:border-amber-500/50"
                               : "border-zinc-200 hover:border-zinc-300 dark:border-zinc-800 dark:hover:border-zinc-700"
                         }`}
+                      />
+                    </div>
+                  </td>
+
+                  <td className="px-3 py-2.5">
+                    <div className="w-36">
+                      <ConsoleSelect
+                        value={matched?.model.supportsThinking ? (slotThinking[slot.key] ?? "__auto__") : "off"}
+                        disabled={!matched?.model.supportsThinking}
+                        onValueChange={(next) =>
+                          onChangeSlotThinking(
+                            slot.key,
+                            next === "__auto__" ? undefined : (next as ThinkingLevel),
+                          )
+                        }
+                        options={THINKING_LEVEL_SELECT_OPTIONS}
+                        size="sm"
+                        triggerClassName="bg-zinc-50 dark:bg-[#0b1014]"
                       />
                     </div>
                   </td>
@@ -400,6 +424,24 @@ export function FunctionSlotsPanel({
                 ]}
                 size="sm"
               />
+
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-[11px] text-zinc-500 dark:text-zinc-400">思考强度</span>
+                <div className="w-36">
+                  <ConsoleSelect
+                    value={matched?.model.supportsThinking ? (slotThinking[slot.key] ?? "__auto__") : "off"}
+                    disabled={!matched?.model.supportsThinking}
+                    onValueChange={(next) =>
+                      onChangeSlotThinking(
+                        slot.key,
+                        next === "__auto__" ? undefined : (next as ThinkingLevel),
+                      )
+                    }
+                    options={THINKING_LEVEL_SELECT_OPTIONS}
+                    size="sm"
+                  />
+                </div>
+              </div>
             </div>
           );
         })}

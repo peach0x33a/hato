@@ -211,11 +211,6 @@ export function streamSimpleWithRetry(
             continue;
           }
 
-          if (event.type === "start") {
-            buffered.push(event);
-            continue;
-          }
-
           if (event.type === "error") {
             lastErrorMessage = event.error;
             if (!options.signal?.aborted && attempt < maxRetries && isRetryableLlmError(event.error)) {
@@ -228,13 +223,26 @@ export function streamSimpleWithRetry(
             return;
           }
 
-          hasEmittedContent = true;
-          for (const b of buffered) outer.push(b);
-          outer.push(event);
           if (event.type === "done") {
+            for (const b of buffered) outer.push(b);
+            outer.push(event);
             outer.end();
             return;
           }
+
+          const hasVisibleContent =
+            (event.type === "text_delta" && event.delta.length > 0) ||
+            event.type === "toolcall_delta" ||
+            event.type === "toolcall_end";
+
+          if (!hasVisibleContent) {
+            buffered.push(event);
+            continue;
+          }
+
+          hasEmittedContent = true;
+          for (const b of buffered) outer.push(b);
+          outer.push(event);
         }
 
         if (retryErrorSummary === null) {

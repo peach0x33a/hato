@@ -83,8 +83,24 @@ export interface MemorySyncStats {
   pendingRawMessages: number;
 }
 
+export interface TurnTraceInsertedEvent {
+  id: string;
+  canonicalUserId: string;
+  slot: string;
+  createdAt: number;
+}
+
 export class HatoRepository {
+  private readonly turnTraceListeners = new Set<(info: TurnTraceInsertedEvent) => void>();
+
   constructor(private readonly db: HatoDb) {}
+
+  subscribeTurnTrace(listener: (info: TurnTraceInsertedEvent) => void): () => void {
+    this.turnTraceListeners.add(listener);
+    return () => {
+      this.turnTraceListeners.delete(listener);
+    };
+  }
 
   ensureOwner(params: {
     canonicalUserId: string;
@@ -1367,6 +1383,7 @@ export class HatoRepository {
     });
     const cacheHitRate = trace.cacheHitRate ?? computed.cacheHitRate;
 
+    const createdAt = Date.now();
     this.db
       .insert(turnTraces)
       .values({
@@ -1389,9 +1406,23 @@ export class HatoRepository {
         toolCallsJson: JSON.stringify(trace.toolCalls),
         stepsJson: JSON.stringify(trace.steps ?? []),
         latencyMs: trace.latencyMs,
-        createdAt: Date.now(),
+        createdAt,
       })
       .run();
+
+    const insertedEvent: TurnTraceInsertedEvent = {
+      id,
+      canonicalUserId: trace.canonicalUserId,
+      slot: trace.slot,
+      createdAt,
+    };
+    for (const listener of [...this.turnTraceListeners]) {
+      try {
+        listener(insertedEvent);
+      } catch {
+        // Ignore broken trace subscribers so DB persistence never fails.
+      }
+    }
     return id;
   }
 

@@ -23,11 +23,16 @@ export interface HealthResponse {
   };
 }
 
+export type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
+export type SlotThinkingMap = Partial<Record<keyof ModelsFileConfig["slots"], ThinkingLevel>>;
+
 export interface SlotView {
   slot: string;
   target: string;
   api: string;
   baseUrl: string;
+  thinkingLevel?: ThinkingLevel;
+  reasoning?: boolean;
 }
 
 export interface StoredMessageRecord {
@@ -431,6 +436,7 @@ export interface ModelsFileConfig {
     hindsight_llm: string;
     vision?: string;
   };
+  slot_thinking?: SlotThinkingMap;
   providers: Record<string, ProviderConfig>;
 }
 
@@ -676,6 +682,27 @@ export interface StaticsResponse {
   traces: TurnTraceRecord[];
 }
 
+export interface LiveTraceSnapshot {
+  id: string;
+  canonicalUserId: string;
+  slot: string;
+  provider: string;
+  modelId: string;
+  api: string;
+  userPreview: string | null;
+  startedAt: number;
+  updatedAt: number;
+  status: "running";
+  toolCalls: string[];
+  steps: TraceStepRecord[];
+  progressNote?: string;
+}
+
+export type TraceStreamEvent =
+  | { type: "snapshot"; active: LiveTraceSnapshot[] }
+  | { type: "active_update"; active: LiveTraceSnapshot[] }
+  | { type: "trace_inserted"; traceId: string; slot: string; createdAt: number };
+
 const TOKEN_STORAGE_KEY = "hato_console_token";
 
 export function getStoredToken(): string {
@@ -819,6 +846,19 @@ export const api = {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ config }),
+    }),
+  setSlotThinking: (slot: string, level: ThinkingLevel | "auto" | null) =>
+    requestJson<{
+      ok: boolean;
+      slot: string;
+      requested: ThinkingLevel | null;
+      effective: ThinkingLevel;
+      reasoningSupported: boolean;
+      slots: SlotView[];
+    }>("/api/config/thinking", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ slot, level }),
     }),
   savePrompt: (promptText: string) =>
     requestJson<SaveConfigResponse>("/api/config/prompt", {
@@ -1025,6 +1065,55 @@ export const api = {
       }
     });
     return () => controller.abort();
+  },
+  subscribeTraceStream(
+    onEvent: (event: TraceStreamEvent) => void,
+    onError?: (err: Error) => void,
+  ): () => void {
+    let closed = false;
+    let controller: AbortController | null = null;
+    let reconnectTimer: number | null = null;
+
+    const connect = async (attempt = 0) => {
+      if (closed) return;
+      controller = new AbortController();
+      try {
+        await consumeSseStream<TraceStreamEvent>(
+          "/api/traces/stream",
+          {
+            method: "GET",
+            headers: authHeaders(),
+            signal: controller.signal,
+          },
+          (ev) => {
+            attempt = 0;
+            onEvent(ev);
+          },
+        );
+        if (!closed) {
+          const delay = Math.min(10_000, 1500 * Math.pow(1.5, attempt));
+          reconnectTimer = window.setTimeout(() => void connect(attempt + 1), delay);
+        }
+      } catch (err) {
+        if (closed || controller.signal.aborted) return;
+        onError?.(err instanceof Error ? err : new Error(String(err)));
+        if (err instanceof ApiError && (err.status === 401 || err.status === 403)) {
+          return;
+        }
+        const delay = Math.min(15_000, 2000 * Math.pow(1.5, attempt));
+        reconnectTimer = window.setTimeout(() => void connect(attempt + 1), delay);
+      }
+    };
+
+    void connect(0);
+
+    return () => {
+      closed = true;
+      if (reconnectTimer !== null) {
+        window.clearTimeout(reconnectTimer);
+      }
+      controller?.abort();
+    };
   },
 };
 

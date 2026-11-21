@@ -153,6 +153,52 @@ export function extractTraceSteps(messages: readonly unknown[]): TraceStepRecord
   return steps;
 }
 
+export interface AggregatedAgentTraceMetrics {
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+  toolCalls: string[];
+  steps: TraceStepRecord[];
+}
+
+/**
+ * Aggregates token usage, tool call names, and chronological trajectory steps
+ * from a sequence of Agent messages.
+ */
+export function aggregateAssistantTraceMetrics(
+  messages: readonly unknown[],
+): AggregatedAgentTraceMetrics {
+  const steps = extractTraceSteps(messages);
+  let inputTokens = 0;
+  let outputTokens = 0;
+  let cacheReadTokens = 0;
+  let cacheWriteTokens = 0;
+  const toolCalls: string[] = [];
+
+  for (const step of steps) {
+    if (step.kind !== "assistant") continue;
+    if (step.tokens) {
+      inputTokens += step.tokens.input;
+      outputTokens += step.tokens.output;
+      cacheReadTokens += step.tokens.cacheRead;
+      cacheWriteTokens += step.tokens.cacheWrite;
+    }
+    for (const tc of step.toolCalls) {
+      toolCalls.push(tc.name);
+    }
+  }
+
+  return {
+    inputTokens,
+    outputTokens,
+    cacheReadTokens,
+    cacheWriteTokens,
+    toolCalls,
+    steps,
+  };
+}
+
 export interface TurnTraceStatRow {
   id: string;
   canonicalUserId: string;

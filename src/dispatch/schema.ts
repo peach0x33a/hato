@@ -1,5 +1,6 @@
 import { Type, type Static } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
+import type { TraceStepRecord } from "../stats/metrics.js";
 
 export const WORKER_BACKENDS = [
   "codex-cli",
@@ -78,7 +79,21 @@ export const WorkerResultSchema = Type.Object({
   question: Type.Optional(Type.String()),
   confirm_action: Type.Optional(Type.String()),
 });
-export type WorkerResult = Static<typeof WorkerResultSchema>;
+export interface WorkerExecutionTrace {
+  provider: string;
+  modelId: string;
+  api: string;
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+  toolCalls: string[];
+  steps: TraceStepRecord[];
+}
+
+export type WorkerResult = Static<typeof WorkerResultSchema> & {
+  trace?: WorkerExecutionTrace;
+};
 
 export const RouterScheduleOpDecisionSchema = Type.Object({
   decision: Type.Literal("schedule_op"),

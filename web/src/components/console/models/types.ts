@@ -3,7 +3,24 @@ import type {
   ModelsFileConfig,
   ProviderConfig,
   SecretState,
+  SlotThinkingMap,
+  ThinkingLevel,
 } from "@/api";
+
+export const THINKING_LEVEL_SELECT_OPTIONS: Array<{
+  value: string;
+  label: string;
+  hint?: string;
+}> = [
+  { value: "__auto__", label: "自动 (默认)", hint: "按槽位策略" },
+  { value: "off", label: "off (关闭)", hint: "不思考" },
+  { value: "minimal", label: "minimal", hint: "极简推理" },
+  { value: "low", label: "low", hint: "轻量推理" },
+  { value: "medium", label: "medium", hint: "均衡推理" },
+  { value: "high", label: "high", hint: "深度推理" },
+  { value: "xhigh", label: "xhigh", hint: "超深度" },
+  { value: "max", label: "max", hint: "最大预算" },
+];
 
 export const API_OPTIONS: Array<{ value: string; label: string }> = [
   { value: "openai-completions", label: "OpenAI Completions" },
@@ -438,9 +455,32 @@ export type BuildModelsResult =
   | { ok: true; config: ModelsFileConfig }
   | { ok: false; error: string; providerUid?: string; modelUid?: string };
 
+const VALID_THINKING_LEVELS = new Set<ThinkingLevel>([
+  "off",
+  "minimal",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "max",
+]);
+
+export function normalizeSlotThinkingMap(input?: SlotThinkingMap): SlotThinkingMap {
+  const out: SlotThinkingMap = {};
+  if (!input) return out;
+  for (const def of SLOT_DEFINITIONS) {
+    const raw = input[def.key];
+    if (raw && VALID_THINKING_LEVELS.has(raw)) {
+      out[def.key] = raw;
+    }
+  }
+  return out;
+}
+
 export function buildApiModelsConfig(
   slots: ModelsFileConfig["slots"],
   providers: UiProviderConfig[],
+  slotThinking?: SlotThinkingMap,
 ): BuildModelsResult {
   const apiProviders: Record<string, ProviderConfig> = {};
 
@@ -631,10 +671,13 @@ export function buildApiModelsConfig(
     apiProviders[slug] = apiProv;
   }
 
+  const normalizedThinking = normalizeSlotThinkingMap(slotThinking);
+
   return {
     ok: true,
     config: {
       slots: { ...slots },
+      ...(Object.keys(normalizedThinking).length > 0 ? { slot_thinking: normalizedThinking } : {}),
       providers: apiProviders,
     },
   };
@@ -643,9 +686,11 @@ export function buildApiModelsConfig(
 export function serializeComparableState(
   slots: ModelsFileConfig["slots"],
   providers: UiProviderConfig[],
+  slotThinking?: SlotThinkingMap,
 ): string {
   return JSON.stringify({
     slots,
+    slotThinking: normalizeSlotThinkingMap(slotThinking),
     providers: providers.map((p) => ({
       name: p.name,
       displayName: p.displayName ?? "",

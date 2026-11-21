@@ -262,3 +262,78 @@ hindsight_llm = "faux-provider/model-a"
     rmSync(tempDir, { recursive: true, force: true });
   }
 });
+
+test("self_config inspect exposes thinking_level/reasoning and set_thinking_level updates slot override", async () => {
+  const faux = fauxProvider({
+    api: "hato-faux-api",
+    provider: "faux-provider",
+    models: [{ id: "model-thinking", name: "Thinking Model", reasoning: true }],
+    tokensPerSecond: 10000,
+  });
+
+  const tempDir = mkdtempSync(join(tmpdir(), "hato-selfcfg-thinking-"));
+  const hatoTomlPath = join(tempDir, "hato.toml");
+  const modelsTomlPath = join(tempDir, "models.toml");
+  const promptsDir = join(tempDir, "prompts");
+  mkdirSync(promptsDir, { recursive: true });
+  writeFileSync(join(promptsDir, "system.md"), "SYS", "utf8");
+  writeFileSync(join(promptsDir, "soul.md"), "SOUL", "utf8");
+
+  const cfg = createDefaultHatoConfig();
+  cfg.paths.prompts_dir = promptsDir;
+  writeHatoConfig(hatoTomlPath, cfg, { backup: false });
+  writeFileSync(
+    modelsTomlPath,
+    `
+[slots]
+persona = "faux-provider/model-thinking"
+router = "faux-provider/model-thinking"
+curator = "faux-provider/model-thinking"
+worker = "faux-provider/model-thinking"
+hindsight_llm = "faux-provider/model-thinking"
+
+[providers]
+`,
+    "utf8",
+  );
+
+  const dbHandle = openDatabase(":memory:");
+  try {
+    const repo = new HatoRepository(dbHandle.db);
+    const registry = new ModelRegistry(modelsTomlPath, repo, {
+      extraProviders: [faux.provider],
+    });
+    const thinkingUpdates: Array<[string, string]> = [];
+    const deps = {
+      hatoConfigPath: hatoTomlPath,
+      getHatoConfig: () => loadHatoConfig(hatoTomlPath),
+      getModelRegistry: () => registry,
+      repo,
+      onReloadRuntime: async () => {},
+      onThinkingUpdated: (slot: string, level: string) => {
+        thinkingUpdates.push([slot, level]);
+      },
+    };
+
+    const inspectRes = await runSelfConfigAction(deps, { action: "inspect" });
+    assert.equal(inspectRes.ok, true);
+    const personaSlot = (
+      inspectRes.details as { model_slots: Array<{ slot: string; thinking_level: string; reasoning: boolean }> }
+    ).model_slots.find((s) => s.slot === "persona");
+    assert.equal(personaSlot?.reasoning, true);
+    assert.equal(personaSlot?.thinking_level, "medium");
+
+    const setRes = await runSelfConfigAction(deps, {
+      action: "set_thinking_level",
+      slot: "persona",
+      thinking_level: "high",
+    });
+    assert.equal(setRes.ok, true);
+    assert.equal(registry.resolveSlotThinkingLevel("persona"), "high");
+    assert.deepEqual(thinkingUpdates, [["persona", "high"]]);
+    assert.ok(faux);
+  } finally {
+    dbHandle.close();
+    rmSync(tempDir, { recursive: true, force: true });
+  }
+});

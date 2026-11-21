@@ -18,6 +18,7 @@ import { CompactionManager } from "../src/memory/compaction.js";
 import { PersonaRuntime } from "../src/persona/agent.js";
 import { createDefaultHatoConfig } from "../src/setup/presets.js";
 import { fetchTelegramUserProfiles } from "../src/setup/probe.js";
+import { LiveTraceTracker } from "../src/stats/live-trace.js";
 import { WebConsoleServer } from "../src/web-console/server.js";
 
 function parseSseFrames(raw: string): Array<Record<string, unknown>> {
@@ -92,7 +93,9 @@ hindsight_llm = "faux-provider/faux-persona-1"
   });
   let proxyRouter = new ScopedProxyRouter(currentConfig.network?.proxies ?? []);
   const actorLock = new ActorLock();
+  const liveTraceTracker = new LiveTraceTracker();
   const runtime = new PersonaRuntime(currentConfig, modelRegistry, proxyRouter, repo);
+  runtime.setLiveTraceTracker(liveTraceTracker);
   const compaction = new CompactionManager(repo, modelRegistry);
 
   const recordedMouse: unknown[] = [];
@@ -201,6 +204,7 @@ hindsight_llm = "faux-provider/faux-persona-1"
     getPersonaRuntime: () => runtime,
     getBrowserRuntime: () => fakeBrowserRuntime,
     getCompactionManager: () => compaction,
+    getLiveTraceTracker: () => liveTraceTracker,
     getActorLock: () => actorLock,
     getSlashDeps: () => ({
       repo,
@@ -591,6 +595,90 @@ hindsight_llm = "faux-provider/faux-persona-1"
       historyAfterTicketJson.messages.some((m) => m.content.includes("内部执行日志")),
       false,
     );
+
+    // Verify /api/traces/stream emits snapshot, live active_update (filtered by uid), and trace_inserted
+    const traceEventsReceived: string[] = [];
+    const repoSubEvents: string[] = [];
+    const unsubRepo = repo.subscribeTurnTrace((info) => repoSubEvents.push(info.id));
+
+    const traceStreamCtrl = new AbortController();
+    const traceStreamRes = await fetch(`${baseUrl}/api/traces/stream`, {
+      headers: authHeaders,
+      signal: traceStreamCtrl.signal,
+    });
+    assert.equal(traceStreamRes.status, 200);
+    const traceReader = traceStreamRes.body!.getReader();
+    const traceDecoder = new TextDecoder();
+    let traceDecoded = "";
+
+    const firstTraceChunk = await traceReader.read();
+    traceDecoded += traceDecoder.decode(firstTraceChunk.value, { stream: true });
+    assert.match(traceDecoded, /"type":"snapshot"/);
+
+    liveTraceTracker.start({
+      id: "live_test_1",
+      canonicalUserId: "owner",
+      slot: "worker",
+      provider: "faux",
+      modelId: "w1",
+      api: "hato-faux",
+      userPreview: "实时运行测试",
+      startedAt: Date.now(),
+      progressNote: "正在执行工具",
+    });
+    liveTraceTracker.start({
+      id: "live_other_user",
+      canonicalUserId: "someone_else",
+      slot: "worker",
+      provider: "faux",
+      modelId: "w1",
+      api: "hato-faux",
+      userPreview: "不应泄漏给当前用户",
+      startedAt: Date.now(),
+    });
+    liveTraceTracker.finish("live_test_1");
+    liveTraceTracker.finish("live_other_user");
+
+    const insertedTraceId = repo.insertTurnTrace({
+      canonicalUserId: "owner",
+      slot: "worker",
+      provider: "builtin-pi",
+      modelId: "w1",
+      api: "hato-faux",
+      inputTokens: 12,
+      outputTokens: 5,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+      userPreview: "完成测试",
+      recalledIds: [],
+      timeCardText: "ok",
+      toolCalls: ["run_command"],
+      steps: [],
+      latencyMs: 42,
+    });
+
+    while (
+      !(
+        traceDecoded.includes('"type":"active_update"') &&
+        traceDecoded.includes('"type":"trace_inserted"')
+      )
+    ) {
+      const next = await traceReader.read();
+      if (next.done) break;
+      traceDecoded += traceDecoder.decode(next.value, { stream: true });
+    }
+    traceStreamCtrl.abort();
+    unsubRepo();
+
+    for (const frame of parseSseFrames(traceDecoded)) {
+      traceEventsReceived.push(String(frame.type));
+    }
+    assert.ok(traceEventsReceived.includes("snapshot"));
+    assert.ok(traceEventsReceived.includes("active_update"));
+    assert.ok(traceEventsReceived.includes("trace_inserted"));
+    assert.equal(traceDecoded.includes("不应泄漏给当前用户"), false);
+    assert.ok(traceDecoded.includes(insertedTraceId));
+    assert.deepEqual(repoSubEvents, [insertedTraceId]);
   } finally {
     delete process.env[tokenEnvName];
     delete process.env[tgTokenEnv];
@@ -664,5 +752,192 @@ test("fetchTelegramUserProfiles fetches displayName, username, and avatarDataUrl
     assert.match(noToken[0]?.error ?? "", /Bot Token/);
   } finally {
     await new Promise<void>((resolveClose) => mockTg.close(() => resolveClose()));
+  }
+});
+
+test("WebConsoleServer manages slot thinking levels via GET /api/chat/history, PUT /api/config/thinking, GET /api/config, and PUT /api/config/models", async () => {
+  const tempDir = mkdtempSync(join(tmpdir(), "hato-web-thinking-"));
+  const hatoTomlPath = join(tempDir, "hato.toml");
+  const modelsTomlPath = join(tempDir, "models.toml");
+  const promptsDir = join(tempDir, "prompts");
+  const envPath = join(tempDir, ".env");
+  const staticDir = join(tempDir, "static");
+  mkdirSync(promptsDir, { recursive: true });
+  mkdirSync(staticDir, { recursive: true });
+  writeFileSync(join(promptsDir, "soul.md"), "你是 Hato", "utf8");
+  writeFileSync(join(staticDir, "index.html"), "<!doctype html><html><body>OK</body></html>", "utf8");
+
+  const tokenEnvName = "HATO_TEST_WEB_THINK_TOKEN";
+  const secretToken = "think-secret-1234";
+  process.env[tokenEnvName] = secretToken;
+  writeFileSync(envPath, `${tokenEnvName}=${secretToken}\n`, "utf8");
+
+  const cfg = createDefaultHatoConfig();
+  cfg.paths.prompts_dir = promptsDir;
+  cfg.web = {
+    ...cfg.web,
+    console: {
+      enabled: true,
+      host: "127.0.0.1",
+      port: 0,
+      auth_token_env: tokenEnvName,
+    },
+  };
+  writeHatoConfig(hatoTomlPath, cfg, { backup: false });
+  writeFileSync(
+    modelsTomlPath,
+    `
+[slots]
+persona = "relay/m1"
+router = "relay/m1"
+curator = "relay/m1"
+worker = "relay/m1"
+hindsight_llm = "relay/m1"
+
+[providers.relay]
+api = "openai-completions"
+base_url = "https://relay.example.com/v1"
+
+[[providers.relay.models]]
+id = "m1"
+name = "Relay Reasoning"
+reasoning = true
+`,
+    "utf8",
+  );
+
+  const dbHandle = openDatabase(":memory:");
+  let currentConfig = loadHatoConfig(hatoTomlPath);
+  const repo = new HatoRepository(dbHandle.db);
+  const modelRegistry = new ModelRegistry(modelsTomlPath, repo);
+  const proxyRouter = new ScopedProxyRouter(currentConfig.network?.proxies ?? []);
+  const actorLock = new ActorLock();
+  const liveTraceTracker = new LiveTraceTracker();
+  const runtime = new PersonaRuntime(currentConfig, modelRegistry, proxyRouter, repo);
+  const compaction = new CompactionManager(repo, modelRegistry);
+  const fakeBrowserRuntime = {
+    isPendingTakeover: () => false,
+    isBusy: () => false,
+  } as unknown as BrowserRuntime;
+
+  const reloadAll = async () => {
+    currentConfig = loadHatoConfig(hatoTomlPath);
+    modelRegistry.reload();
+    proxyRouter.reload(currentConfig.network?.proxies ?? []);
+    runtime.updateConfig(currentConfig);
+    return {
+      slots: modelRegistry.listSlots().map((s) => ({
+        slot: s.slot,
+        target: s.target,
+        api: String(s.model.api),
+        baseUrl: s.model.baseUrl,
+      })),
+      proxyCount: currentConfig.network?.proxies?.length ?? 0,
+      changes: [],
+    };
+  };
+
+  const server = new WebConsoleServer({
+    hatoConfigPath: hatoTomlPath,
+    modelsConfigPath: modelsTomlPath,
+    envPath,
+    staticDir,
+    getConfig: () => currentConfig,
+    getModelRegistry: () => modelRegistry,
+    getProxyRouter: () => proxyRouter,
+    getRepo: () => repo,
+    getPersonaRuntime: () => runtime,
+    getBrowserRuntime: () => fakeBrowserRuntime,
+    getCompactionManager: () => compaction,
+    getLiveTraceTracker: () => liveTraceTracker,
+    getActorLock: () => actorLock,
+    getSlashDeps: () => ({
+      repo,
+      listModelSlots: () => [],
+      listAvailableModels: () => modelRegistry.listTargets(),
+      setModelSlot: () => ({ slot: "persona", target: "relay/m1", api: "openai-completions", baseUrl: "" }),
+      reloadAll: async () => reloadAll(),
+      forceCompact: async (uid) => compaction.forceCompact(uid),
+      resetContext: async (uid) => repo.resetWorkingContext(uid),
+    }),
+    reloadAll,
+  });
+
+  try {
+    const addr = await server.start();
+    const baseUrl = `http://127.0.0.1:${addr.port}`;
+    const authHeaders = {
+      Authorization: `Bearer ${secretToken}`,
+      "Content-Type": "application/json",
+    };
+
+    const histRes = await fetch(`${baseUrl}/api/chat/history`, { headers: authHeaders });
+    assert.equal(histRes.status, 200);
+    const histBody = (await histRes.json()) as {
+      slots: Array<{ slot: string; thinkingLevel?: string; reasoning?: boolean }>;
+    };
+    const personaSlot = histBody.slots.find((s) => s.slot === "persona");
+    assert.equal(personaSlot?.reasoning, true);
+    assert.equal(personaSlot?.thinkingLevel, "medium");
+
+    // PUT /api/config/thinking updates slot thinking override
+    const setRes = await fetch(`${baseUrl}/api/config/thinking`, {
+      method: "PUT",
+      headers: authHeaders,
+      body: JSON.stringify({ slot: "persona", level: "high" }),
+    });
+    assert.equal(setRes.status, 200);
+    const setBody = (await setRes.json()) as {
+      ok: boolean;
+      effective: string;
+      slots: Array<{ slot: string; thinkingLevel?: string }>;
+    };
+    assert.equal(setBody.effective, "high");
+    assert.equal(setBody.slots.find((s) => s.slot === "persona")?.thinkingLevel, "high");
+
+    // Invalid slot or level rejected with 400
+    const badRes = await fetch(`${baseUrl}/api/config/thinking`, {
+      method: "PUT",
+      headers: authHeaders,
+      body: JSON.stringify({ slot: "persona", level: "bogus" }),
+    });
+    assert.equal(badRes.status, 400);
+
+    // GET /api/config exposes effective slot_thinking
+    const cfgRes = await fetch(`${baseUrl}/api/config`, { headers: authHeaders });
+    assert.equal(cfgRes.status, 200);
+    const cfgBody = (await cfgRes.json()) as {
+      modelsConfig: {
+        slots: Record<string, string>;
+        slot_thinking?: Record<string, string>;
+        providers: Record<string, unknown>;
+      };
+    };
+    assert.equal(cfgBody.modelsConfig.slot_thinking?.persona, "high");
+
+    // PUT /api/config/models persists [slot_thinking] and clears runtime overrides
+    const putModelsRes = await fetch(`${baseUrl}/api/config/models`, {
+      method: "PUT",
+      headers: authHeaders,
+      body: JSON.stringify({
+        config: {
+          ...cfgBody.modelsConfig,
+          slot_thinking: { persona: "low" },
+        },
+      }),
+    });
+    assert.equal(putModelsRes.status, 200);
+    assert.equal(modelRegistry.resolveSlotThinkingLevel("persona"), "low");
+
+    const cfgAfterRes = await fetch(`${baseUrl}/api/config`, { headers: authHeaders });
+    const cfgAfterBody = (await cfgAfterRes.json()) as {
+      modelsConfig: { slot_thinking?: Record<string, string> };
+    };
+    assert.equal(cfgAfterBody.modelsConfig.slot_thinking?.persona, "low");
+  } finally {
+    delete process.env[tokenEnvName];
+    await server.stop();
+    dbHandle.close();
+    rmSync(tempDir, { recursive: true, force: true });
   }
 });

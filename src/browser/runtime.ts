@@ -1,5 +1,5 @@
 import { Agent, type AgentTool } from "@earendil-works/pi-agent-core";
-import { clampThinkingLevel, type AssistantMessage, type Usage } from "@earendil-works/pi-ai";
+import { type AssistantMessage, type Usage } from "@earendil-works/pi-ai";
 import { bool, num, obj, oneOf, opt, str } from "@earendil-works/pi-schema";
 import { resolveLlmRetryConfig, resolveWebBrowserConfig, type HatoConfig } from "../config/app.js";
 import { supportsCustomFetchOption, type ModelRegistry } from "../config/models.js";
@@ -446,7 +446,7 @@ export class BrowserRuntime {
       initialState: {
         systemPrompt: BROWSER_WORKER_SYSTEM_PROMPT,
         model: resolvedSlot.model,
-        thinkingLevel: clampThinkingLevel(resolvedSlot.model, resolvedSlot.model.reasoning ? "low" : "off"),
+        thinkingLevel: this.modelRegistry.resolveSlotThinkingLevel(resolvedSlot.slot),
         tools,
         messages: [],
       },

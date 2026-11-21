@@ -11,7 +11,12 @@ import {
   X,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { api, type TraceStepRecord, type TurnTraceRecord } from "@/api";
+import {
+  api,
+  type LiveTraceSnapshot,
+  type TraceStepRecord,
+  type TurnTraceRecord,
+} from "@/api";
 import { ApiBadge, ConsoleSelect, SlotBadge } from "@/components/console/ConsolePrimitives";
 import { SLOT_DEFINITIONS } from "@/components/console/models/types";
 import {
@@ -188,9 +193,15 @@ export interface TrajectoryPanelProps {
   onToast: (input: { title: string; description?: string; status?: "info" | "success" | "error" }) => void;
   sessionEpoch?: number;
   sessionId?: string | null;
+  liveTraces?: LiveTraceSnapshot[];
 }
 
-export function TrajectoryPanel({ onToast, sessionEpoch = 0, sessionId = null }: TrajectoryPanelProps) {
+export function TrajectoryPanel({
+  onToast,
+  sessionEpoch = 0,
+  sessionId = null,
+  liveTraces,
+}: TrajectoryPanelProps) {
   const [slot, setSlot] = useState("__all__");
   const [mode, setMode] = useState<TimelineMode>("duration");
   const [searchText, setSearchText] = useState("");
@@ -204,14 +215,25 @@ export function TrajectoryPanel({ onToast, sessionEpoch = 0, sessionId = null }:
   const [selectedTraceId, setSelectedTraceId] = useState<string | null>(null);
 
   const [viewState, setViewState] = useState<"loading" | "error" | "ready">("loading");
+  const [refreshing, setRefreshing] = useState(false);
   const [errorMessage, setErrorMessage] = useState("");
   const [traces, setTraces] = useState<TurnTraceRecord[]>([]);
+  const [internalLiveTraces, setInternalLiveTraces] = useState<LiveTraceSnapshot[]>([]);
+  const [liveNowMs, setLiveNowMs] = useState(() => Date.now());
   const requestSeqRef = useRef(0);
+  const prevLatestTraceIdRef = useRef<string | null>(null);
+  const selectedEventKeyRef = useRef<string | null>(null);
+  selectedEventKeyRef.current = selectedEventKey;
+  const prevEpochRef = useRef(sessionEpoch);
 
-  const loadTraces = useCallback(async () => {
+  const loadTraces = useCallback(async (silent = false) => {
     const reqId = ++requestSeqRef.current;
-    setViewState("loading");
-    setErrorMessage("");
+    if (!silent) {
+      setViewState("loading");
+      setErrorMessage("");
+    } else {
+      setRefreshing(true);
+    }
     try {
       const res = await api.getStatics({
         limit: 80,
@@ -220,25 +242,90 @@ export function TrajectoryPanel({ onToast, sessionEpoch = 0, sessionId = null }:
       });
       if (reqId !== requestSeqRef.current) return;
       const chronological = [...res.traces].reverse();
+      const prevLatest = prevLatestTraceIdRef.current;
+      const nextLatest = chronological[chronological.length - 1]?.id ?? null;
+      prevLatestTraceIdRef.current = nextLatest;
+
       setTraces(chronological);
-      setSelectedTraceId((prev) =>
-        prev && chronological.some((t) => t.id === prev)
-          ? prev
-          : chronological[chronological.length - 1]?.id ?? null,
-      );
+      setSelectedTraceId((prev) => {
+        if (!prev || !chronological.some((t) => t.id === prev)) {
+          return nextLatest;
+        }
+        if (prev === prevLatest && selectedEventKeyRef.current === null && nextLatest) {
+          return nextLatest;
+        }
+        return prev;
+      });
       setViewState("ready");
     } catch (err) {
       if (reqId !== requestSeqRef.current) return;
-      const msg = err instanceof Error ? err.message : String(err);
-      setErrorMessage(msg);
-      setViewState("error");
-      onToast({ title: "轨迹加载失败", description: msg, status: "error" });
+      if (!silent) {
+        const msg = err instanceof Error ? err.message : String(err);
+        setErrorMessage(msg);
+        setViewState("error");
+        onToast({ title: "轨迹加载失败", description: msg, status: "error" });
+      }
+    } finally {
+      if (reqId === requestSeqRef.current) {
+        setRefreshing(false);
+      }
     }
   }, [slot, sessionId, onToast]);
 
   useEffect(() => {
-    void loadTraces();
-  }, [loadTraces, sessionEpoch]);
+    void loadTraces(false);
+  }, [loadTraces]);
+
+  useEffect(() => {
+    if (sessionEpoch === prevEpochRef.current) return;
+    prevEpochRef.current = sessionEpoch;
+    void loadTraces(true);
+  }, [sessionEpoch, loadTraces]);
+
+  useEffect(() => {
+    if (liveTraces !== undefined || sessionId) return;
+    let refreshTimer: number | null = null;
+    const unsubscribe = api.subscribeTraceStream((evt) => {
+      if (evt.type === "snapshot" || evt.type === "active_update") {
+        setInternalLiveTraces(evt.active);
+      } else if (evt.type === "trace_inserted") {
+        if (refreshTimer !== null) window.clearTimeout(refreshTimer);
+        refreshTimer = window.setTimeout(() => {
+          void loadTraces(true);
+        }, 200);
+      }
+    });
+    return () => {
+      if (refreshTimer !== null) window.clearTimeout(refreshTimer);
+      unsubscribe();
+    };
+  }, [liveTraces, sessionId, loadTraces]);
+
+  const activeLiveTraces = liveTraces ?? internalLiveTraces;
+
+  const filteredLiveTraces = useMemo(() => {
+    if (sessionId) return [];
+    const q = searchText.trim().toLowerCase();
+    return activeLiveTraces.filter((tr) => {
+      if (slot !== "__all__" && tr.slot !== slot) return false;
+      if (!q) return true;
+      return (
+        tr.slot.toLowerCase().includes(q) ||
+        tr.provider.toLowerCase().includes(q) ||
+        tr.modelId.toLowerCase().includes(q) ||
+        (tr.userPreview ?? "").toLowerCase().includes(q) ||
+        (tr.progressNote ?? "").toLowerCase().includes(q) ||
+        tr.toolCalls.join(" ").toLowerCase().includes(q)
+      );
+    });
+  }, [activeLiveTraces, sessionId, slot, searchText]);
+
+  useEffect(() => {
+    if (filteredLiveTraces.length === 0) return;
+    setLiveNowMs(Date.now());
+    const timer = window.setInterval(() => setLiveNowMs(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, [filteredLiveTraces.length]);
 
   const slotOptions = useMemo(() => {
     const known = new Set(DEFAULT_SLOT_OPTIONS.map((o) => o.value));
@@ -578,10 +665,10 @@ export function TrajectoryPanel({ onToast, sessionEpoch = 0, sessionId = null }:
             variant="ghost"
             size="sm"
             className="h-7 px-2 text-xs"
-            disabled={viewState === "loading"}
-            onClick={() => void loadTraces()}
+            disabled={viewState === "loading" || refreshing}
+            onClick={() => void loadTraces(false)}
           >
-            <RefreshCw className={`size-3.5 ${viewState === "loading" ? "animate-spin" : ""}`} />
+            <RefreshCw className={`size-3.5 ${viewState === "loading" || refreshing ? "animate-spin" : ""}`} />
             刷新
           </Button>
         </div>
@@ -678,11 +765,11 @@ export function TrajectoryPanel({ onToast, sessionEpoch = 0, sessionId = null }:
             </AlertContent>
           </Alert>
         </div>
-      ) : viewState === "loading" && traces.length === 0 ? (
+      ) : viewState === "loading" && traces.length === 0 && filteredLiveTraces.length === 0 ? (
         <div className="flex flex-1 items-center justify-center text-xs text-muted-foreground">
           正在加载运行轨迹…
         </div>
-      ) : filteredTraces.length === 0 ? (
+      ) : filteredTraces.length === 0 && filteredLiveTraces.length === 0 ? (
         <div className="flex flex-1 items-center justify-center px-4 text-center text-xs text-muted-foreground">
           暂无匹配的轨迹记录。发送对话或运行浏览器任务后即可在此追踪每次调用与输出。
         </div>
@@ -690,7 +777,47 @@ export function TrajectoryPanel({ onToast, sessionEpoch = 0, sessionId = null }:
         <div className="flex min-h-0 min-w-0 max-w-full flex-1 flex-col overflow-hidden md:flex-row">
           {/* Left: High-Density Event Ledger */}
           <div className="min-h-0 min-w-0 flex-1 overflow-y-auto divide-y divide-border/50">
-            {ledgerEvents.length === 0 ? (
+            {filteredLiveTraces.map((live) => {
+              const elapsedSec = Math.max(0, Math.round((liveNowMs - live.startedAt) / 1000));
+              const recentTools = live.toolCalls.slice(-3);
+              return (
+                <div
+                  key={live.id}
+                  className="flex flex-col gap-1 bg-sky-500/5 px-3 py-2 text-xs"
+                >
+                  <div className="flex min-w-0 items-center gap-2">
+                    <span className="inline-flex h-4 shrink-0 items-center gap-1 rounded border border-sky-500/40 bg-sky-500/15 px-1.5 text-[10px] font-medium leading-none text-sky-700 dark:text-sky-300">
+                      <span className="size-1.5 animate-pulse rounded-full bg-sky-500" />
+                      运行中
+                    </span>
+                    <span className="truncate font-medium text-foreground">
+                      {live.userPreview ? singleLine(live.userPreview) : `[${live.slot}] 正在处理`}
+                    </span>
+                    <SlotBadge slot={live.slot} className="hidden h-4 px-1 text-[10px] sm:inline-flex" />
+                    <span className="ml-auto shrink-0 font-mono text-[10px] tabular-nums text-muted-foreground">
+                      {live.provider}/{live.modelId} · {elapsedSec}s
+                    </span>
+                  </div>
+                  {(live.progressNote || recentTools.length > 0 || live.steps.length > 0) && (
+                    <div className="flex flex-wrap items-center gap-1.5 pl-1 text-[11px] text-muted-foreground">
+                      {live.progressNote && <span>{live.progressNote}</span>}
+                      {recentTools.length > 0 && (
+                        <span className="inline-flex items-center gap-1 font-mono text-[10px] text-amber-600 dark:text-amber-300">
+                          <Wrench className="size-2.5" />
+                          {recentTools.join(" → ")}
+                        </span>
+                      )}
+                      {live.steps.length > 0 && (
+                        <span className="font-mono text-[10px] tabular-nums">
+                          ({live.steps.length} steps)
+                        </span>
+                      )}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+            {ledgerEvents.length === 0 && filteredLiveTraces.length === 0 ? (
               <div className="flex h-full min-h-32 items-center justify-center px-4 text-center text-xs text-muted-foreground">
                 {!showInputs && !showRecall && !showTools && !showModels
                   ? "已关闭所有事件类型过滤，请在上方开启至少一项。"

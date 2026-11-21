@@ -12,6 +12,7 @@ import type { ModelRegistry } from "../config/models.js";
 import type { ScopedProxyRouter } from "../config/proxy.js";
 import type { HatoRepository } from "../db/repo.js";
 import type { ChannelName, InboundBatch } from "../gateway/types.js";
+import type { LiveTraceTracker } from "../stats/live-trace.js";
 import { logError, logInfo, summarizeError } from "../utils/logger.js";
 import type { WorkerDispatcher } from "../worker/backend.js";
 import {
@@ -44,6 +45,7 @@ export interface TicketCoordinatorDeps {
   bus: EventBus;
   getModelRegistry?: () => ModelRegistry;
   proxyRouter?: ScopedProxyRouter;
+  liveTraceTracker?: LiveTraceTracker;
   maxConcurrentTickets?: number;
   executeSensitiveFileConfirm?: (
     canonicalUserId: string,
@@ -281,76 +283,156 @@ export class TicketCoordinator {
       referenceImagePaths?: string[];
     },
   ): Promise<void> {
+    const startPerf = performance.now();
+    const cfg = this.deps.getHatoConfig();
+    const mandate = buildDefaultMandate(cfg, ticketId);
+    mandate.workspace_dir = workspaceDir;
+
     let result: WorkerResult;
     const modelRegistry = this.deps.getModelRegistry?.();
     const proxyRouter = this.deps.proxyRouter;
     const provider = modelRegistry ? resolveImageGenProvider(modelRegistry) : null;
+    const liveTraceId = `live_image_gen_${ticketId}`;
 
-    if (!provider || !proxyRouter) {
-      result = {
-        ticket_id: ticketId,
-        status: "failed",
-        narration_hint: "未找到可用的 OpenAI 兼容图片生成供应商配置。",
-        verbatim_blocks: [],
-        artifacts: [],
-        required_secrets: [],
-        caveats: ["image_gen provider unavailable"],
-      };
-    } else {
-      try {
-        mkdirSync(workspaceDir, { recursive: true });
-        const apiKey = resolveProviderApiKey(provider);
-        const gen = await generateOpenAiImage({
-          prompt: params.prompt,
-          model: params.model,
-          size: params.size,
-          quality: params.quality,
-          n: params.n,
-          filename: params.filename,
-          referenceImagePaths: params.referenceImagePaths,
-          workspaceDir,
-          providerSlug: provider.slug,
-          baseUrl: provider.baseUrl,
-          apiKey,
-          proxyRouter,
-        });
-        if (!gen.ok) {
-          result = {
-            ticket_id: ticketId,
-            status: "failed",
-            narration_hint: `图片生成失败 (${gen.model}): ${gen.error ?? "unknown error"}`,
-            verbatim_blocks: [],
-            artifacts: [],
-            required_secrets: [],
-            caveats: gen.error ? [gen.error] : [],
-          };
-        } else {
-          result = {
-            ticket_id: ticketId,
-            status: "done",
-            narration_hint: `已完成图片生成 (${gen.providerSlug}/${gen.model})，共 ${gen.files.length} 张。`,
-            verbatim_blocks: [],
-            artifacts: gen.files.map((f) => ({
-              path: f.path,
-              filename: basename(f.path),
-              send_as: "photo" as const,
-            })),
-            required_secrets: [],
-            caveats: [],
-          };
-        }
-      } catch (err) {
+    this.deps.liveTraceTracker?.start({
+      id: liveTraceId,
+      canonicalUserId: params.canonicalUserId,
+      slot: "worker",
+      provider: provider?.slug ?? "image_gen",
+      modelId: params.model ?? "gpt-image-2",
+      api: "openai-images",
+      userPreview: `[工单 ${ticketId}] ${briefTitle}`,
+      startedAt: Date.now(),
+      progressNote: "正在生成图片",
+      toolCalls: ["image_gen"],
+    });
+
+    try {
+      if (!provider || !proxyRouter) {
         result = {
           ticket_id: ticketId,
           status: "failed",
-          narration_hint: `图片生成异常：${summarizeError(err)}`,
+          narration_hint: "未找到可用的 OpenAI 兼容图片生成供应商配置。",
           verbatim_blocks: [],
           artifacts: [],
           required_secrets: [],
-          caveats: [summarizeError(err)],
+          caveats: ["image_gen provider unavailable"],
         };
+      } else {
+        try {
+          mkdirSync(workspaceDir, { recursive: true });
+          const apiKey = resolveProviderApiKey(provider);
+          const gen = await generateOpenAiImage({
+            prompt: params.prompt,
+            model: params.model,
+            size: params.size,
+            quality: params.quality,
+            n: params.n,
+            filename: params.filename,
+            referenceImagePaths: params.referenceImagePaths,
+            workspaceDir,
+            providerSlug: provider.slug,
+            baseUrl: provider.baseUrl,
+            apiKey,
+            proxyRouter,
+          });
+          if (!gen.ok) {
+            result = {
+              ticket_id: ticketId,
+              status: "failed",
+              narration_hint: `图片生成失败 (${gen.model}): ${gen.error ?? "unknown error"}`,
+              verbatim_blocks: [],
+              artifacts: [],
+              required_secrets: [],
+              caveats: gen.error ? [gen.error] : [],
+              trace: {
+                provider: gen.providerSlug,
+                modelId: gen.model,
+                api: "openai-images",
+                inputTokens: 0,
+                outputTokens: 0,
+                cacheReadTokens: 0,
+                cacheWriteTokens: 0,
+                toolCalls: ["image_gen"],
+                steps: [
+                  {
+                    kind: "tool",
+                    step: 1,
+                    name: "image_gen",
+                    args: {
+                      prompt: params.prompt,
+                      model: gen.model,
+                      referenceImagePaths: params.referenceImagePaths,
+                    },
+                    output: `图片生成失败 (${gen.model}): ${gen.error ?? "unknown error"}`,
+                    isError: true,
+                  },
+                ],
+              },
+            };
+          } else {
+            result = {
+              ticket_id: ticketId,
+              status: "done",
+              narration_hint: `已完成图片生成 (${gen.providerSlug}/${gen.model})，共 ${gen.files.length} 张。`,
+              verbatim_blocks: [],
+              artifacts: gen.files.map((f) => ({
+                path: f.path,
+                filename: basename(f.path),
+                send_as: "photo" as const,
+              })),
+              required_secrets: [],
+              caveats: [],
+              trace: {
+                provider: gen.providerSlug,
+                modelId: gen.model,
+                api: "openai-images",
+                inputTokens: 0,
+                outputTokens: 0,
+                cacheReadTokens: 0,
+                cacheWriteTokens: 0,
+                toolCalls: ["image_gen"],
+                steps: [
+                  {
+                    kind: "tool",
+                    step: 1,
+                    name: "image_gen",
+                    args: {
+                      prompt: params.prompt,
+                      model: gen.model,
+                      referenceImagePaths: params.referenceImagePaths,
+                    },
+                    output: `已完成图片生成 (${gen.providerSlug}/${gen.model})，产物: ${gen.files.map((f) => f.path).join(", ")}`,
+                  },
+                ],
+              },
+            };
+          }
+        } catch (err) {
+          result = {
+            ticket_id: ticketId,
+            status: "failed",
+            narration_hint: `图片生成异常：${summarizeError(err)}`,
+            verbatim_blocks: [],
+            artifacts: [],
+            required_secrets: [],
+            caveats: [summarizeError(err)],
+          };
+        }
       }
+    } finally {
+      this.deps.liveTraceTracker?.finish(liveTraceId);
     }
+
+    this.recordWorkerTrace({
+      ticketId,
+      canonicalUserId: params.canonicalUserId,
+      backend: "builtin-pi",
+      briefTitle,
+      mandate,
+      result,
+      latencyMs: Math.max(1, Math.round(performance.now() - startPerf)),
+    });
 
     await this.handleWorkerOutcome(
       ticketId,
@@ -784,16 +866,30 @@ export class TicketCoordinator {
     }
     const outputText = outputParts.filter(Boolean).join("\n\n").trim();
 
+    const workerTrace = params.result.trace;
+    const steps =
+      workerTrace && workerTrace.steps.length > 0
+        ? workerTrace.steps
+        : [
+            {
+              step: 1,
+              kind: "assistant" as const,
+              text: outputText || `status=${params.result.status}`,
+              stopReason: params.result.status === "failed" ? "error" : "stop",
+              toolCalls: [],
+            },
+          ];
+
     this.deps.repo.insertTurnTrace({
       canonicalUserId: params.canonicalUserId,
       slot: "worker",
-      provider: params.backend,
-      modelId: params.ticketId,
-      api: "worker-cli",
-      inputTokens: 0,
-      outputTokens: 0,
-      cacheReadTokens: 0,
-      cacheWriteTokens: 0,
+      provider: workerTrace?.provider ?? params.backend,
+      modelId: workerTrace?.modelId ?? params.ticketId,
+      api: workerTrace?.api ?? "worker-cli",
+      inputTokens: workerTrace?.inputTokens ?? 0,
+      outputTokens: workerTrace?.outputTokens ?? 0,
+      cacheReadTokens: workerTrace?.cacheReadTokens ?? 0,
+      cacheWriteTokens: workerTrace?.cacheWriteTokens ?? 0,
       cacheHitRate: 0,
       ttftMs: null,
       tps: null,
@@ -812,16 +908,8 @@ export class TicketCoordinator {
       ]
         .filter(Boolean)
         .join("\n"),
-      toolCalls: [],
-      steps: [
-        {
-          step: 1,
-          kind: "assistant",
-          text: outputText || `status=${params.result.status}`,
-          stopReason: params.result.status === "failed" ? "error" : "stop",
-          toolCalls: [],
-        },
-      ],
+      toolCalls: workerTrace?.toolCalls ?? [],
+      steps,
       latencyMs: params.latencyMs,
     });
   }
@@ -833,10 +921,11 @@ export class TicketCoordinator {
     briefTitle: string,
     result: WorkerResult,
   ): Promise<void> {
+    const { trace: _trace, ...persistedResult } = result;
     this.deps.repo.updateTicket(ticketId, {
       status: result.status,
       progressNote: result.narration_hint.slice(0, 120),
-      resultJson: JSON.stringify(result),
+      resultJson: JSON.stringify(persistedResult),
     });
 
     if (result.status === "needs_input") {

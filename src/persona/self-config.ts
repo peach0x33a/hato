@@ -95,12 +95,14 @@ export interface SelfConfigDeps {
   getModelRegistry: () => ModelRegistry;
   repo: HatoRepository;
   onReloadRuntime: () => Promise<void>;
+  onThinkingUpdated?: (slot: string, effectiveLevel: string) => void;
 }
 
 export type SelfConfigAction =
   | "inspect"
   | "patch_hato"
   | "set_model_slot"
+  | "set_thinking_level"
   | "edit_soul"
   | "upsert_prompt_block"
   | "delete_prompt_block"
@@ -112,6 +114,7 @@ export interface SelfConfigInput {
   config_patch?: Record<string, unknown>;
   slot?: string;
   target?: string;
+  thinking_level?: string;
   content?: string;
   append_note?: string;
   block_name?: string;
@@ -183,6 +186,8 @@ export async function runSelfConfigAction(
         slot: s.slot,
         target: s.target,
         api: String(s.model.api),
+        reasoning: Boolean(s.model.reasoning),
+        thinking_level: registry.resolveSlotThinkingLevel(s.slot),
       })),
       available_models: registry.listTargets(),
       prompts: {
@@ -262,6 +267,26 @@ export async function runSelfConfigAction(
       ok: true,
       summary: `已热切换槽位 ${updated.slot} -> ${updated.target} (${String(updated.model.api)})。`,
       details: { ok: true, slot: updated.slot, target: updated.target },
+    };
+  }
+
+  if (input.action === "set_thinking_level") {
+    const slot = input.slot?.trim() || "persona";
+    const level = input.thinking_level?.trim() ?? "";
+    if (!level) {
+      return {
+        ok: false,
+        summary: "set_thinking_level 需要提供 thinking_level（auto/off/minimal/low/medium/high/xhigh/max）。",
+        details: { ok: false },
+      };
+    }
+    const updated = registry.setSlotThinkingOverride(slot, level === "auto" ? null : level);
+    deps.onThinkingUpdated?.(updated.slot, updated.effective);
+    logInfo("SELF_CONFIG", `set thinking level ${updated.slot} -> ${updated.effective} (requested=${updated.requested ?? "auto"})`);
+    return {
+      ok: true,
+      summary: `已设置槽位 ${updated.slot} 思考强度为 ${updated.effective}（请求=${updated.requested ?? "auto"}）。`,
+      details: { ok: true, ...updated },
     };
   }
 

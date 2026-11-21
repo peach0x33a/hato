@@ -5,7 +5,7 @@ import { resolveGatewayRetryConfig, type HatoConfig } from "../config/app.js";
 import type { ScopedProxyRouter } from "../config/proxy.js";
 import { logError, logInfo, logWarn, summarizeError } from "../utils/logger.js";
 import { retryWithBackoff } from "../utils/retry.js";
-import { convertBufferToModelImage, saveInboundMediaBuffer } from "./media.js";
+import { convertBufferToModelImage, detectMediaMimeType, saveInboundMediaBuffer } from "./media.js";
 import { formatGatewayMessageLog } from "./msg-log.js";
 import {
   QQ_INTENT_GROUP_AND_C2C,
@@ -741,9 +741,11 @@ export class QqAdapter implements ChannelAdapter {
     }
 
     for (const att of evt.attachments ?? []) {
-      const isImage = Boolean(att.content_type?.startsWith("image/"));
+      const isImageByMeta =
+        Boolean(att.content_type?.startsWith("image/")) ||
+        /\.(png|jpe?g|webp|gif|bmp)$/i.test(att.filename ?? "");
       const item: InboundAttachment = {
-        kind: isImage ? "image" : "file",
+        kind: isImageByMeta ? "image" : "file",
         filename: att.filename,
         mimeType: att.content_type,
       };
@@ -778,7 +780,13 @@ export class QqAdapter implements ChannelAdapter {
         const filenameHint = inferExtensionFromContentType(att.content_type, att.filename);
         item.localPath = saveInboundMediaBuffer(dataDir, buf, filenameHint);
 
+        const detectedMime = detectMediaMimeType(buf, filenameHint);
+        const isImage = isImageByMeta || Boolean(detectedMime?.startsWith("image/"));
         if (isImage) {
+          item.kind = "image";
+          if (detectedMime) {
+            item.mimeType = detectedMime;
+          }
           const converted = await convertBufferToModelImage({
             buffer: buf,
             filePath: filenameHint,
@@ -805,7 +813,7 @@ export class QqAdapter implements ChannelAdapter {
       } catch (err) {
         logWarn(
           "QQ",
-          `failed to download inbound ${isImage ? "image" : "file"} ${att.filename ?? ""}: ${summarizeError(err)}`,
+          `failed to download inbound ${isImageByMeta ? "image" : "file"} ${att.filename ?? ""}: ${summarizeError(err)}`,
         );
       }
     }

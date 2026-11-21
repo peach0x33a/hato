@@ -153,7 +153,13 @@ export function rawRecordToAgentMessage(row: RawMessageRecord, repo?: HatoReposi
   }
 
   const attachmentNotes = row.attachments
-    .map((att) => (att.summary ? `[附件 ${att.kind}: ${att.summary}]` : `[附件 ${att.kind}${att.filename ? `: ${att.filename}` : ""}]`))
+    .map((att) => {
+      const pathSuffix = att.localPath ? ` (path: ${att.localPath})` : "";
+      if (att.summary) {
+        return `[附件 ${att.kind}: ${att.summary}${pathSuffix}]`;
+      }
+      return `[附件 ${att.kind}${att.filename ? `: ${att.filename}` : ""}${pathSuffix}]`;
+    })
     .join("\n");
 
   const combinedText = [replyToSummary, row.content, attachmentNotes].filter(Boolean).join("\n");

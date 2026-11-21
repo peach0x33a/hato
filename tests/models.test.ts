@@ -294,3 +294,73 @@ input = ["text", "image"]
     rmSync(tempDir, { recursive: true, force: true });
   }
 });
+
+test("ModelRegistry supports [slot_thinking], slot defaults/clamping, and persisted runtime thinking overrides", () => {
+  const tempDir = mkdtempSync(join(tmpdir(), "hato-models-thinking-"));
+  const modelsToml = join(tempDir, "models.toml");
+  const dbHandle = openDatabase(":memory:");
+  try {
+    const repo = new HatoRepository(dbHandle.db);
+    writeFileSync(
+      modelsToml,
+      `
+[slots]
+persona = "relay/reasoning-model"
+router = "relay/reasoning-model"
+curator = "relay/reasoning-model"
+worker = "relay/reasoning-model"
+hindsight_llm = "relay/plain-model"
+
+[slot_thinking]
+persona = "high"
+worker = "medium"
+hindsight_llm = "high"
+
+[providers.relay]
+api = "openai-completions"
+base_url = "https://relay.example.com/v1"
+
+[[providers.relay.models]]
+id = "reasoning-model"
+name = "Reasoning Model"
+reasoning = true
+
+[[providers.relay.models]]
+id = "plain-model"
+name = "Plain Model"
+reasoning = false
+`,
+      "utf8",
+    );
+
+    const registry = new ModelRegistry(modelsToml, repo);
+    assert.equal(registry.resolveSlotThinkingLevel("persona"), "high");
+    assert.equal(registry.resolveSlotThinkingLevel("worker"), "medium");
+    assert.equal(registry.resolveSlotThinkingLevel("router"), "minimal");
+    assert.equal(registry.resolveSlotThinkingLevel("curator"), "minimal");
+    assert.equal(registry.resolveSlotThinkingLevel("hindsight_llm"), "off");
+
+    const updated = registry.setSlotThinkingOverride("persona", "low");
+    assert.deepEqual(updated, {
+      slot: "persona",
+      requested: "low",
+      effective: "low",
+      reasoningSupported: true,
+    });
+    assert.equal(registry.resolveSlotThinkingLevel("persona"), "low");
+    assert.equal(registry.getEffectiveSlotThinkingMap().persona, "low");
+
+    // Overrides persist across ModelRegistry reload/re-instantiation via runtime_settings
+    const reloadedRegistry = new ModelRegistry(modelsToml, repo);
+    assert.equal(reloadedRegistry.resolveSlotThinkingLevel("persona"), "low");
+
+    reloadedRegistry.clearSlotThinkingOverrides();
+    assert.equal(reloadedRegistry.resolveSlotThinkingLevel("persona"), "high");
+
+    assert.throws(() => reloadedRegistry.setSlotThinkingOverride("unknown_slot", "high"), /Unknown slot/);
+    assert.throws(() => reloadedRegistry.setSlotThinkingOverride("persona", "invalid_level"), /Invalid thinking level/);
+  } finally {
+    dbHandle.close();
+    rmSync(tempDir, { recursive: true, force: true });
+  }
+});

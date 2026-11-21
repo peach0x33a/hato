@@ -1,6 +1,7 @@
 import {
   Activity,
   Bot,
+  Brain,
   Compass,
   Database,
   History,
@@ -18,8 +19,10 @@ import {
   api,
   type ChatSessionRecord,
   type ChatSseEvent,
+  type LiveTraceSnapshot,
   type SlotView,
   type StoredMessageRecord,
+  type ThinkingLevel,
   type TicketSummary,
   type TurnTelemetry,
   type TurnTraceRecord,
@@ -38,7 +41,7 @@ import {
   MessageScroller,
 } from "@/components/agents/message";
 import { PromptInput } from "@/components/agents/prompt-input";
-import { ApiBadge, SlotBadge } from "@/components/console/ConsolePrimitives";
+import { ApiBadge, ConsoleSelect, SlotBadge } from "@/components/console/ConsolePrimitives";
 import { useDismiss } from "@/lib/hooks/use-dismiss";
 import { MarkdownContent } from "@/components/console/MarkdownContent";
 import { StaticsPanel } from "@/components/console/StaticsPanel";
@@ -191,9 +194,13 @@ export function ChatPanel({
   const [latestTrace, setLatestTrace] = useState<TurnTraceRecord | null>(null);
   const [traceLoading, setTraceLoading] = useState(false);
   const [slashBusy, setSlashBusy] = useState(false);
+  const [savingThinking, setSavingThinking] = useState(false);
   const [activeTickets, setActiveTickets] = useState<TicketSummary[]>([]);
+  const [liveTraces, setLiveTraces] = useState<LiveTraceSnapshot[]>([]);
   const [ticketActionBusy, setTicketActionBusy] = useState<string | null>(null);
   const prevActiveCountRef = useRef(0);
+  const streamingRef = useRef(false);
+  streamingRef.current = streaming;
   const abortRef = useRef<AbortController | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const traceRef = useRef<HTMLDivElement | null>(null);
@@ -224,6 +231,27 @@ export function ChatPanel({
     [slots],
   );
 
+  const handleChangePersonaThinking = async (next: string) => {
+    if (savingThinking) return;
+    setSavingThinking(true);
+    try {
+      const res = await api.setSlotThinking("persona", next as ThinkingLevel | "auto");
+      setSlots(res.slots);
+      onToast({
+        title: `主对话思考强度已设为 ${res.effective}`,
+        status: "success",
+      });
+    } catch (err) {
+      onToast({
+        title: "切换思考强度失败",
+        description: err instanceof Error ? err.message : String(err),
+        status: "error",
+      });
+    } finally {
+      setSavingThinking(false);
+    }
+  };
+
   const loadHistory = async (targetSessionId = selectedSessionId) => {
     setHistoryState("loading");
     setHistoryError("");
@@ -246,7 +274,7 @@ export function ChatPanel({
     }
   };
 
-  const syncTicketsAndHistory = async (targetSessionId = selectedSessionId) => {
+  const syncTicketsAndHistory = async (targetSessionId = selectedSessionId, forceHistory = false) => {
     if (targetSessionId) return;
     try {
       const ticketRes = await api.getTickets();
@@ -255,7 +283,7 @@ export function ChatPanel({
       prevActiveCountRef.current = nextActive.length;
       setActiveTickets(nextActive);
 
-      if (nextActive.length > 0 || hadActive) {
+      if (forceHistory || nextActive.length > 0 || hadActive) {
         const h = await api.getChatHistory(null);
         setItems((prev) => mergeStoredWithLocalImages(mapStoredToUi(h.messages), prev));
         setSlots(h.slots);
@@ -270,14 +298,43 @@ export function ChatPanel({
     }
   };
 
+  const syncTicketsAndHistoryRef = useRef(syncTicketsAndHistory);
+  syncTicketsAndHistoryRef.current = syncTicketsAndHistory;
+
   useEffect(() => {
     void loadHistory(selectedSessionId);
     if (!selectedSessionId) {
       void syncTicketsAndHistory(null);
     } else {
       setActiveTickets([]);
+      setLiveTraces([]);
       prevActiveCountRef.current = 0;
     }
+  }, [selectedSessionId]);
+
+  useEffect(() => {
+    if (selectedSessionId) return;
+    let refreshTimer: number | null = null;
+    const unsubscribe = api.subscribeTraceStream((evt) => {
+      if (evt.type === "snapshot" || evt.type === "active_update") {
+        setLiveTraces(evt.active);
+        if (evt.active.some((item) => item.slot === "worker")) {
+          void syncTicketsAndHistoryRef.current(null);
+        }
+      } else if (evt.type === "trace_inserted") {
+        if (refreshTimer !== null) window.clearTimeout(refreshTimer);
+        refreshTimer = window.setTimeout(() => {
+          setSessionEpoch((n) => n + 1);
+          if (!streamingRef.current) {
+            void syncTicketsAndHistoryRef.current(null, true);
+          }
+        }, 250);
+      }
+    });
+    return () => {
+      if (refreshTimer !== null) window.clearTimeout(refreshTimer);
+      unsubscribe();
+    };
   }, [selectedSessionId]);
 
   useEffect(() => {
@@ -575,6 +632,28 @@ export function ChatPanel({
                 {personaSlot.target}
               </span>
               <ApiBadge api={personaSlot.api} />
+              {!readonlySession && personaSlot.reasoning && (
+                <div className="flex items-center gap-1" title="主对话模型思考强度">
+                  <Brain className="size-3.5 shrink-0 text-sky-600 dark:text-sky-400" />
+                  <ConsoleSelect
+                    size="sm"
+                    disabled={savingThinking}
+                    value={personaSlot.thinkingLevel ?? "medium"}
+                    onValueChange={(next) => void handleChangePersonaThinking(next)}
+                    options={[
+                      { value: "off", label: "off (关闭)" },
+                      { value: "minimal", label: "minimal" },
+                      { value: "low", label: "low" },
+                      { value: "medium", label: "medium" },
+                      { value: "high", label: "high" },
+                      { value: "xhigh", label: "xhigh" },
+                      { value: "max", label: "max" },
+                      { value: "auto", label: "恢复默认" },
+                    ]}
+                    triggerClassName="h-6 min-w-[92px] border-border/70 bg-muted/40 px-2 py-0 text-[11px]"
+                  />
+                </div>
+              )}
             </div>
           )}
           {pendingTakeover && (
@@ -1172,6 +1251,7 @@ export function ChatPanel({
             onToast={onToast}
             sessionEpoch={sessionEpoch}
             sessionId={selectedSessionId}
+            liveTraces={liveTraces}
           />
         )}
       </TabsContent>

@@ -135,6 +135,7 @@ const SelfConfigParams = obj({
     "inspect",
     "patch_hato",
     "set_model_slot",
+    "set_thinking_level",
     "edit_soul",
     "upsert_prompt_block",
     "delete_prompt_block",
@@ -147,13 +148,38 @@ const SelfConfigParams = obj({
         "JSON object string for patch_hato, e.g. '{\"gateway\":{\"debounce_ms\":2500}}' or '{\"prompts\":{\"order\":[\"soul\",\"system\",\"blocks\"]}}'",
     }),
   ),
-  slot: opt(str({ description: "Model slot name for set_model_slot (persona/router/curator/worker/hindsight_llm)" })),
+  slot: opt(str({ description: "Model slot name for set_model_slot / set_thinking_level (persona/router/curator/worker/hindsight_llm/vision)" })),
   target: opt(str({ description: "Qualified model target <provider>/<model_id> for set_model_slot" })),
+  thinking_level: opt(
+    str({
+      description:
+        "Thinking intensity for set_thinking_level (auto/off/minimal/low/medium/high/xhigh/max)",
+    }),
+  ),
   content: opt(str({ description: "Full text content for edit_soul or upsert_prompt_block" })),
   append_note: opt(str({ description: "Single new rule/note line to append to soul.md in edit_soul" })),
   block_name: opt(str({ description: "Block filename under blocks/ for upsert_prompt_block or delete_prompt_block (e.g. 02-rules.md)" })),
   fact_key: opt(str({ description: "Key name for set_relationship_fact or delete_relationship_fact" })),
   fact_value: opt(str({ description: "Value text for set_relationship_fact" })),
+});
+
+const SetThinkingLevelParams = obj({
+  level: oneOf(["auto", "off", "minimal", "low", "medium", "high", "xhigh", "max"], {
+    description:
+      "Desired thinking/reasoning intensity. Use 'high'/'medium' for complex multi-step planning or debugging, 'low'/'minimal' for quick casual chat, or 'auto' to revert to default.",
+  }),
+  slot: opt(
+    oneOf(["persona", "worker", "router", "curator", "hindsight_llm", "vision"], {
+      description: "Target model slot (defaults to 'persona')",
+    }),
+  ),
+  scope: opt(
+    oneOf(["persist", "turn"], {
+      description:
+        "Whether to persist across turns ('persist', default) or apply only to the current turn ('turn', persona slot only)",
+    }),
+  ),
+  reason: opt(str({ description: "Optional brief reason for adjusting thinking intensity" })),
 });
 
 const ReadSkillParams = obj({
@@ -198,7 +224,12 @@ const ImageGenParams = obj({
   n: opt(num({ description: "Optional number of images (1-4), defaults to 1" })),
   filename: opt(str({ description: "Optional output filename, e.g. drawing.png" })),
   reference_image_paths: opt(
-    arr(str({ description: "Optional local reference image path(s) for image editing/reference generation" })),
+    arr(
+      str({
+        description:
+          "Optional local reference image path(s) for image editing/reference generation (pass `(path: ...)` from conversation attachments or known local paths directly)",
+      }),
+    ),
   ),
   deliver_files: opt(
     bool({
@@ -356,6 +387,19 @@ export function createPersonaReadOnlyTools(params: {
     theme?: "light" | "dark";
     caption?: string;
   }) => Promise<{ ok: boolean; message: string; bytes?: number }>;
+  onSetThinkingLevel?: (input: {
+    level: string;
+    slot?: string;
+    scope?: "persist" | "turn";
+    reason?: string;
+  }) => {
+    ok: boolean;
+    slot: string;
+    requested: string;
+    effective: string;
+    scope: "persist" | "turn";
+    reasoningSupported: boolean;
+  };
   onMemoryRecalled?: (ids: string[]) => void;
   onBeforeToolExecute?: (toolName: string, input: unknown) => Promise<void>;
 }): AgentTool<any>[] {
@@ -932,6 +976,7 @@ export function createPersonaReadOnlyTools(params: {
             config_patch: parsedPatch,
             slot: input.slot,
             target: input.target,
+            thinking_level: input.thinking_level,
             content: input.content,
             append_note: input.append_note,
             block_name: input.block_name,
@@ -1360,6 +1405,38 @@ export function createPersonaReadOnlyTools(params: {
       },
     };
     tools.push(renderTool);
+  }
+
+  if (params.onSetThinkingLevel) {
+    const setThinkingFn = params.onSetThinkingLevel;
+    const setThinkingTool: AgentTool<typeof SetThinkingLevelParams> = {
+      name: "set_thinking_level",
+      label: "Set Thinking Level",
+      description:
+        "Adjust your own (or another model slot's) reasoning/thinking intensity (`off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`, or `auto`). Use `scope: \"turn\"` to boost thinking immediately on the next step for hard problems, or `scope: \"persist\"` to persist across turns.",
+      parameters: SetThinkingLevelParams,
+      async execute(_toolCallId, input) {
+        const res = setThinkingFn({
+          level: input.level,
+          slot: input.slot,
+          scope: input.scope,
+          reason: input.reason,
+        });
+        const suffix = !res.reasoningSupported
+          ? "（注意：当前所选模型不支持推理控制，已自动回退为 off）"
+          : "";
+        return {
+          content: [
+            {
+              type: "text",
+              text: `已调整 ${res.slot} 思考强度为 ${res.effective}（requested=${res.requested}, scope=${res.scope}）${suffix}`,
+            },
+          ],
+          details: res,
+        };
+      },
+    };
+    tools.push(setThinkingTool);
   }
 
   if (params.extraTools && params.extraTools.length > 0) {

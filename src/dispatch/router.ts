@@ -233,6 +233,7 @@ export class NeutralRouter {
       `llm-calling.${resolved.model.provider}`,
       async () => {
         const scopedFetch = this.deps.proxyRouter.createScopedFetch(`llm-calling.${resolved.model.provider}`);
+        const thinkingLevel = this.deps.modelRegistry.resolveSlotThinkingLevel("router");
         const stream = streamSimpleWithRetry(
           () =>
             this.deps.modelRegistry.models.streamSimple(
@@ -242,7 +243,7 @@ export class NeutralRouter {
                 apiKey: this.deps.modelRegistry.resolveApiKeyForProvider(resolved.model.provider),
                 disableContinuation: true,
                 ...(supportsCustomFetchOption(resolved.model.api) ? { fetch: scopedFetch } : {}),
-                reasoning: resolved.model.reasoning ? "minimal" : undefined,
+                reasoning: thinkingLevel === "off" ? undefined : thinkingLevel,
               },
             ),
           {

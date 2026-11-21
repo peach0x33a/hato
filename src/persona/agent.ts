@@ -8,6 +8,7 @@ import {
   type AssistantMessage,
   type ImageContent,
   type Message,
+  type ModelThinkingLevel,
   type Usage,
 } from "@earendil-works/pi-ai";
 import type { BrowserRuntime, SendPhotoToUserFn } from "../browser/runtime.js";
@@ -30,13 +31,19 @@ import {
   loadZoneSkills,
   type SkillEntry,
 } from "../skills/loader.js";
-import { computeTurnMetrics, extractTraceSteps, formatLlmTelemetryLog } from "../stats/metrics.js";
+import {
+  aggregateAssistantTraceMetrics,
+  computeTurnMetrics,
+  extractTraceSteps,
+  formatLlmTelemetryLog,
+} from "../stats/metrics.js";
+import type { LiveTraceTracker } from "../stats/live-trace.js";
 import {
   formatLlmRetryNotice,
   streamSimpleWithRetry,
   type LlmRetryNotice,
 } from "../utils/llm-retry.js";
-import { logWarn } from "../utils/logger.js";
+import { logWarn, summarizeError } from "../utils/logger.js";
 import { joinPersistedBubbles, splitIntoBubbles } from "./bubbles.js";
 import {
   buildEphemeralContextBlock,
@@ -111,8 +118,11 @@ export class PersonaRuntime {
   private activeTurnRecalledMemories: MemoryRecallItem[] = [];
   private activeTurnRecalledIds = new Set<string>();
   private activeTurn: ActivePersonaTurnState | null = null;
+  private liveTraceTracker: LiveTraceTracker | null = null;
   private readonly pendingSupersededImages = new Map<string, ImageContent[]>();
   private reloadHandler: (() => Promise<void>) | null = null;
+  private syncedCompactedUntilTs = 0;
+  private pendingTranscriptRefresh = false;
   private delegateHandler:
     | ((input: {
         canonicalUserId: string;
@@ -206,6 +216,9 @@ export class PersonaRuntime {
       hasPersonalSkills: this.personalSkills.length > 0,
     });
 
+    const initialHistory = hydrateTranscriptFromDb(this.repo, canonicalUserId);
+    this.syncedCompactedUntilTs = this.repo.getWorkingMemory(canonicalUserId).compactedUntilTs;
+
     this.agent = new Agent({
       initialState: {
         systemPrompt: buildStaticSystemPrompt(
@@ -215,9 +228,9 @@ export class PersonaRuntime {
           this.toolIndexText,
         ),
         model: resolved.model,
-        thinkingLevel: clampThinkingLevel(resolved.model, resolved.model.reasoning ? "low" : "off"),
+        thinkingLevel: this.modelRegistry.resolveSlotThinkingLevel("persona"),
         tools,
-        messages: hydrateTranscriptFromDb(this.repo, canonicalUserId),
+        messages: initialHistory,
       },
       steeringMode: "all",
       sessionId: canonicalUserId,
@@ -266,6 +279,13 @@ export class PersonaRuntime {
           },
         ];
       },
+      prepareNextTurnWithContext: (lastTurn) => ({
+        context: {
+          ...lastTurn.context,
+          tools: this.agent.state.tools.slice(),
+        },
+        thinkingLevel: this.agent.state.thinkingLevel,
+      }),
       convertToLlm: (messages) => {
         return convertHatoMessagesToLlm(messages, {
           getTimezone: () => this.getEffectiveTimezone(canonicalUserId),
@@ -286,6 +306,8 @@ export class PersonaRuntime {
     if (!this.activeTurn) {
       this.syncTools();
       this.refreshTranscriptFromDb();
+    } else {
+      this.pendingTranscriptRefresh = true;
     }
   }
 
@@ -432,6 +454,10 @@ export class PersonaRuntime {
     this.memoryStore = nextMemoryStore;
   }
 
+  setLiveTraceTracker(tracker: LiveTraceTracker | null): void {
+    this.liveTraceTracker = tracker;
+  }
+
   reloadPrompt(): void {
     this.layeredPrompts = loadLayeredPrompts(
       this.hatoConfig.paths.prompts_dir,
@@ -450,6 +476,7 @@ export class PersonaRuntime {
       allTools: this.allTools,
       userText: "",
       hasPersonalSkills: this.personalSkills.length > 0,
+      previouslyActivated: this.sessionTools,
     });
   }
 
@@ -483,6 +510,65 @@ export class PersonaRuntime {
     );
     const history = hydrateTranscriptFromDb(this.repo, canonicalUserId);
     this.agent.state.messages = leadingSystem ? [leadingSystem, ...history] : history;
+    this.syncedCompactedUntilTs = this.repo.getWorkingMemory(canonicalUserId).compactedUntilTs;
+    this.pendingTranscriptRefresh = false;
+  }
+
+  private syncTranscriptIfDrifted(canonicalUserId: string): void {
+    const wm = this.repo.getWorkingMemory(canonicalUserId);
+    if (wm.compactedUntilTs !== this.syncedCompactedUntilTs) {
+      this.refreshTranscriptFromDb();
+    }
+  }
+
+  private pruneTurnPayloadBloat(): void {
+    const messages = this.agent.state.messages;
+    if (messages.length === 0) return;
+
+    let changed = false;
+    const pruned = messages.map((msg): AgentMessage => {
+      if (msg.role === "hato_user_batch") {
+        if (msg.images.length > 0) {
+          changed = true;
+          return { ...msg, images: [] };
+        }
+        return msg;
+      }
+
+      if (msg.role === "user" && Array.isArray(msg.content)) {
+        const hasImage = msg.content.some((part) => part.type === "image");
+        if (!hasImage) return msg;
+        changed = true;
+        const filtered = msg.content.filter((part) => part.type !== "image");
+        return {
+          ...msg,
+          content:
+            filtered.length > 0
+              ? filtered
+              : [{ type: "text", text: "[历史图片内容已省略]" }],
+        };
+      }
+
+      if (msg.role === "toolResult" && Array.isArray(msg.content)) {
+        const hasImage = msg.content.some((part) => part.type === "image");
+        if (!hasImage) return msg;
+        changed = true;
+        const filtered = msg.content.filter((part) => part.type !== "image");
+        return {
+          ...msg,
+          content:
+            filtered.length > 0
+              ? filtered
+              : [{ type: "text", text: "[工具返回的历史图片已省略]" }],
+        };
+      }
+
+      return msg;
+    });
+
+    if (changed) {
+      this.agent.state.messages = pruned;
+    }
   }
 
   private buildPersonaTools(): AgentTool<any>[] {
@@ -675,7 +761,15 @@ export class PersonaRuntime {
         getHatoConfig: () => this.hatoConfig,
         getModelRegistry: () => this.modelRegistry,
         repo: this.repo,
+        onThinkingUpdated: (slot, effectiveLevel) => {
+          if (slot === "persona") {
+            this.agent.state.thinkingLevel = effectiveLevel as ModelThinkingLevel;
+          }
+        },
         onReloadRuntime: async () => {
+          if (this.activeTurn) {
+            this.pendingTranscriptRefresh = true;
+          }
           if (this.reloadHandler) {
             await this.reloadHandler();
           } else {
@@ -686,6 +780,42 @@ export class PersonaRuntime {
             }
           }
         },
+      },
+      onSetThinkingLevel: (input) => {
+        const targetSlot = input.slot ?? "persona";
+        const scope: "persist" | "turn" =
+          input.scope === "turn" && targetSlot === "persona" ? "turn" : "persist";
+        if (scope === "turn") {
+          const resolved = this.modelRegistry.resolveSlot("persona");
+          const effective = this.modelRegistry.resolveSlotThinkingLevel(
+            "persona",
+            input.level === "auto" ? undefined : (input.level as ModelThinkingLevel),
+          );
+          this.agent.state.thinkingLevel = effective;
+          return {
+            ok: true,
+            slot: "persona",
+            requested: input.level,
+            effective,
+            scope: "turn",
+            reasoningSupported: Boolean(resolved.model.reasoning),
+          };
+        }
+        const updated = this.modelRegistry.setSlotThinkingOverride(
+          targetSlot,
+          input.level === "auto" ? null : input.level,
+        );
+        if (updated.slot === "persona") {
+          this.agent.state.thinkingLevel = updated.effective;
+        }
+        return {
+          ok: true,
+          slot: updated.slot,
+          requested: input.level,
+          effective: updated.effective,
+          scope: "persist",
+          reasoningSupported: updated.reasoningSupported,
+        };
       },
       onMemoryRecalled: (ids) => {
         for (const id of ids) this.activeTurnRecalledIds.add(id);
@@ -793,10 +923,8 @@ export class PersonaRuntime {
     this.activeTurnOriginChannel = batch.originChannel;
     const resolved = this.modelRegistry.resolveSlot("persona");
     this.agent.state.model = resolved.model;
-    this.agent.state.thinkingLevel = clampThinkingLevel(
-      resolved.model,
-      resolved.model.reasoning ? "low" : "off",
-    );
+    this.agent.state.thinkingLevel = this.modelRegistry.resolveSlotThinkingLevel("persona");
+    this.syncTranscriptIfDrifted(canonicalUserId);
 
     const wmState = this.repo.getWorkingMemory(canonicalUserId);
     const userCreatedAt = Math.max(
@@ -840,10 +968,8 @@ export class PersonaRuntime {
 
     const startIndex = this.agent.state.messages.length;
     const turnStartPerf = performance.now();
-    let turnFirstDeltaPerf: number | null = null;
-    let msgStartPerf = turnStartPerf;
-    let msgFirstDeltaPerf: number | null = null;
-    let totalDecodeMs = 0;
+    const userPreview = batch.combinedText.replace(/\s+/g, " ").trim().slice(0, 60) || null;
+    const liveTraceId = `live_persona_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
 
     const preReplyState: {
       latestToolUseMsg: AssistantMessage | null;
@@ -866,51 +992,44 @@ export class PersonaRuntime {
         }
       : undefined;
 
-    const unsubscribe = this.agent.subscribe((ev) => {
-      if (ev.type === "message_start" && ev.message.role === "assistant") {
-        msgStartPerf = this.activeCallStartPerf ?? performance.now();
-        msgFirstDeltaPerf = null;
-        return;
-      }
+    this.liveTraceTracker?.start({
+      id: liveTraceId,
+      canonicalUserId,
+      slot: "persona",
+      provider: resolved.providerSlug,
+      modelId: resolved.model.id,
+      api: String(resolved.model.api),
+      userPreview,
+      startedAt: Date.now(),
+      progressNote: "思考与生成回复中",
+    });
 
-      if (ev.type === "message_update") {
-        const sub = ev.assistantMessageEvent;
-        const hasDelta =
-          (sub.type === "text_delta" || sub.type === "thinking_delta" || sub.type === "toolcall_delta") &&
-          sub.delta.length > 0;
-        if (hasDelta) {
-          const nowPerf = performance.now();
-          if (turnFirstDeltaPerf === null) turnFirstDeltaPerf = nowPerf;
-          if (msgFirstDeltaPerf === null) msgFirstDeltaPerf = nowPerf;
-        }
-        return;
-      }
-
-      if (ev.type === "tool_execution_start") {
+    const telemetry = this.subscribeTurnTelemetry({
+      startIndex,
+      turnStartPerf,
+      liveTraceId,
+      onToolStart: () => {
         turnState.hasToolActivity = true;
-        return;
-      }
-
-      if (ev.type === "tool_execution_end" && ev.toolName === "send_sticker" && !ev.isError) {
-        const resObj =
-          ev.result && typeof ev.result === "object"
-            ? (ev.result as {
-                details?: { ok?: boolean; stickerId?: string };
-                content?: Array<{ type?: string; text?: string }>;
-              })
-            : undefined;
-        if (resObj?.details?.ok) {
-          const textBlock = Array.isArray(resObj.content)
-            ? (resObj.content.find((c) => c.type === "text")?.text ?? "")
-            : "";
-          const note = textBlock.trim() || `已发送表情包 ${resObj.details.stickerId ?? ""}`.trim();
-          sentMediaNotes.push(`[${note}]`);
+      },
+      onToolEnd: (toolName, isError, result) => {
+        if (toolName === "send_sticker" && !isError) {
+          const resObj =
+            result && typeof result === "object"
+              ? (result as {
+                  details?: { ok?: boolean; stickerId?: string };
+                  content?: Array<{ type?: string; text?: string }>;
+                })
+              : undefined;
+          if (resObj?.details?.ok) {
+            const textBlock = Array.isArray(resObj.content)
+              ? (resObj.content.find((c) => c.type === "text")?.text ?? "")
+              : "";
+            const note = textBlock.trim() || `已发送表情包 ${resObj.details.stickerId ?? ""}`.trim();
+            sentMediaNotes.push(`[${note}]`);
+          }
         }
-        return;
-      }
-
-      if (ev.type === "message_end" && ev.message.role === "assistant") {
-        const msg = ev.message;
+      },
+      onAssistantMessageEnd: (msg) => {
         if (msg.stopReason === "toolUse") {
           turnState.hasToolActivity = true;
           preReplyState.latestToolUseMsg = msg;
@@ -920,50 +1039,7 @@ export class PersonaRuntime {
             turnState.unsentStopMsgExists = true;
           }
         }
-        const nowPerf = performance.now();
-        const callStart = this.activeCallStartPerf ?? msgStartPerf;
-        const callTotalMs = Math.max(1, Math.round(nowPerf - callStart));
-        if (turnFirstDeltaPerf === null) turnFirstDeltaPerf = nowPerf;
-        const callTtftMs =
-          msgFirstDeltaPerf !== null ? Math.max(0, Math.round(msgFirstDeltaPerf - callStart)) : callTotalMs;
-        const callDecodeMs =
-          msgFirstDeltaPerf !== null ? Math.max(1, nowPerf - msgFirstDeltaPerf) : undefined;
-        if (callDecodeMs !== undefined) {
-          totalDecodeMs += callDecodeMs;
-        }
-        this.activeCallStartPerf = null;
-        msgFirstDeltaPerf = null;
-
-        const msgTools = msg.content
-          .filter((b): b is Extract<AssistantMessage["content"][number], { type: "toolCall" }> => b.type === "toolCall")
-          .map((b) => b.name);
-
-        console.log(
-          formatLlmTelemetryLog({
-            slot: "persona",
-            provider: msg.provider,
-            modelId: msg.model,
-            responseModel: msg.responseModel,
-            responseId: msg.responseId,
-            api: String(msg.api),
-            stopReason: msg.stopReason,
-            rawStopReason: msg.rawStopReason,
-            thinkingLevel: msg.providerThinkingLevel ?? msg.thinkingLevel,
-            inputTokens: msg.usage.input,
-            outputTokens: msg.usage.output,
-            reasoningTokens: msg.usage.reasoning,
-            cacheReadTokens: msg.usage.cacheRead,
-            cacheWriteTokens: msg.usage.cacheWrite,
-            cacheWrite1hTokens: msg.usage.cacheWrite1h,
-            costTotal: msg.usage.cost.total,
-            ttftMs: callTtftMs,
-            decodeMs: callDecodeMs,
-            latencyMs: callTotalMs,
-            toolCalls: msgTools,
-            timeZone: this.hatoConfig.owner.timezone,
-          }),
-        );
-      }
+      },
     });
 
     const sendBubblesToUser = options?.sendBubblesToUser;
@@ -1091,14 +1167,16 @@ export class PersonaRuntime {
       this.activeRetryNoticeHook = null;
       this.activePhotoSender = null;
       this.browserRuntime?.setPhotoSender(null);
-      unsubscribe();
+      telemetry.unsubscribe();
       this.activeCallStartPerf = null;
       this.activeTurnRecalledMemories = [];
+      this.liveTraceTracker?.finish(liveTraceId);
       if (this.activeTurn === turnState) {
         this.activeTurn = null;
       }
     }
 
+    const { turnFirstDeltaPerf, totalDecodeMs } = telemetry.getTiming();
     const latencyMs = Math.max(1, Math.round(performance.now() - turnStartPerf));
     const ttftMs =
       turnFirstDeltaPerf !== null ? Math.max(0, Math.round(turnFirstDeltaPerf - turnStartPerf)) : latencyMs;
@@ -1199,10 +1277,11 @@ export class PersonaRuntime {
       });
     }
 
-    // Re-sync transcript with clean hato_* turn blocks so subsequent turns keep stable prefixes.
-    this.refreshTranscriptFromDb();
-
-    const userPreview = batch.combinedText.replace(/\s+/g, " ").trim().slice(0, 60) || null;
+    if (this.pendingTranscriptRefresh) {
+      this.refreshTranscriptFromDb();
+    } else {
+      this.pruneTurnPayloadBloat();
+    }
 
     const recalledIds = [...this.activeTurnRecalledIds];
     this.activeTurnRecalledIds.clear();
@@ -1311,24 +1390,61 @@ export class PersonaRuntime {
     promptInstruction: string;
     images?: ImageContent[];
   }): Promise<string[]> {
-    this.repo.appendRawMessage({
+    this.activeTurnOriginChannel = params.channel;
+    const resolved = this.modelRegistry.resolveSlot("persona");
+    this.agent.state.model = resolved.model;
+    this.agent.state.thinkingLevel = this.modelRegistry.resolveSlotThinkingLevel("persona");
+    this.syncTranscriptIfDrifted(params.canonicalUserId);
+
+    const turnTools = selectToolsForTurn({
+      allTools: this.allTools,
+      userText: `${params.eventSummary}\n${params.promptInstruction}`,
+      hasImages: (params.images?.length ?? 0) > 0,
+      hasAttachments: true,
+      hasPersonalSkills: this.personalSkills.length > 0,
+      previouslyActivated: this.sessionTools,
+    });
+    for (const t of turnTools) {
+      this.sessionTools.add(t.name);
+    }
+    this.agent.state.tools = turnTools;
+
+    const savedEvent = this.repo.appendRawMessage({
       canonicalUserId: params.canonicalUserId,
       channel: params.channel,
       role: "executed_event",
       content: params.eventSummary,
       createdAt: Date.now(),
     });
-    this.refreshTranscriptFromDb();
-
-    const resolved = this.modelRegistry.resolveSlot("persona");
-    this.agent.state.model = resolved.model;
-    this.agent.state.thinkingLevel = clampThinkingLevel(
-      resolved.model,
-      resolved.model.reasoning ? "low" : "off",
-    );
+    this.agent.state.messages = [
+      ...this.agent.state.messages,
+      rawRecordToAgentMessage(savedEvent, this.repo),
+    ];
 
     const startIndex = this.agent.state.messages.length;
     const startPerf = performance.now();
+    const userPreview = params.eventSummary.replace(/\s+/g, " ").trim().slice(0, 100);
+    const liveTraceId = `live_persona_bg_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+
+    this.liveTraceTracker?.start({
+      id: liveTraceId,
+      canonicalUserId: params.canonicalUserId,
+      slot: "persona",
+      provider: resolved.providerSlug,
+      modelId: resolved.model.id,
+      api: String(resolved.model.api),
+      userPreview,
+      startedAt: Date.now(),
+      progressNote: "处理后台事件回复",
+    });
+
+    const telemetry = this.subscribeTurnTelemetry({
+      startIndex,
+      turnStartPerf: startPerf,
+      liveTraceId,
+    });
+
+    let promptErr: unknown = null;
     try {
       const attachedImages = params.images?.slice(0, 4) ?? [];
       if (attachedImages.length > 0) {
@@ -1336,12 +1452,27 @@ export class PersonaRuntime {
       } else {
         await this.agent.prompt(params.promptInstruction);
       }
-    } catch {
+    } catch (err) {
+      promptErr = err;
+    } finally {
+      telemetry.unsubscribe();
+      this.activeCallStartPerf = null;
+      this.liveTraceTracker?.finish(liveTraceId);
+    }
+
+    const turnFailure =
+      promptErr ?? (this.agent.state.errorMessage ? new Error(this.agent.state.errorMessage) : null);
+    if (turnFailure) {
+      logWarn("PERSONA", `narrateBackgroundEvent failed: ${summarizeError(turnFailure)}`);
       this.refreshTranscriptFromDb();
       return [params.eventSummary];
     }
 
+    const { turnFirstDeltaPerf, totalDecodeMs } = telemetry.getTiming();
     const latencyMs = Math.max(1, Math.round(performance.now() - startPerf));
+    const ttftMs =
+      turnFirstDeltaPerf !== null ? Math.max(0, Math.round(turnFirstDeltaPerf - startPerf)) : latencyMs;
+
     const newMessages = this.agent.state.messages.slice(startIndex);
     const { finalText, totalUsage, toolCalls } = extractTurnMetrics(newMessages);
     const reply = finalText.trim() || params.eventSummary;
@@ -1371,8 +1502,8 @@ export class PersonaRuntime {
       cacheReadTokens: totalUsage.cacheRead,
       cacheWriteTokens: totalUsage.cacheWrite,
       latencyMs,
-      ttftMs: latencyMs,
-      decodeMs: latencyMs,
+      ttftMs,
+      decodeMs: totalDecodeMs > 0 ? totalDecodeMs : undefined,
     });
     this.repo.insertTurnTrace({
       canonicalUserId: params.canonicalUserId,
@@ -1385,9 +1516,9 @@ export class PersonaRuntime {
       cacheReadTokens: totalUsage.cacheRead,
       cacheWriteTokens: totalUsage.cacheWrite,
       cacheHitRate: metrics.cacheHitRate,
-      ttftMs: null,
-      tps: null,
-      userPreview: params.eventSummary.replace(/\s+/g, " ").trim().slice(0, 100),
+      ttftMs,
+      tps: metrics.decodeTps,
+      userPreview,
       recalledIds: [],
       timeCardText: params.promptInstruction,
       toolCalls,
@@ -1395,8 +1526,127 @@ export class PersonaRuntime {
       latencyMs,
     });
 
-    this.refreshTranscriptFromDb();
+    if (this.pendingTranscriptRefresh) {
+      this.refreshTranscriptFromDb();
+    } else {
+      this.pruneTurnPayloadBloat();
+    }
     return bubbles.length > 0 ? bubbles : [reply];
+  }
+
+  private subscribeTurnTelemetry(params: {
+    startIndex: number;
+    turnStartPerf: number;
+    liveTraceId?: string;
+    onToolStart?: (toolName: string) => void;
+    onToolEnd?: (toolName: string, isError: boolean, result: unknown) => void;
+    onAssistantMessageEnd?: (msg: AssistantMessage) => void;
+  }): {
+    unsubscribe: () => void;
+    getTiming: () => { turnFirstDeltaPerf: number | null; totalDecodeMs: number };
+  } {
+    let turnFirstDeltaPerf: number | null = null;
+    let msgStartPerf = params.turnStartPerf;
+    let msgFirstDeltaPerf: number | null = null;
+    let totalDecodeMs = 0;
+
+    const syncLiveTrace = (progressNote?: string) => {
+      if (!this.liveTraceTracker || !params.liveTraceId) return;
+      const agg = aggregateAssistantTraceMetrics(this.agent.state.messages.slice(params.startIndex));
+      this.liveTraceTracker.update(params.liveTraceId, {
+        ...(progressNote !== undefined ? { progressNote } : {}),
+        steps: agg.steps,
+        toolCalls: agg.toolCalls,
+      });
+    };
+
+    const unsubscribe = this.agent.subscribe((ev) => {
+      if (ev.type === "message_start" && ev.message.role === "assistant") {
+        msgStartPerf = this.activeCallStartPerf ?? performance.now();
+        msgFirstDeltaPerf = null;
+        return;
+      }
+
+      if (ev.type === "message_update") {
+        const sub = ev.assistantMessageEvent;
+        const hasDelta =
+          (sub.type === "text_delta" || sub.type === "thinking_delta" || sub.type === "toolcall_delta") &&
+          sub.delta.length > 0;
+        if (hasDelta) {
+          const nowPerf = performance.now();
+          if (turnFirstDeltaPerf === null) turnFirstDeltaPerf = nowPerf;
+          if (msgFirstDeltaPerf === null) msgFirstDeltaPerf = nowPerf;
+        }
+        return;
+      }
+
+      if (ev.type === "tool_execution_start") {
+        params.onToolStart?.(ev.toolName);
+        syncLiveTrace(`正在调用: ${ev.toolName}`);
+        return;
+      }
+
+      if (ev.type === "tool_execution_end") {
+        params.onToolEnd?.(ev.toolName, ev.isError, ev.result);
+        syncLiveTrace();
+        return;
+      }
+
+      if (ev.type === "message_end" && ev.message.role === "assistant") {
+        const msg = ev.message;
+        params.onAssistantMessageEnd?.(msg);
+
+        const nowPerf = performance.now();
+        const callStart = this.activeCallStartPerf ?? msgStartPerf;
+        const callTotalMs = Math.max(1, Math.round(nowPerf - callStart));
+        if (turnFirstDeltaPerf === null) turnFirstDeltaPerf = nowPerf;
+        const callTtftMs =
+          msgFirstDeltaPerf !== null ? Math.max(0, Math.round(msgFirstDeltaPerf - callStart)) : callTotalMs;
+        const callDecodeMs =
+          msgFirstDeltaPerf !== null ? Math.max(1, nowPerf - msgFirstDeltaPerf) : undefined;
+        if (callDecodeMs !== undefined) {
+          totalDecodeMs += callDecodeMs;
+        }
+        this.activeCallStartPerf = null;
+        msgFirstDeltaPerf = null;
+
+        const msgTools = msg.content
+          .filter((b): b is Extract<AssistantMessage["content"][number], { type: "toolCall" }> => b.type === "toolCall")
+          .map((b) => b.name);
+
+        console.log(
+          formatLlmTelemetryLog({
+            slot: "persona",
+            provider: msg.provider,
+            modelId: msg.model,
+            responseModel: msg.responseModel,
+            responseId: msg.responseId,
+            api: String(msg.api),
+            stopReason: msg.stopReason,
+            rawStopReason: msg.rawStopReason,
+            thinkingLevel: msg.providerThinkingLevel ?? msg.thinkingLevel,
+            inputTokens: msg.usage.input,
+            outputTokens: msg.usage.output,
+            reasoningTokens: msg.usage.reasoning,
+            cacheReadTokens: msg.usage.cacheRead,
+            cacheWriteTokens: msg.usage.cacheWrite,
+            cacheWrite1hTokens: msg.usage.cacheWrite1h,
+            costTotal: msg.usage.cost.total,
+            ttftMs: callTtftMs,
+            decodeMs: callDecodeMs,
+            latencyMs: callTotalMs,
+            toolCalls: msgTools,
+            timeZone: this.hatoConfig.owner.timezone,
+          }),
+        );
+        syncLiveTrace();
+      }
+    });
+
+    return {
+      unsubscribe,
+      getTiming: () => ({ turnFirstDeltaPerf, totalDecodeMs }),
+    };
   }
 
   /**
@@ -1455,6 +1705,11 @@ export class PersonaRuntime {
     const apiKey = this.modelRegistry.resolveApiKeyForProvider(resolved.providerSlug);
     const scopedFetch = this.proxyRouter.createScopedFetch(`llm-calling.${resolved.providerSlug}`);
 
+    const compactionThinking = clampThinkingLevel(
+      resolved.model,
+      this.modelRegistry.resolveSlotThinkingLevel("curator"),
+    );
+
     const callStartPerf = performance.now();
     let firstDeltaPerf: number | null = null;
     const result = await this.proxyRouter.runWithScope(`llm-calling.${resolved.providerSlug}`, async () => {
@@ -1468,7 +1723,7 @@ export class PersonaRuntime {
               sessionId: params.canonicalUserId,
               disableContinuation: true,
               ...(supportsCustomFetchOption(resolved.model.api) ? { fetch: scopedFetch } : {}),
-              reasoning: resolved.model.reasoning ? "minimal" : undefined,
+              reasoning: compactionThinking === "off" ? undefined : compactionThinking,
             },
           ),
         {

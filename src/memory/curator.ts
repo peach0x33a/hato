@@ -598,6 +598,7 @@ export class MemoryCurator {
 
     const callStartPerf = performance.now();
     let firstDeltaPerf: number | null = null;
+    const thinkingLevel = this.modelRegistry.resolveSlotThinkingLevel("curator");
     const result = await this.proxyRouter.runWithScope(`llm-calling.${resolved.providerSlug}`, async () => {
       const stream = streamSimpleWithRetry(
         () =>
@@ -609,7 +610,7 @@ export class MemoryCurator {
               sessionId: `${canonicalUserId}:curator`,
               disableContinuation: true,
               ...(supportsCustomFetchOption(resolved.model.api) ? { fetch: scopedFetch } : {}),
-              reasoning: resolved.model.reasoning ? "minimal" : undefined,
+              reasoning: thinkingLevel === "off" ? undefined : thinkingLevel,
             },
           ),
         {

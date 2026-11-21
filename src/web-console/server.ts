@@ -73,6 +73,7 @@ import {
   parseSinceSpec,
   summarizeTurnTraces,
 } from "../stats/metrics.js";
+import type { LiveTraceTracker } from "../stats/live-trace.js";
 import type { StickerService } from "../stickers/service.js";
 import { logInfo, logWarn, summarizeError } from "../utils/logger.js";
 import {
@@ -104,6 +105,7 @@ export interface WebConsoleServerDeps {
   getCompactionManager: () => CompactionManager;
   getMemoryCurator?: () => MemoryCurator;
   getTicketCoordinator?: () => TicketCoordinator;
+  getLiveTraceTracker?: () => LiveTraceTracker;
   getActorLock: () => ActorLock;
   getSlashDeps: (canonicalUserId: string) => SlashCommandDeps;
   reloadAll: () => Promise<WebConsoleReloadResult>;
@@ -420,6 +422,10 @@ export class WebConsoleServer {
           await this.handleSaveModels(req, res);
           return;
         }
+        if (pathname === "/api/config/thinking" && method === "PUT") {
+          await this.handleSaveThinking(req, res);
+          return;
+        }
         if (pathname === "/api/config/models/test" && method === "POST") {
           await this.handleTestModel(req, res);
           return;
@@ -475,6 +481,10 @@ export class WebConsoleServer {
         }
         if (pathname === "/api/statics" && method === "GET") {
           this.handleStatics(parsedUrl, res);
+          return;
+        }
+        if (pathname === "/api/traces/stream" && method === "GET") {
+          this.handleTracesStream(req, res);
           return;
         }
         if (pathname === "/api/stickers" && method === "GET") {
@@ -987,14 +997,20 @@ export class WebConsoleServer {
       compactedUntilTs,
       pendingTakeover: this.deps.getBrowserRuntime().isPendingTakeover(),
       messages,
-      slots: registry.listSlots().map((s) => ({
-        slot: s.slot,
-        target: s.target,
-        api: String(s.model.api),
-        baseUrl: s.model.baseUrl,
-      })),
+      slots: this.buildSlotViews(registry),
       availableModels: registry.listTargets(),
     });
+  }
+
+  private buildSlotViews(registry: ModelRegistry) {
+    return registry.listSlots().map((s) => ({
+      slot: s.slot,
+      target: s.target,
+      api: String(s.model.api),
+      baseUrl: s.model.baseUrl,
+      thinkingLevel: registry.resolveSlotThinkingLevel(s.slot),
+      reasoning: Boolean(s.model.reasoning),
+    }));
   }
 
   private async handleChatSend(req: IncomingMessage, res: ServerResponse): Promise<void> {
@@ -1221,6 +1237,12 @@ export class WebConsoleServer {
     const hatoConfig = this.deps.getConfig();
     const modelsRegistry = this.deps.getModelRegistry();
     const modelsConfig = modelsRegistry.getFileConfig();
+    const effectiveThinking = modelsRegistry.getEffectiveSlotThinkingMap();
+    if (Object.keys(effectiveThinking).length > 0) {
+      modelsConfig.slot_thinking = effectiveThinking;
+    } else {
+      delete modelsConfig.slot_thinking;
+    }
     const { layered, promptLayers } = this.buildPromptLayersSnapshot(hatoConfig);
     const promptPath = layered.soulPath;
     const promptText = layered.soulText;
@@ -1267,6 +1289,7 @@ export class WebConsoleServer {
       payload.config as ReturnType<ModelRegistry["getFileConfig"]>,
       { backup: true },
     );
+    this.deps.getModelRegistry().clearSlotThinkingOverrides();
     const reloadRes = await this.deps.reloadAll();
     sendJson(res, 200, {
       ok: true,
@@ -1274,6 +1297,30 @@ export class WebConsoleServer {
       backupPath: writeRes.backupPath,
       ...reloadRes,
     });
+  }
+
+  private async handleSaveThinking(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    const payload = (await readJsonBody(req)) as { slot?: unknown; level?: unknown };
+    const slot = typeof payload.slot === "string" ? payload.slot.trim() : "";
+    if (!slot) {
+      sendJson(res, 400, { ok: false, error: "请提供有效的模型槽位" });
+      return;
+    }
+    const level = typeof payload.level === "string" ? payload.level.trim() : null;
+    const registry = this.deps.getModelRegistry();
+    try {
+      const updated = registry.setSlotThinkingOverride(slot, level);
+      sendJson(res, 200, {
+        ok: true,
+        ...updated,
+        slots: this.buildSlotViews(registry),
+      });
+    } catch (err) {
+      sendJson(res, 400, {
+        ok: false,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
   }
 
   private async handleModelsDevLookup(parsedUrl: URL, res: ServerResponse): Promise<void> {
@@ -1990,6 +2037,65 @@ export class WebConsoleServer {
     const traces = repo.listTurnTraces({ canonicalUserId: uid, limit, slot, sinceMs, afterMs });
     const summary = summarizeTurnTraces(traces, resolveCostRates);
     sendJson(res, 200, { ok: true, summary, traces: attachCost(traces) });
+  }
+
+  private handleTracesStream(req: IncomingMessage, res: ServerResponse): void {
+    res.writeHead(200, {
+      "Content-Type": "text/event-stream; charset=utf-8",
+      "Cache-Control": "no-cache, no-transform",
+      Connection: "keep-alive",
+    });
+    res.write(": connected\n\n");
+
+    const uid = this.deps.getConfig().owner.canonical_user_id;
+    const tracker = this.deps.getLiveTraceTracker?.();
+    const repo = this.deps.getRepo();
+
+    const writeEvent = (payload: Record<string, unknown>) => {
+      if (!res.writableEnded) {
+        res.write(`data: ${JSON.stringify(payload)}\n\n`);
+      }
+    };
+
+    writeEvent({
+      type: "snapshot",
+      active: tracker?.listActive(uid) ?? [],
+    });
+
+    const unsubTracker = tracker?.subscribe((event) => {
+      if (event.type === "active_update") {
+        writeEvent({
+          type: "active_update",
+          active: event.active.filter((item) => item.canonicalUserId === uid),
+        });
+      }
+    });
+
+    const unsubRepo = repo.subscribeTurnTrace((info) => {
+      if (info.canonicalUserId !== uid) return;
+      writeEvent({
+        type: "trace_inserted",
+        traceId: info.id,
+        slot: info.slot,
+        createdAt: info.createdAt,
+      });
+    });
+
+    const keepAlive = setInterval(() => {
+      if (!res.writableEnded) {
+        res.write(": ping\n\n");
+      }
+    }, 15_000);
+    keepAlive.unref();
+
+    const cleanup = () => {
+      clearInterval(keepAlive);
+      unsubTracker?.();
+      unsubRepo();
+      if (!res.writableEnded) res.end();
+    };
+    req.once("close", cleanup);
+    res.once("close", cleanup);
   }
 
   private handleBrowserStream(req: IncomingMessage, res: ServerResponse): void {

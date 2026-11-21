@@ -7,6 +7,7 @@ export interface ReloadSlotSnapshot {
   api: string;
   baseUrl: string;
   reasoning?: boolean;
+  thinkingLevel?: string;
   input?: readonly string[];
 }
 
@@ -79,6 +80,7 @@ function diffSlots(
 function formatSlotSignature(slot: ReloadSlotSnapshot): string {
   const flags: string[] = [slot.api];
   if (slot.reasoning !== undefined) flags.push(`reasoning=${slot.reasoning}`);
+  if (slot.thinkingLevel !== undefined) flags.push(`thinking=${slot.thinkingLevel}`);
   if (slot.input && slot.input.length > 0) flags.push(`input=[${slot.input.join(",")}]`);
   return `${slot.target} (${flags.join(", ")}, ${slot.baseUrl})`;
 }

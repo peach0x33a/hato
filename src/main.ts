@@ -59,6 +59,7 @@ import { PersonaRuntime } from "./persona/agent.js";
 import { probeTelegramGateway, updateTelegramBotProfile } from "./setup/probe.js";
 import { StickerService } from "./stickers/service.js";
 import { StickerStore } from "./stickers/store.js";
+import { LiveTraceTracker } from "./stats/live-trace.js";
 import { logError, logInfo, logWarn, setLogTimezone, summarizeError } from "./utils/logger.js";
 import { WebConsoleServer } from "./web-console/server.js";
 import { WorkerDispatcher } from "./worker/backend.js";
@@ -97,6 +98,7 @@ async function main(): Promise<void> {
   const mcpPool = new McpClientPool(proxyRouter);
   await mcpPool.syncConfig(mcpConfig, { eagerZones: ["personal"] });
   const browserRuntime = new BrowserRuntime(hatoConfig, modelRegistry, proxyRouter, undefined, repo);
+  const liveTraceTracker = new LiveTraceTracker();
   let memoryStore = buildMemoryStore(hatoConfig, proxyRouter, repo);
   const personaRuntime = new PersonaRuntime(
     hatoConfig,
@@ -108,6 +110,7 @@ async function main(): Promise<void> {
     HATO_CONFIG_PATH,
     mcpPool,
   );
+  personaRuntime.setLiveTraceTracker(liveTraceTracker);
   const memoryCurator = new MemoryCurator(
     hatoConfig,
     modelRegistry,
@@ -132,6 +135,7 @@ async function main(): Promise<void> {
     proxyRouter,
     repo,
     mcpPool,
+    liveTraceTracker,
   });
   const externalRunner = new ExternalCliRunner({
     getHatoConfig: () => hatoConfig,
@@ -154,6 +158,7 @@ async function main(): Promise<void> {
     bus,
     getModelRegistry: () => modelRegistry,
     proxyRouter,
+    liveTraceTracker,
     executeSensitiveFileConfirm: async (canonicalUserId, payload) => {
       if (payload.channel === "web") {
         if (payload.text?.trim()) {
@@ -1261,6 +1266,7 @@ async function main(): Promise<void> {
     getCompactionManager: () => compactionManager,
     getMemoryCurator: () => memoryCurator,
     getTicketCoordinator: () => ticketCoordinator,
+    getLiveTraceTracker: () => liveTraceTracker,
     getActorLock: () => actorLock,
     getSlashDeps: (uid) => buildSlashDeps(uid),
     reloadAll,
@@ -1509,6 +1515,7 @@ function captureReloadSnapshot(
       api: String(s.model.api),
       baseUrl: s.model.baseUrl,
       reasoning: s.model.reasoning,
+      thinkingLevel: modelRegistry.resolveSlotThinkingLevel(s.slot),
       input: s.model.input,
     })),
     availableTargets: modelRegistry.listTargets(),

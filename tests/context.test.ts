@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { openDatabase } from "../src/db/client.js";
 import { HatoRepository } from "../src/db/repo.js";
-import { convertHatoMessagesToLlm, hydrateTranscriptFromDb } from "../src/persona/context.js";
+import { convertHatoMessagesToLlm, hydrateTranscriptFromDb, rawRecordToAgentMessage } from "../src/persona/context.js";
 
 test("hydrateTranscriptFromDb and convertHatoMessagesToLlm maintain prefix stability, gap markers, and ephemeral tail", () => {
   const handle = openDatabase(":memory:");
@@ -73,5 +73,35 @@ test("hydrateTranscriptFromDb and convertHatoMessagesToLlm maintain prefix stabi
     assert.ok(lastText.includes("<time>\n现在: 2026-11-16\n</time>"));
   } finally {
     handle.close();
+  }
+});
+
+test("rawRecordToAgentMessage exposes attachment localPath to Persona context", () => {
+  const agentMsg = rawRecordToAgentMessage({
+    id: "m_att_1",
+    canonicalUserId: "owner",
+    channel: "qq",
+    platformMsgId: "qq_1",
+    replyToId: null,
+    role: "user",
+    content: "你自己看看",
+    attachments: [
+      {
+        kind: "file",
+        filename: "07_服装02_居家休闲.png",
+        mimeType: "file",
+        localPath: "/mnt/hato-data/media/inbound/1795251376602_f80c53.png",
+      },
+    ],
+    createdAt: Date.now(),
+  });
+
+  assert.equal(agentMsg.role, "hato_user_batch");
+  if (agentMsg.role === "hato_user_batch") {
+    assert.ok(
+      agentMsg.text.includes(
+        "[附件 file: 07_服装02_居家休闲.png (path: /mnt/hato-data/media/inbound/1795251376602_f80c53.png)]",
+      ),
+    );
   }
 });

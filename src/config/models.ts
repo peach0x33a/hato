@@ -2,12 +2,14 @@ import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { logWarn } from "../utils/logger.js";
 import {
+  clampThinkingLevel,
   createModels,
   createProvider,
   envApiKeyAuth,
   type Api,
   type KnownApi,
   type Model,
+  type ModelThinkingLevel,
   type MutableModels,
   type Provider,
   type ProviderStreams,
@@ -137,6 +139,36 @@ export const MODEL_SLOTS = [
 ] as const;
 export type ModelSlot = (typeof MODEL_SLOTS)[number];
 
+export const THINKING_LEVEL_OPTIONS = [
+  "off",
+  "minimal",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "max",
+] as const;
+export type ConfiguredThinkingLevel = (typeof THINKING_LEVEL_OPTIONS)[number];
+
+export const DEFAULT_SLOT_THINKING_LEVEL: Record<ModelSlot, ModelThinkingLevel> = {
+  persona: "medium",
+  router: "minimal",
+  curator: "minimal",
+  worker: "medium",
+  hindsight_llm: "minimal",
+  vision: "off",
+};
+
+const ThinkingLevelSchema = Type.Union([
+  Type.Literal("off"),
+  Type.Literal("minimal"),
+  Type.Literal("low"),
+  Type.Literal("medium"),
+  Type.Literal("high"),
+  Type.Literal("xhigh"),
+  Type.Literal("max"),
+]);
+
 const ModelEntrySchema = Type.Object({
   id: Type.String({ minLength: 1 }),
   name: Type.String({ minLength: 1 }),
@@ -186,6 +218,16 @@ export const ModelsFileSchema = Type.Object({
     hindsight_llm: Type.String({ minLength: 3 }),
     vision: Type.Optional(Type.String({ minLength: 3 })),
   }),
+  slot_thinking: Type.Optional(
+    Type.Object({
+      persona: Type.Optional(ThinkingLevelSchema),
+      router: Type.Optional(ThinkingLevelSchema),
+      curator: Type.Optional(ThinkingLevelSchema),
+      worker: Type.Optional(ThinkingLevelSchema),
+      hindsight_llm: Type.Optional(ThinkingLevelSchema),
+      vision: Type.Optional(ThinkingLevelSchema),
+    }),
+  ),
   providers: Type.Record(Type.String(), ProviderConfigSchema),
 });
 
@@ -222,6 +264,7 @@ export interface ModelRegistryOptions {
 }
 
 const SLOT_OVERRIDES_SETTING_KEY = "model_slot_overrides";
+const SLOT_THINKING_OVERRIDES_SETTING_KEY = "model_slot_thinking_overrides";
 
 interface StoredProviderRecord extends ResolvedProviderMeta {
   isExtra: boolean;
@@ -442,6 +485,7 @@ export class ModelRegistry {
   readonly models: MutableModels = createModels();
   private fileConfig!: ModelsFileConfig;
   private slotOverrides: Partial<Record<ModelSlot, string>> = {};
+  private slotThinkingOverrides: Partial<Record<ModelSlot, ModelThinkingLevel>> = {};
   private readonly extraProviders: Provider[];
   private readonly providersBySlug = new Map<string, StoredProviderRecord>();
   private readonly modelsByTarget = new Map<string, ResolvedTargetModel>();
@@ -512,8 +556,28 @@ export class ModelRegistry {
       this.repo?.setRuntimeSetting(SLOT_OVERRIDES_SETTING_KEY, validOverrides);
     }
 
+    const persistedThinking =
+      this.repo?.getRuntimeSetting<Record<string, unknown>>(SLOT_THINKING_OVERRIDES_SETTING_KEY) ?? {};
+    const validThinking: Partial<Record<ModelSlot, ModelThinkingLevel>> = {};
+    let thinkingChanged = false;
+    for (const [k, v] of Object.entries(persistedThinking)) {
+      if (
+        MODEL_SLOTS.includes(k as ModelSlot) &&
+        typeof v === "string" &&
+        THINKING_LEVEL_OPTIONS.includes(v as ConfiguredThinkingLevel)
+      ) {
+        validThinking[k as ModelSlot] = v as ModelThinkingLevel;
+      } else {
+        thinkingChanged = true;
+      }
+    }
+    if (thinkingChanged) {
+      this.repo?.setRuntimeSetting(SLOT_THINKING_OVERRIDES_SETTING_KEY, validThinking);
+    }
+
     this.fileConfig = parsed;
     this.slotOverrides = validOverrides;
+    this.slotThinkingOverrides = validThinking;
     this.providersBySlug.clear();
     for (const [k, v] of nextProvidersBySlug) {
       this.providersBySlug.set(k, v);
@@ -571,6 +635,76 @@ export class ModelRegistry {
       slot,
       ...resolved,
     };
+  }
+
+  resolveSlotThinkingLevel(slot: ModelSlot, overrideLevel?: ModelThinkingLevel): ModelThinkingLevel {
+    const resolved = this.resolveSlot(slot);
+    if (!resolved.model.reasoning) {
+      return "off";
+    }
+    const requested =
+      overrideLevel ??
+      this.slotThinkingOverrides[slot] ??
+      this.fileConfig.slot_thinking?.[slot] ??
+      DEFAULT_SLOT_THINKING_LEVEL[slot];
+    return clampThinkingLevel(resolved.model, requested);
+  }
+
+  getEffectiveSlotThinkingMap(): Partial<Record<ModelSlot, ModelThinkingLevel>> {
+    const merged: Partial<Record<ModelSlot, ModelThinkingLevel>> = {
+      ...(this.fileConfig.slot_thinking ?? {}),
+    };
+    for (const slot of MODEL_SLOTS) {
+      const ov = this.slotThinkingOverrides[slot];
+      if (ov !== undefined) {
+        merged[slot] = ov;
+      }
+    }
+    return merged;
+  }
+
+  setSlotThinkingOverride(
+    slotInput: string,
+    levelInput: string | null,
+  ): {
+    slot: ModelSlot;
+    requested: ModelThinkingLevel | null;
+    effective: ModelThinkingLevel;
+    reasoningSupported: boolean;
+  } {
+    if (!MODEL_SLOTS.includes(slotInput as ModelSlot)) {
+      throw new Error(`Unknown slot "${slotInput}". Valid slots: ${MODEL_SLOTS.join(", ")}`);
+    }
+    const slot = slotInput as ModelSlot;
+    const normalized = levelInput?.trim().toLowerCase() ?? "";
+    const nextOverrides = { ...this.slotThinkingOverrides };
+    let requested: ModelThinkingLevel | null = null;
+
+    if (!normalized || normalized === "auto") {
+      delete nextOverrides[slot];
+    } else if (THINKING_LEVEL_OPTIONS.includes(normalized as ConfiguredThinkingLevel)) {
+      requested = normalized as ModelThinkingLevel;
+      nextOverrides[slot] = requested;
+    } else {
+      throw new Error(
+        `Invalid thinking level "${levelInput}". Valid levels: auto, ${THINKING_LEVEL_OPTIONS.join(", ")}`,
+      );
+    }
+
+    this.slotThinkingOverrides = nextOverrides;
+    this.repo?.setRuntimeSetting(SLOT_THINKING_OVERRIDES_SETTING_KEY, this.slotThinkingOverrides);
+    const resolved = this.resolveSlot(slot);
+    return {
+      slot,
+      requested,
+      effective: this.resolveSlotThinkingLevel(slot),
+      reasoningSupported: Boolean(resolved.model.reasoning),
+    };
+  }
+
+  clearSlotThinkingOverrides(): void {
+    this.slotThinkingOverrides = {};
+    this.repo?.setRuntimeSetting(SLOT_THINKING_OVERRIDES_SETTING_KEY, {});
   }
 
   listProviders(): ResolvedProviderMeta[] {

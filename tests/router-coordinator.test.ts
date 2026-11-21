@@ -380,3 +380,137 @@ hindsight_llm = "faux-router/r1"
     rmSync(tempDir, { recursive: true, force: true });
   }
 });
+
+test("BuiltinPiRunner marks failed on LLM error or timeout and records full trace steps/tokens", async () => {
+  const tempDir = mkdtempSync(join(tmpdir(), "hato-builtin-fail-"));
+  const modelsToml = join(tempDir, "models.toml");
+  writeFileSync(
+    modelsToml,
+    `[slots]
+persona = "faux-worker/w1"
+router = "faux-worker/w1"
+curator = "faux-worker/w1"
+worker = "faux-worker/w1"
+hindsight_llm = "faux-worker/w1"
+
+[providers]
+`,
+    "utf8",
+  );
+
+  const fauxWorker = fauxProvider({
+    api: "hato-faux-worker-fail",
+    provider: "faux-worker",
+    models: [{ id: "w1", name: "W1" }],
+    tokensPerSecond: 10_000,
+  });
+
+  const dbHandle = openDatabase(":memory:");
+  try {
+    const cfg = createDefaultHatoConfig();
+    cfg.paths.workspaces_dir = join(tempDir, "workspaces");
+    const repo = new HatoRepository(dbHandle.db);
+    repo.ensureOwner({
+      canonicalUserId: "owner",
+      timezone: "Asia/Shanghai",
+      proactiveChannel: "tg",
+    });
+
+    const registry = new ModelRegistry(modelsToml, repo, {
+      extraProviders: [fauxWorker.provider],
+    });
+    const runner = new BuiltinPiRunner({
+      getHatoConfig: () => cfg,
+      modelRegistry: registry,
+      proxyRouter: new ScopedProxyRouter([]),
+      repo,
+    });
+
+    // 1. Non-retryable LLM error after an initial tool step must fail instead of returning "done"
+    repo.createTicket({
+      id: "t_err_1",
+      canonicalUserId: "owner",
+      status: "running",
+      backend: "builtin-pi",
+      briefTitle: "测试错误中断",
+      originChannel: "web",
+    });
+    fauxWorker.setResponses([
+      () => fauxAssistantMessage([fauxToolCall("run_command", { command: "echo hi" })], { stopReason: "toolUse" }),
+      () =>
+        fauxAssistantMessage("upstream rejected", {
+          stopReason: "error",
+          errorMessage: "400 INVALID_ARGUMENT: bad request",
+        }),
+    ]);
+
+    const errRes = await runner.execute(
+      {
+        ticketId: "t_err_1",
+        canonicalUserId: "owner",
+        backend: "builtin-pi",
+        briefTitle: "测试错误中断",
+        contextId: "ctx_t_err_1",
+        externalSessionId: null,
+      },
+      {
+        workspace_mode: "isolated",
+        workspace_dir: join(tempDir, "workspaces", "t_err_1"),
+        is_host_repo: false,
+        network: "egress",
+        timeout_ms: 5000,
+        skills: [],
+        allowed_mcp_servers: [],
+        confirm_before: [],
+      },
+    );
+
+    assert.equal(errRes.status, "failed");
+    assert.match(errRes.narration_hint, /400 INVALID_ARGUMENT/);
+    assert.ok(errRes.trace);
+    assert.deepEqual(errRes.trace.toolCalls, ["run_command"]);
+    assert.ok(errRes.trace.steps.some((s) => s.kind === "tool" && s.name === "run_command"));
+
+    // 2. Timeout abort must fail with timeout caveat instead of returning "done"
+    repo.createTicket({
+      id: "t_timeout_1",
+      canonicalUserId: "owner",
+      status: "running",
+      backend: "builtin-pi",
+      briefTitle: "测试超时中止",
+      originChannel: "web",
+    });
+    fauxWorker.setResponses([
+      () => fauxAssistantMessage([fauxToolCall("run_command", { command: "sleep 1" })], { stopReason: "toolUse" }),
+      () => fauxAssistantMessage("done"),
+    ]);
+
+    const timeoutRes = await runner.execute(
+      {
+        ticketId: "t_timeout_1",
+        canonicalUserId: "owner",
+        backend: "builtin-pi",
+        briefTitle: "测试超时中止",
+        contextId: "ctx_t_timeout_1",
+        externalSessionId: null,
+      },
+      {
+        workspace_mode: "isolated",
+        workspace_dir: join(tempDir, "workspaces", "t_timeout_1"),
+        is_host_repo: false,
+        network: "egress",
+        timeout_ms: 40,
+        skills: [],
+        allowed_mcp_servers: [],
+        confirm_before: [],
+      },
+    );
+
+    assert.equal(timeoutRes.status, "failed");
+    assert.ok(timeoutRes.caveats.includes("timeout"));
+    assert.match(timeoutRes.narration_hint, /超时/);
+  } finally {
+    dbHandle.close();
+    rmSync(tempDir, { recursive: true, force: true });
+  }
+});
