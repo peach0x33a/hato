@@ -627,15 +627,16 @@ async function main(): Promise<void> {
   const archiveAndResetHotZone = async (uid: string) => {
     debouncer.discardUser(uid);
     queuedBatchesByUser.delete(uid);
-    return actorLock.run(uid, async () => {
+    const res = await actorLock.run(uid, async () => {
       compactionManager.resetUser(uid);
-      await memoryCurator.retainPending(uid).catch((err) => {
-        logError("CURATOR", `pre-reset retain failed for ${uid}`, err);
-      });
-      const res = repo.resetWorkingContext(uid);
+      const resetRes = repo.resetWorkingContext(uid);
       personaRuntime.resetSession();
-      return res;
+      return resetRes;
     });
+    void memoryCurator.retainPending(uid).catch((err) => {
+      logError("CURATOR", `post-reset background retain failed for ${uid}`, err);
+    });
+    return res;
   };
 
   const compactionManager = new CompactionManager(
