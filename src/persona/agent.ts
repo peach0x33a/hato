@@ -153,6 +153,16 @@ export class PersonaRuntime {
         caption?: string;
       }) => Promise<{ ok: boolean; message: string }>)
     | null = null;
+  private sensitiveFileConfirmHandler:
+    | ((input: {
+        canonicalUserId: string;
+        channel: InboundBatch["originChannel"];
+        strictChannel?: boolean;
+        path: string;
+        caption?: string;
+        text?: string;
+      }) => Promise<{ ok: boolean; ticketId?: string; message: string }>)
+    | null = null;
   private activePhotoSender: SendPhotoToUserFn | null = null;
   private renderMarkdownImageHandler:
     | ((markdown: string, options?: { theme?: "light" | "dark" }) => Promise<Buffer>)
@@ -368,6 +378,24 @@ export class PersonaRuntime {
     }
   }
 
+  setSensitiveFileConfirmHandler(
+    handler:
+      | ((input: {
+          canonicalUserId: string;
+          channel: InboundBatch["originChannel"];
+          strictChannel?: boolean;
+          path: string;
+          caption?: string;
+          text?: string;
+        }) => Promise<{ ok: boolean; ticketId?: string; message: string }>)
+      | null,
+  ): void {
+    this.sensitiveFileConfirmHandler = handler;
+    if (!this.activeTurn) {
+      this.syncTools();
+    }
+  }
+
   setStickerHandlers(
     handlers: {
       onSearch: (input: { canonicalUserId: string; query: string; emotion?: string; limit?: number }) => Promise<string>;
@@ -552,6 +580,26 @@ export class PersonaRuntime {
                 filePath: input.filePath,
                 caption: input.caption,
               }),
+          }
+        : {}),
+      ...(this.sensitiveFileConfirmHandler
+        ? {
+            onRequestSensitiveFileConfirm: (input: {
+              channel: "current" | "tg" | "qq" | "web";
+              path: string;
+              caption?: string;
+              text?: string;
+            }) => {
+              const explicit = input.channel !== "current" ? input.channel : undefined;
+              return this.sensitiveFileConfirmHandler!({
+                canonicalUserId,
+                channel: explicit ?? this.activeTurnOriginChannel,
+                strictChannel: Boolean(explicit),
+                path: input.path,
+                caption: input.caption,
+                text: input.text,
+              });
+            },
           }
         : {}),
       ...(this.botProfileHandler ? { onBotProfile: this.botProfileHandler } : {}),

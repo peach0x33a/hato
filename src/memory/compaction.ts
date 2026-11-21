@@ -75,6 +75,7 @@ export class CompactionManager {
   private readonly lastInteractionAt = new Map<string, number>();
   private readonly scheduledDeferTimers = new Map<string, NodeJS.Timeout>();
   private dailyScheduleTimer: NodeJS.Timeout | undefined;
+  private disposed = false;
 
   constructor(
     private config: CompactionConfig,
@@ -238,6 +239,7 @@ export class CompactionManager {
   }
 
   dispose(): void {
+    this.disposed = true;
     if (this.dailyScheduleTimer) {
       clearTimeout(this.dailyScheduleTimer);
       this.dailyScheduleTimer = undefined;
@@ -277,6 +279,7 @@ export class CompactionManager {
   }
 
   private scheduleNextDailyClear(nowMs = Date.now()): void {
+    if (this.disposed) return;
     if ((this.config.clearMode ?? "cache") !== "scheduled") return;
     if (this.dailyScheduleTimer) {
       clearTimeout(this.dailyScheduleTimer);

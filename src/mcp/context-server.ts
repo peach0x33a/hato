@@ -1,11 +1,14 @@
+import { resolve } from "node:path";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import { openDatabase } from "../db/client.js";
 import { HatoRepository } from "../db/repo.js";
 import {
+  computeContextToken,
   expandEarlierContext,
   readTaskContext,
+  verifyContextToken,
   type ContextLookbackLimits,
 } from "../dispatch/context-slice.js";
 
@@ -126,10 +129,14 @@ export function createScopedContextMcpServer(params: {
 async function runCliEntrypoint(): Promise<void> {
   const dbPath = process.env.HATO_DB_PATH?.trim();
   const contextId = process.env.HATO_CONTEXT_ID?.trim();
+  const providedToken = process.env.HATO_CTX_TOKEN?.trim();
   const timezone = process.env.HATO_TIMEZONE?.trim() || "UTC";
 
   if (!dbPath || !contextId) {
     throw new Error("HATO_DB_PATH and HATO_CONTEXT_ID environment variables are required");
+  }
+  if (!providedToken) {
+    throw new Error("HATO_CTX_TOKEN environment variable is required");
   }
 
   let lookback: ContextLookbackLimits = {
@@ -150,8 +157,20 @@ async function runCliEntrypoint(): Promise<void> {
     }
   }
 
-  const dbHandle = openDatabase(dbPath);
+  const absDbPath = resolve(dbPath);
+  const dbHandle = openDatabase(absDbPath, { readonly: true });
   const repo = new HatoRepository(dbHandle.db);
+  const ticket = repo.getTicketByContextId(contextId);
+  if (!ticket) {
+    dbHandle.close();
+    throw new Error(`Invalid or unknown context_id "${contextId}"`);
+  }
+  const expectedToken = computeContextToken(absDbPath, ticket.id, contextId);
+  if (!verifyContextToken(providedToken, expectedToken)) {
+    dbHandle.close();
+    throw new Error("Invalid HATO_CTX_TOKEN for requested context_id");
+  }
+
   const server = createScopedContextMcpServer({
     repo,
     allowedContextId: contextId,

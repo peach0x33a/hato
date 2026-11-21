@@ -77,6 +77,7 @@ export class TelegramAdapter implements ChannelAdapter {
   private running = false;
   private connectedUsername: string | null = null;
   private lastCommandSyncSignature: string | null = null;
+  private reconnectAbort: AbortController | null = null;
 
   constructor(private readonly deps: TelegramAdapterDeps) {
     this.config = deps.config;
@@ -178,33 +179,59 @@ export class TelegramAdapter implements ChannelAdapter {
       throw new Error("Telegram webhook mode is not wired yet; set gateway.telegram.mode = 'polling'");
     }
     this.running = true;
-    // bot.start() runs long-polling until bot.stop() is invoked.
-    void this.bot
-      .start({
-        drop_pending_updates: false,
-        onStart: (info) => {
-          this.connectedUsername = info.username ?? null;
-          logInfo("TG", `connected as @${info.username} via ${this.config.gateway.telegram.base_url}`, {
+    this.reconnectAbort = new AbortController();
+    void this.runPollingLoop();
+  }
+
+  private async runPollingLoop(): Promise<void> {
+    let backoffMs = 2_000;
+    while (this.running) {
+      let connectedInRun = false;
+      try {
+        await this.bot.start({
+          drop_pending_updates: false,
+          onStart: (info) => {
+            connectedInRun = true;
+            backoffMs = 2_000;
+            this.connectedUsername = info.username ?? null;
+            logInfo("TG", `connected as @${info.username} via ${this.config.gateway.telegram.base_url}`, {
+              timeZone: this.config.owner.timezone,
+            });
+            void this.syncBotCommands().catch((err) => {
+              logWarn("TG", `failed to register Telegram bot commands: ${summarizeError(err)}`);
+            });
+          },
+        });
+        if (!this.running) break;
+      } catch (err) {
+        if (!this.running) break;
+        this.connectedUsername = null;
+        if (err instanceof GrammyError && err.error_code === 401) {
+          logError("TG", "invalid bot token (HTTP 401), stopping Telegram polling", err, {
             timeZone: this.config.owner.timezone,
           });
-          void this.syncBotCommands().catch((err) => {
-            logWarn("TG", `failed to register Telegram bot commands: ${summarizeError(err)}`);
-          });
-        },
-      })
-      .catch((err) => {
-        if (this.running) {
-          logError("TG", "polling error", err, {
-            timeZone: this.config.owner.timezone,
-          });
+          this.running = false;
+          break;
         }
-      });
+        logError("TG", `polling error (retrying in ${Math.round(backoffMs / 1000)}s)`, err, {
+          timeZone: this.config.owner.timezone,
+        });
+      }
+      if (!this.running) break;
+      if (connectedInRun) {
+        backoffMs = 2_000;
+      }
+      await sleepAbortable(backoffMs, this.reconnectAbort?.signal);
+      backoffMs = Math.min(30_000, backoffMs * 2);
+    }
   }
 
   async stop(): Promise<void> {
     if (!this.running) return;
     this.running = false;
     this.connectedUsername = null;
+    this.reconnectAbort?.abort();
+    this.reconnectAbort = null;
     await this.bot.stop();
   }
 
@@ -743,4 +770,20 @@ export function getTelegramRetryAfterMs(err: unknown): number | undefined {
 function sleep(ms: number): Promise<void> {
   if (ms <= 0) return Promise.resolve();
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function sleepAbortable(ms: number, signal?: AbortSignal): Promise<void> {
+  if (ms <= 0 || signal?.aborted) return Promise.resolve();
+  return new Promise((resolve) => {
+    const onAbort = () => {
+      clearTimeout(timer);
+      resolve();
+    };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    timer.unref?.();
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
 }

@@ -167,17 +167,6 @@ export function prepareExternalCliOverlay(
 
   const resolvedMode = resolveEffectiveCliModeArgs(params.backend, params.hatoConfig);
   const command = resolveBackendCommand(params.backend, params.hatoConfig);
-
-  const mcpSecretEnv: Record<string, string> = {};
-  if (params.contextMcp) {
-    Object.assign(mcpSecretEnv, params.contextMcp.env);
-  }
-  for (const srv of authorizedWorkerServers) {
-    if (srv.transport === "stdio") {
-      Object.assign(mcpSecretEnv, resolveMcpServerEnv(srv));
-    }
-  }
-
   const customEnv = resolveExternalCliCustomEnv(params.hatoConfig);
 
   if (params.backend === "codex-cli") {
@@ -271,7 +260,6 @@ export function prepareExternalCliOverlay(
         workerProxyEnv: params.workerProxyEnv,
         extraEnv: {
           ...customEnv,
-          ...mcpSecretEnv,
           CODEX_HOME: shadowCodexHome,
         },
       }),
@@ -315,7 +303,6 @@ export function prepareExternalCliOverlay(
         workerProxyEnv: params.workerProxyEnv,
         extraEnv: {
           ...customEnv,
-          ...mcpSecretEnv,
         },
       }),
       stagedSkillsDir,
@@ -408,7 +395,6 @@ export function prepareExternalCliOverlay(
         workerProxyEnv: params.workerProxyEnv,
         extraEnv: {
           ...customEnv,
-          ...mcpSecretEnv,
           OPENCODE_CONFIG: overlayConfigPath,
         },
       }),
@@ -443,13 +429,22 @@ export function prepareExternalCliOverlay(
         workerProxyEnv: params.workerProxyEnv,
         extraEnv: {
           ...customEnv,
-          ...mcpSecretEnv,
         },
       }),
       stagedSkillsDir,
       generatedFiles,
     };
   }
+
+  const extPiDir = resolve(runtimeRootDir, "external-pi", ticketToken);
+  mkdirSync(extPiDir, { recursive: true });
+  const extPiMcpMap = buildStandardMcpServersMap({
+    contextMcp: params.contextMcp,
+    workerServers: authorizedWorkerServers,
+  });
+  const extPiMcpPath = join(extPiDir, "mcp_config.json");
+  writeFileSync(extPiMcpPath, `${JSON.stringify({ mcpServers: extPiMcpMap }, null, 2)}\n`, "utf8");
+  generatedFiles.push(extPiMcpPath);
 
   return {
     backend: params.backend,
@@ -461,7 +456,7 @@ export function prepareExternalCliOverlay(
       workerProxyEnv: params.workerProxyEnv,
       extraEnv: {
         ...customEnv,
-        ...mcpSecretEnv,
+        PI_MCP_CONFIG: extPiMcpPath,
       },
     }),
     stagedSkillsDir,

@@ -21,7 +21,13 @@ import { ModelRegistry } from "./config/models.js";
 import { ScopedProxyRouter } from "./config/proxy.js";
 import { getOptionalSecret, loadSecretEnv, reloadSecretEnv, requireSecret } from "./config/secrets.js";
 import { ensureHatoHomeConfig } from "./config/paths.js";
-import { bindQqHomeChannel, bindTelegramHomeChannel, writeHatoConfig } from "./config/store.js";
+import {
+  bindQqHomeChannel,
+  bindTelegramHomeChannel,
+  resolveActiveHomeBinding,
+  unbindHomeChannel,
+  writeHatoConfig,
+} from "./config/store.js";
 import { openDatabase } from "./db/client.js";
 import { HatoRepository } from "./db/repo.js";
 import {
@@ -148,9 +154,56 @@ async function main(): Promise<void> {
     bus,
     getModelRegistry: () => modelRegistry,
     proxyRouter,
+    executeSensitiveFileConfirm: async (canonicalUserId, payload) => {
+      if (payload.channel === "web") {
+        if (payload.text?.trim()) {
+          repo.appendRawMessage({
+            canonicalUserId,
+            channel: "web",
+            role: "assistant",
+            content: payload.text.trim(),
+            createdAt: Date.now(),
+          });
+          personaRuntime.refreshTranscriptFromDb();
+        }
+        return {
+          ok: false,
+          message: `Web Console 暂不支持直接发送文件附件，本地路径为: ${payload.path}`,
+        };
+      }
+      const outbound = payload.strictChannel
+        ? resolveStrictOutboundTarget(payload.channel)
+        : resolveOutboundTarget(payload.channel);
+      if (!outbound?.adapter.sendFile) {
+        return {
+          ok: false,
+          message: `${payload.channel.toUpperCase()} 网关未就绪或未绑定 owner，无法发送文件: ${payload.path}`,
+        };
+      }
+      if (payload.text?.trim()) {
+        await outbound.adapter.sendText(outbound.targetId, payload.text.trim());
+      }
+      await outbound.adapter.sendFile(
+        outbound.targetId,
+        payload.path,
+        basename(payload.path),
+        payload.caption,
+      );
+      return {
+        ok: true,
+        message: `已发送敏感文件到 ${outbound.channel.toUpperCase()}: ${basename(payload.path)}`,
+      };
+    },
   });
+  const recoveredTickets = ticketCoordinator.recoverStaleTickets();
+  if (recoveredTickets > 0) {
+    logWarn("DISPATCH", `recovered ${recoveredTickets} stale in-flight ticket(s) from previous run`);
+  }
   personaRuntime.setDelegateHandler((input) => ticketCoordinator.enqueueDelegation(input));
   personaRuntime.setImageGenHandler((input) => ticketCoordinator.enqueueImageGeneration(input));
+  personaRuntime.setSensitiveFileConfirmHandler((input) =>
+    ticketCoordinator.enqueueSensitiveFileConfirm(input),
+  );
   personaRuntime.setStickerHandlers({
     onSearch: async ({ canonicalUserId, query, emotion, limit }) => {
       const matches = stickerStore.search(canonicalUserId, query, { emotion, limit });
@@ -501,6 +554,7 @@ async function main(): Promise<void> {
     await mcpPool.syncConfig(mcpConfig, { eagerZones: ["personal"] });
     personaRuntime.updateConfig(nextConfig, memoryStore);
     memoryCurator.updateConfig(nextConfig, memoryStore);
+    markdownRenderer.updateBrowserConfig(resolveWebBrowserConfig(nextConfig));
     tgAdapter?.updateConfig(nextConfig);
     qqAdapter?.updateConfig(nextConfig);
 
@@ -580,19 +634,44 @@ async function main(): Promise<void> {
     syncMemory: (uid: string, opts?: { includeDenied?: boolean }) =>
       memoryCurator.retainPending(uid, { includeDeniedRetries: opts?.includeDenied ?? true }),
     forgetMemory: (uid: string, query: string) => memoryCurator.forgetByQuery(uid, query),
-    ...(platformInfo?.channel === "tg"
+    ...(platformInfo?.channel === "tg" || platformInfo?.channel === "qq"
       ? {
           setHomeChannel: async () => {
-            const bound = bindTelegramHomeChannel({
+            const activeHome = resolveActiveHomeBinding(hatoConfig, repo);
+            if (activeHome.bound) {
+              const homeLabel = `${activeHome.channel?.toUpperCase() ?? "UNKNOWN"}:${activeHome.targetId ?? ""}`;
+              throw new Error(
+                `当前已绑定原 Home Channel（${homeLabel}），必须先前往 Web 控制台解绑原 Home 后，/sethome 才能生效。`,
+              );
+            }
+            if (platformInfo.channel === "tg") {
+              const bound = bindTelegramHomeChannel({
+                hatoConfigPath: HATO_CONFIG_PATH,
+                repo,
+                canonicalUserId,
+                tgUserId: platformInfo.platformUserId,
+                currentConfig: hatoConfig,
+              });
+              hatoConfig = bound.updatedConfig;
+              personaRuntime.updateConfig(hatoConfig);
+              tgAdapter?.updateConfig(hatoConfig);
+              return {
+                channel: platformInfo.channel,
+                targetId: platformInfo.platformUserId,
+                addedToWhitelist: bound.addedToWhitelist,
+                savedToConfig: bound.savedToConfig,
+              };
+            }
+            const bound = bindQqHomeChannel({
               hatoConfigPath: HATO_CONFIG_PATH,
               repo,
               canonicalUserId,
-              tgUserId: platformInfo.platformUserId,
+              qqOpenId: platformInfo.platformUserId,
               currentConfig: hatoConfig,
             });
             hatoConfig = bound.updatedConfig;
             personaRuntime.updateConfig(hatoConfig);
-            tgAdapter?.updateConfig(hatoConfig);
+            qqAdapter?.updateConfig(hatoConfig);
             return {
               channel: platformInfo.channel,
               targetId: platformInfo.platformUserId,
@@ -810,11 +889,14 @@ async function main(): Promise<void> {
         }
       }
       if (outbound) {
-        await outbound.adapter.sendBubbles(
-          outbound.targetId,
-          bubbles,
-          hatoConfig.gateway.bubbles.delay_ms_range,
-        );
+        await outbound.adapter
+          .sendBubbles(outbound.targetId, bubbles, hatoConfig.gateway.bubbles.delay_ms_range)
+          .catch((err) => {
+            logWarn(
+              outbound.channel.toUpperCase(),
+              `failed to send ticket_result narration bubbles: ${summarizeError(err)}`,
+            );
+          });
       }
 
       // Wall 3: only send failure diagnostics or explicit code/diff blocks unprompted;
@@ -832,7 +914,12 @@ async function main(): Promise<void> {
             : `**${block.title}**\n${block.content}`;
         webVerbatimParts.push(text);
         if (outbound) {
-          await outbound.adapter.sendText(outbound.targetId, text);
+          await outbound.adapter.sendText(outbound.targetId, text).catch((err) => {
+            logWarn(
+              outbound.channel.toUpperCase(),
+              `failed to send verbatim block ${block.title}: ${summarizeError(err)}`,
+            );
+          });
         }
       }
       const pendingArtifacts = filterPendingAutoArtifacts({
@@ -923,28 +1010,34 @@ async function main(): Promise<void> {
 
   const ensureTelegramStarted = async () => {
     if (tgAdapter) return;
-    if (hatoConfig.owner.channels.tg.user_ids.length === 0) {
+    const activeHome = resolveActiveHomeBinding(hatoConfig, repo);
+    if (!activeHome.bound && hatoConfig.owner.channels.tg.user_ids.length === 0) {
       const pairingCode = repo.getOrCreateHomePairingCode();
       logInfo(
         "TG",
-        `owner.channels.tg.user_ids 为空，尚未绑定主人。请在 Telegram 私聊 Bot 发送: /sethome ${pairingCode}`,
+        `尚未绑定 Home Channel。请在 Telegram 私聊 Bot 发送: /sethome ${pairingCode}`,
       );
-    } else {
-      repo.deleteRuntimeSetting("home_pairing_code");
     }
 
     const botToken = requireSecret(hatoConfig.gateway.telegram.bot_token_env, "Telegram gateway");
-    tgAdapter = new TelegramAdapter({
+    const adapter = new TelegramAdapter({
       config: hatoConfig,
       botToken,
       proxyRouter,
       onConfirmAction: (ticketId, approved) =>
         ticketCoordinator.handleConfirmAction(ticketId, approved),
       onClaimHome: async ({ platformUserId, code, username }) => {
+        const currentHome = resolveActiveHomeBinding(hatoConfig, repo);
+        if (currentHome.bound) {
+          return {
+            ok: false,
+            reply: `当前已绑定原 Home Channel（${currentHome.channel?.toUpperCase()}: ${currentHome.targetId}），必须先在 Web 控制台解绑原 Home 后，/sethome 才能生效。`,
+          };
+        }
         if (!repo.verifyAndConsumeHomePairingCode(code)) {
           return {
             ok: false,
-            reply: "配对码无效或已过期，请核对启动终端中显示的 `/sethome <配对码>`。",
+            reply: "配对码无效、已过期或尝试次数过多，请前往 Web 控制台查看最新 `/sethome <配对码>`。",
           };
         }
         const bound = bindTelegramHomeChannel({
@@ -1003,6 +1096,17 @@ async function main(): Promise<void> {
           }
         }
 
+        const confirmTextRes = await ticketCoordinator.tryHandleConfirmText(
+          msg.canonicalUserId,
+          msg.text,
+        );
+        if (confirmTextRes.handled) {
+          if (confirmTextRes.reply) {
+            await tgAdapter?.sendText(msg.platformUserId, confirmTextRes.reply, msg.platformMsgId);
+          }
+          return;
+        }
+
         const interrupt = personaRuntime.handleIncomingDuringActiveTurn(msg);
         if (interrupt.action === "steered") {
           if (interrupt.shouldSendAck) {
@@ -1017,7 +1121,8 @@ async function main(): Promise<void> {
       },
     });
 
-    await tgAdapter.start();
+    await adapter.start();
+    tgAdapter = adapter;
   };
 
   if (hatoConfig.gateway.telegram.enabled) {
@@ -1026,11 +1131,12 @@ async function main(): Promise<void> {
 
   const ensureQqStarted = async () => {
     if (qqAdapter) return;
-    if (hatoConfig.owner.channels.qq.open_ids.length === 0) {
+    const activeHome = resolveActiveHomeBinding(hatoConfig, repo);
+    if (!activeHome.bound && hatoConfig.owner.channels.qq.open_ids.length === 0) {
       const pairingCode = repo.getOrCreateHomePairingCode();
       logInfo(
         "QQ",
-        `owner.channels.qq.open_ids 为空，尚未绑定主人。请在 QQ 私聊机器人发送: /sethome ${pairingCode}`,
+        `尚未绑定 Home Channel。请在 QQ 私聊机器人发送: /sethome ${pairingCode}`,
       );
     }
     const appId = hatoConfig.gateway.qq.app_id.trim();
@@ -1038,16 +1144,23 @@ async function main(): Promise<void> {
       throw new Error("QQ gateway is enabled, but gateway.qq.app_id is empty in config/hato.toml.");
     }
     const clientSecret = requireSecret(hatoConfig.gateway.qq.client_secret_env, "QQ gateway");
-    qqAdapter = new QqAdapter({
+    const adapter = new QqAdapter({
       config: hatoConfig,
       appId,
       clientSecret,
       proxyRouter,
       onClaimHome: async ({ platformUserId, code }) => {
+        const currentHome = resolveActiveHomeBinding(hatoConfig, repo);
+        if (currentHome.bound) {
+          return {
+            ok: false,
+            reply: `当前已绑定原 Home Channel（${currentHome.channel?.toUpperCase()}: ${currentHome.targetId}），必须先在 Web 控制台解绑原 Home 后，/sethome 才能生效。`,
+          };
+        }
         if (!repo.verifyAndConsumeHomePairingCode(code)) {
           return {
             ok: false,
-            reply: "配对码无效或已过期，请核对启动终端中显示的 /sethome <配对码>。",
+            reply: "配对码无效、已过期或尝试次数过多，请前往 Web 控制台查看最新 /sethome <配对码>。",
           };
         }
         const bound = bindQqHomeChannel({
@@ -1101,6 +1214,17 @@ async function main(): Promise<void> {
           }
         }
 
+        const confirmTextRes = await ticketCoordinator.tryHandleConfirmText(
+          msg.canonicalUserId,
+          msg.text,
+        );
+        if (confirmTextRes.handled) {
+          if (confirmTextRes.reply) {
+            await qqAdapter?.sendText(msg.platformUserId, confirmTextRes.reply, msg.platformMsgId);
+          }
+          return;
+        }
+
         const interrupt = personaRuntime.handleIncomingDuringActiveTurn(msg);
         if (interrupt.action === "steered") {
           if (interrupt.shouldSendAck) {
@@ -1115,7 +1239,8 @@ async function main(): Promise<void> {
       },
     });
 
-    await qqAdapter.start();
+    await adapter.start();
+    qqAdapter = adapter;
   };
 
   if (hatoConfig.gateway.qq.enabled) {
@@ -1150,6 +1275,7 @@ async function main(): Promise<void> {
       },
     }),
     toggleGateway: async (channel, enabled) => {
+      const prevConfig = hatoConfig;
       try {
         const nextConfig: HatoConfig = {
           ...hatoConfig,
@@ -1181,8 +1307,32 @@ async function main(): Promise<void> {
         personaRuntime.updateConfig(hatoConfig);
         return { ok: true };
       } catch (err) {
+        hatoConfig = prevConfig;
         return { ok: false, error: err instanceof Error ? err.message : String(err) };
       }
+    },
+    unbindHome: async (opts) => {
+      const res = unbindHomeChannel({
+        hatoConfigPath: HATO_CONFIG_PATH,
+        repo,
+        canonicalUserId: hatoConfig.owner.canonical_user_id,
+        currentConfig: hatoConfig,
+        clearChannelWhitelist: opts?.clearChannelWhitelist,
+      });
+      hatoConfig = res.updatedConfig;
+      personaRuntime.updateConfig(hatoConfig);
+      tgAdapter?.updateConfig(hatoConfig);
+      qqAdapter?.updateConfig(hatoConfig);
+      logInfo(
+        "HATO",
+        `unbound home channel via Web Console (prev=${res.previousHome.channel ?? "none"}:${res.previousHome.targetId ?? ""}, clearedWhitelist=${res.clearedWhitelist})`,
+      );
+      return {
+        ok: true,
+        previousHome: res.previousHome,
+        home: resolveActiveHomeBinding(hatoConfig, repo),
+        clearedWhitelist: res.clearedWhitelist,
+      };
     },
   });
   await webConsoleServer.start();
@@ -1300,9 +1450,12 @@ async function main(): Promise<void> {
       );
     },
   });
-  scriptScheduler.start(60_000);
+  scriptScheduler.start(15_000);
 
+  let shuttingDown = false;
   const shutdown = async () => {
+    if (shuttingDown) return;
+    shuttingDown = true;
     logInfo("HATO", "shutting down...");
     clearTimeout(updateStartupTimer);
     clearInterval(updatePeriodicTimer);
@@ -1311,6 +1464,7 @@ async function main(): Promise<void> {
     debouncer.dispose();
     compactionManager.dispose();
     memoryCurator.dispose();
+    await ticketCoordinator.abortAll().catch(() => undefined);
     await browserRuntime.dispose();
     await markdownRenderer.dispose();
     await mcpPool.closeAll();
@@ -1331,11 +1485,13 @@ function captureReloadSnapshot(
   modelRegistry: ModelRegistry,
   personaRuntime: PersonaRuntime,
 ): ReloadSnapshot {
+  const hindsightApiKeyEnv = resolveHindsightConfig(config).apiKeyEnv;
   const envNames = new Set<string>([
     config.gateway.telegram.bot_token_env,
     config.gateway.qq.client_secret_env,
     resolveTavilySearchConfig(config).apiKeyEnv,
     resolveMemoryEchoConfig(config).apiKeyEnv,
+    ...(hindsightApiKeyEnv ? [hindsightApiKeyEnv] : []),
     ...modelRegistry.listProviders().map((p) => p.apiKeyEnv),
   ]);
   const secretFingerprints: Record<string, string> = {};

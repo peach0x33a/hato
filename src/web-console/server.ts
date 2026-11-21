@@ -1,12 +1,14 @@
+import { timingSafeEqual } from "node:crypto";
 import { copyFileSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import http, { type IncomingMessage, type ServerResponse } from "node:http";
 import { dirname, extname, resolve, sep } from "node:path";
 import type { ImageContent } from "@earendil-works/pi-ai";
 import type { BrowserRuntime } from "../browser/runtime.js";
 import type { ActorLock } from "../bus/actor-bus.js";
-import { tryHandleSlashCommand, type SlashCommandDeps } from "../commands/slash.js";
+import { tryExecuteSlashCommand, type SlashCommandDeps } from "../commands/slash.js";
 import {
   loadHatoConfig,
+  resolveHindsightConfig,
   resolveMemoryEchoConfig,
   resolvePromptDisabled,
   resolveMemoryProvider,
@@ -23,7 +25,15 @@ import type { ModelRegistry } from "../config/models.js";
 import { ModelsDevRegistry } from "../config/models-dev.js";
 import type { ScopedProxyRouter } from "../config/proxy.js";
 import { getOptionalSecret, reloadSecretEnv } from "../config/secrets.js";
-import { mergeEnvFile, readEnvMap, writeHatoConfig, writeModelsConfig } from "../config/store.js";
+import {
+  mergeEnvFile,
+  readEnvMap,
+  resolveActiveHomeBinding,
+  unbindHomeChannel,
+  writeHatoConfig,
+  writeModelsConfig,
+  type ActiveHomeBinding,
+} from "../config/store.js";
 import type { HatoRepository } from "../db/repo.js";
 import type { TicketCoordinator } from "../dispatch/coordinator.js";
 import { QqOpenApiClient } from "../gateway/qq-client.js";
@@ -64,7 +74,7 @@ import {
   summarizeTurnTraces,
 } from "../stats/metrics.js";
 import type { StickerService } from "../stickers/service.js";
-import { logInfo, summarizeError } from "../utils/logger.js";
+import { logInfo, logWarn, summarizeError } from "../utils/logger.js";
 import {
   EXTERNAL_CLI_BACKENDS,
   probeAllExternalClis,
@@ -104,6 +114,60 @@ export interface WebConsoleServerDeps {
     qq: { enabled: boolean; running: boolean; online: boolean; sessionId?: string };
   };
   toggleGateway?: (channel: "tg" | "qq", enabled: boolean) => Promise<{ ok: boolean; error?: string }>;
+  unbindHome?: (options?: { clearChannelWhitelist?: boolean }) => Promise<{
+    ok: boolean;
+    previousHome: ActiveHomeBinding;
+    home: ActiveHomeBinding;
+    clearedWhitelist: boolean;
+    error?: string;
+  }>;
+}
+
+class HttpStatusError extends Error {
+  constructor(
+    public readonly statusCode: number,
+    message: string,
+  ) {
+    super(message);
+    this.name = "HttpStatusError";
+  }
+}
+
+const LOOPBACK_HOSTS = new Set(["127.0.0.1", "localhost", "::1", "[::1]"]);
+const MAX_CACHE_ENTRIES = 200;
+
+function isLoopbackHost(host: string): boolean {
+  return LOOPBACK_HOSTS.has(host.trim().toLowerCase());
+}
+
+function timingSafeTokenEqual(provided: string, expected: string): boolean {
+  const a = Buffer.from(provided, "utf8");
+  const b = Buffer.from(expected, "utf8");
+  if (a.length === 0 || a.length !== b.length) return false;
+  return timingSafeEqual(a, b);
+}
+
+function extractHostnameFromHostHeader(hostHeader: string): string {
+  const trimmed = hostHeader.trim().toLowerCase();
+  if (trimmed.startsWith("[")) {
+    const closeIdx = trimmed.indexOf("]");
+    return closeIdx > 0 ? trimmed.slice(0, closeIdx + 1) : trimmed;
+  }
+  const colonIdx = trimmed.lastIndexOf(":");
+  return colonIdx > 0 ? trimmed.slice(0, colonIdx) : trimmed;
+}
+
+function pruneCache<T extends { expiresAt: number }>(cache: Map<string, T>, nowMs = Date.now()): void {
+  for (const [k, v] of cache.entries()) {
+    if (v.expiresAt <= nowMs) {
+      cache.delete(k);
+    }
+  }
+  while (cache.size > MAX_CACHE_ENTRIES) {
+    const firstKey = cache.keys().next().value;
+    if (firstKey === undefined) break;
+    cache.delete(firstKey);
+  }
 }
 
 const MIME_TYPES: Record<string, string> = {
@@ -172,6 +236,12 @@ export class WebConsoleServer {
     const cfg = resolveWebConsoleConfig(this.deps.getConfig());
     if (!cfg.enabled) return null;
     if (this.server) return this.getAddress();
+    if (!isLoopbackHost(cfg.host) && !getOptionalSecret(cfg.authTokenEnv)) {
+      logWarn(
+        "WEB",
+        `Web Console is bound to non-loopback host "${cfg.host}" without ${cfg.authTokenEnv}. Set ${cfg.authTokenEnv} in .env if exposed beyond a trusted LAN.`,
+      );
+    }
 
     const server = http.createServer((req, res) => {
       void this.handleRequest(req, res);
@@ -260,6 +330,7 @@ export class WebConsoleServer {
           telegramEnabled: hato.gateway.telegram.enabled,
           pendingTakeover: this.deps.getBrowserRuntime().isPendingTakeover(),
           authRequired: Boolean(authSecret),
+          unauthenticatedPublicBind: !isLoopbackHost(consoleCfg.host) && !authSecret,
           runtime: {
             isRoot,
             inDocker,
@@ -274,7 +345,12 @@ export class WebConsoleServer {
       }
 
       if (pathname.startsWith("/api/")) {
-        if (!this.isAuthorized(req)) {
+        const csrfCheck = this.validateRequestOriginAndHost(req, method);
+        if (!csrfCheck.ok) {
+          sendJson(res, 403, { ok: false, error: csrfCheck.error });
+          return;
+        }
+        if (!this.isAuthorized(req, pathname, parsedUrl)) {
           sendJson(res, 401, { ok: false, error: "Unauthorized: invalid or missing console token" });
           return;
         }
@@ -285,11 +361,35 @@ export class WebConsoleServer {
         }
         if (pathname === "/api/pairing-code" && method === "GET") {
           const repo = this.deps.getRepo();
+          const hato = this.deps.getConfig();
+          const home = resolveActiveHomeBinding(hato, repo);
+          if (home.bound) {
+            sendJson(res, 200, {
+              ok: true,
+              homeBound: true,
+              currentHome: home,
+              code: null,
+              command: null,
+              expiresAt: null,
+            });
+            return;
+          }
           if (parsedUrl.searchParams.get("refresh") === "1") {
             repo.deleteRuntimeSetting("home_pairing_code");
           }
-          const code = repo.getOrCreateHomePairingCode();
-          sendJson(res, 200, { ok: true, code, command: `/sethome ${code}` });
+          const info = repo.getHomePairingCodeInfo();
+          sendJson(res, 200, {
+            ok: true,
+            homeBound: false,
+            currentHome: home,
+            code: info.code,
+            command: `/sethome ${info.code}`,
+            expiresAt: info.expiresAt,
+          });
+          return;
+        }
+        if (pathname === "/api/home/unbind" && method === "POST") {
+          await this.handleUnbindHome(req, res);
           return;
         }
         if (pathname === "/api/gateway/toggle" && method === "POST") {
@@ -503,27 +603,151 @@ export class WebConsoleServer {
 
       sendJson(res, 405, { ok: false, error: "Method Not Allowed" });
     } catch (err) {
-      const msg = summarizeError(err);
+      const statusCode = err instanceof HttpStatusError ? err.statusCode : 500;
+      const msg = err instanceof HttpStatusError ? err.message : summarizeError(err);
       if (!res.headersSent) {
-        sendJson(res, 500, { ok: false, error: msg });
+        sendJson(res, statusCode, { ok: false, error: msg });
       } else {
         res.end();
       }
     }
   }
 
-  private isAuthorized(req: IncomingMessage): boolean {
+  private validateRequestOriginAndHost(
+    req: IncomingMessage,
+    method: string,
+  ): { ok: true } | { ok: false; error: string } {
+    const consoleCfg = resolveWebConsoleConfig(this.deps.getConfig());
+    const hostHeader = typeof req.headers.host === "string" ? req.headers.host.trim() : "";
+
+    // DNS rebinding defense when bound to loopback: reject unexpected Host headers.
+    if (hostHeader && isLoopbackHost(consoleCfg.host)) {
+      const reqHost = extractHostnameFromHostHeader(hostHeader);
+      if (!isLoopbackHost(reqHost)) {
+        return { ok: false, error: `Forbidden Host header "${hostHeader}"` };
+      }
+    }
+
+    const secFetchSite =
+      typeof req.headers["sec-fetch-site"] === "string"
+        ? req.headers["sec-fetch-site"].trim().toLowerCase()
+        : "";
+    if (secFetchSite === "cross-site") {
+      return { ok: false, error: "Forbidden cross-site API request" };
+    }
+
+    const originHeader = typeof req.headers.origin === "string" ? req.headers.origin.trim() : "";
+    if (originHeader) {
+      try {
+        const originUrl = new URL(originHeader);
+        const sameHost = hostHeader && originUrl.host.toLowerCase() === hostHeader.toLowerCase();
+        const isViteDevSameOrigin =
+          secFetchSite === "same-origin" &&
+          isLoopbackHost(consoleCfg.host) &&
+          isLoopbackHost(originUrl.hostname);
+        if (!sameHost && !isViteDevSameOrigin) {
+          return { ok: false, error: `Forbidden cross-origin request from "${originHeader}"` };
+        }
+      } catch {
+        return { ok: false, error: "Malformed Origin header" };
+      }
+    }
+
+    if (method === "POST" || method === "PUT" || method === "PATCH") {
+      const contentType =
+        typeof req.headers["content-type"] === "string"
+          ? req.headers["content-type"].trim().toLowerCase()
+          : "";
+      const contentLength = Number(req.headers["content-length"] ?? "0");
+      const hasBody =
+        (Number.isFinite(contentLength) && contentLength > 0) ||
+        Boolean(req.headers["transfer-encoding"]);
+      if (hasBody && !contentType.startsWith("application/json")) {
+        return {
+          ok: false,
+          error: "Unsupported Content-Type: JSON endpoints require application/json",
+        };
+      }
+    }
+
+    return { ok: true };
+  }
+
+  private isAuthorized(req: IncomingMessage, pathname: string, parsedUrl: URL): boolean {
     const consoleCfg = resolveWebConsoleConfig(this.deps.getConfig());
     const requiredToken = getOptionalSecret(consoleCfg.authTokenEnv);
     if (!requiredToken) return true;
 
     const authHeader = req.headers.authorization ?? "";
     const bearer = authHeader.startsWith("Bearer ") ? authHeader.slice(7).trim() : "";
-    if (bearer && bearer === requiredToken) return true;
+    if (bearer && timingSafeTokenEqual(bearer, requiredToken)) return true;
 
     const customHeader = req.headers["x-hato-token"];
-    if (typeof customHeader === "string" && customHeader.trim() === requiredToken) return true;
+    if (typeof customHeader === "string" && timingSafeTokenEqual(customHeader.trim(), requiredToken)) {
+      return true;
+    }
+
+    // Support query token exclusively for image <img> tags on sticker thumbnails.
+    if (
+      (req.method ?? "GET").toUpperCase() === "GET" &&
+      /^\/api\/stickers\/[^/]+\/image$/.test(pathname)
+    ) {
+      const queryToken = parsedUrl.searchParams.get("token")?.trim() ?? "";
+      if (queryToken && timingSafeTokenEqual(queryToken, requiredToken)) {
+        return true;
+      }
+    }
+
     return false;
+  }
+
+  private async handleUnbindHome(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    const body = (await readJsonBody(req)) as { clearChannelWhitelist?: unknown };
+    const clearChannelWhitelist = body.clearChannelWhitelist === true;
+    const repo = this.deps.getRepo();
+
+    if (this.deps.unbindHome) {
+      const result = await this.deps.unbindHome({ clearChannelWhitelist });
+      if (!result.ok) {
+        sendJson(res, 400, { ok: false, error: result.error ?? "解绑原 Home 失败" });
+        return;
+      }
+      const pairing = repo.getHomePairingCodeInfo();
+      sendJson(res, 200, {
+        ok: true,
+        previousHome: result.previousHome,
+        home: result.home,
+        clearedWhitelist: result.clearedWhitelist,
+        pairing: {
+          code: pairing.code,
+          command: `/sethome ${pairing.code}`,
+          expiresAt: pairing.expiresAt,
+        },
+      });
+      return;
+    }
+
+    const hato = this.deps.getConfig();
+    const resUnbind = unbindHomeChannel({
+      hatoConfigPath: this.deps.hatoConfigPath,
+      repo,
+      canonicalUserId: hato.owner.canonical_user_id,
+      currentConfig: hato,
+      clearChannelWhitelist,
+    });
+    await this.deps.reloadAll();
+    const pairing = repo.getHomePairingCodeInfo();
+    sendJson(res, 200, {
+      ok: true,
+      previousHome: resUnbind.previousHome,
+      home: resolveActiveHomeBinding(this.deps.getConfig(), repo),
+      clearedWhitelist: resUnbind.clearedWhitelist,
+      pairing: {
+        code: pairing.code,
+        command: `/sethome ${pairing.code}`,
+        expiresAt: pairing.expiresAt,
+      },
+    });
   }
 
   private async handleToggleGateway(req: IncomingMessage, res: ServerResponse): Promise<void> {
@@ -623,6 +847,7 @@ export class WebConsoleServer {
       botId = undefined;
     }
 
+    pruneCache(this.botAvatarCache);
     this.botAvatarCache.set(cacheKey, {
       expiresAt: Date.now() + (avatarUrl || username || displayName ? 10 * 60_000 : 15_000),
       avatarUrl,
@@ -661,10 +886,12 @@ export class WebConsoleServer {
     const slots = registry.listSlots();
     const personaTarget = slots.find((s) => s.slot === "persona")?.target ?? "";
     const routerTarget = slots.find((s) => s.slot === "router")?.target ?? "";
+    const home = resolveActiveHomeBinding(hato, repo);
 
     sendJson(res, 200, {
       ok: true,
       uptimeSec: Math.round((Date.now() - this.startedAtMs) / 1000),
+      home,
       gateways: {
         telegram: {
           ...gwStatus.telegram,
@@ -831,18 +1058,30 @@ export class WebConsoleServer {
 
     try {
       if (text.startsWith("/")) {
-        const slashReply = await tryHandleSlashCommand(uid, text, this.deps.getSlashDeps(uid));
-        if (slashReply !== null) {
-          console.log(
-            formatGatewayMessageLog({
-              direction: "outbound",
-              channel: "web",
-              timeZone: hato.owner.timezone,
-              userSlug: uid,
-              text: slashReply,
-            }),
-          );
-          emit({ type: "slash_reply", text: slashReply });
+        const slashOut = await tryExecuteSlashCommand({
+          canonicalUserId: uid,
+          text,
+          channel: "web",
+          platformUserId: uid,
+          deps: this.deps.getSlashDeps(uid),
+        });
+        if (slashOut !== null) {
+          if (slashOut.photo) {
+            const dataUrl = `data:image/png;base64,${slashOut.photo.buffer.toString("base64")}`;
+            emit({ type: "photo", dataUrl, caption: slashOut.photo.caption });
+          }
+          if (slashOut.text !== undefined) {
+            console.log(
+              formatGatewayMessageLog({
+                direction: "outbound",
+                channel: "web",
+                timeZone: hato.owner.timezone,
+                userSlug: uid,
+                text: slashOut.text,
+              }),
+            );
+            emit({ type: "slash_reply", text: slashOut.text });
+          }
           emit({ type: "done", pendingTakeover: this.deps.getBrowserRuntime().isPendingTakeover() });
           res.end();
           return;
@@ -1411,8 +1650,11 @@ export class WebConsoleServer {
     if (target === "all" || target === "memory") {
       const provider = resolveMemoryProvider(hato);
       const memoryEcho = resolveMemoryEchoConfig(hato);
+      const hindsightCfg = resolveHindsightConfig(hato);
+      const activeEnvName = provider === "hindsight" ? hindsightCfg.apiKeyEnv : memoryEcho.apiKeyEnv;
       const apiKey =
-        envMap[memoryEcho.apiKeyEnv]?.trim() || process.env[memoryEcho.apiKeyEnv]?.trim() || "";
+        (activeEnvName ? envMap[activeEnvName]?.trim() || process.env[activeEnvName]?.trim() : "") ||
+        "";
       const memRes = await probeMemoryService({
         provider,
         memoryEcho,
@@ -1498,6 +1740,7 @@ export class WebConsoleServer {
         proxyRouter: this.deps.getProxyRouter(),
       });
       const ttlMs = 5 * 60_000;
+      pruneCache(this.tgProfileCache);
       for (const profile of fetched) {
         resultsById.set(profile.id, profile);
         if (profile.ok) {
@@ -1546,6 +1789,49 @@ export class WebConsoleServer {
     if (!providerSlug || !modelId || !api || !baseUrl) {
       sendJson(res, 400, { ok: false, error: "测试模型需要提供供应商名称、协议、Base URL 与模型 ID" });
       return;
+    }
+
+    // Guard against exfiltrating arbitrary env secrets to attacker-controlled baseUrls.
+    const effectiveTestBaseUrl =
+      (typeof body.model?.base_url === "string" && body.model.base_url.trim()) || baseUrl;
+    if (api !== "hato-faux-api" && !apiKeyOverride && apiKeyEnv) {
+      const registry = this.deps.getModelRegistry();
+      const providers = registry.listProviders();
+      const fileConfig = registry.getFileConfig();
+      const matchingProviders = providers.filter((p) => p.apiKeyEnv === apiKeyEnv);
+      let allowedOrigin = false;
+      try {
+        const targetOrigin = new URL(effectiveTestBaseUrl).origin;
+        for (const p of matchingProviders) {
+          const provCfg = fileConfig.providers[p.slug];
+          const candidateUrls = [
+            p.baseUrl,
+            ...(provCfg?.models.map((m) => m.base_url).filter((u): u is string => Boolean(u)) ?? []),
+          ];
+          for (const candidate of candidateUrls) {
+            try {
+              if (new URL(candidate).origin === targetOrigin) {
+                allowedOrigin = true;
+                break;
+              }
+            } catch {
+              // ignore invalid stored URL
+            }
+          }
+          if (allowedOrigin) break;
+        }
+      } catch {
+        sendJson(res, 400, { ok: false, error: "无效的 Base URL" });
+        return;
+      }
+      if (!allowedOrigin) {
+        sendJson(res, 403, {
+          ok: false,
+          error:
+            "出于安全限制，未显式传入 API Key 时仅允许将已配置供应商的密钥变量发往其已保存的 Base URL 源站。",
+        });
+        return;
+      }
     }
 
     const toStringMap = (raw: unknown): Record<string, string> | undefined => {
@@ -1701,7 +1987,7 @@ export class WebConsoleServer {
     const sinceMs = sinceRaw ? parseSinceSpec(sinceRaw) : undefined;
     const afterMs = scope === "history" ? undefined : repo.getSessionResetAt(uid) ?? undefined;
 
-    const traces = repo.listTurnTraces({ limit, slot, sinceMs, afterMs });
+    const traces = repo.listTurnTraces({ canonicalUserId: uid, limit, slot, sinceMs, afterMs });
     const summary = summarizeTurnTraces(traces, resolveCostRates);
     sendJson(res, 200, { ok: true, summary, traces: attachCost(traces) });
   }
@@ -1872,11 +2158,13 @@ export class WebConsoleServer {
   private collectKnownSecretEnvNames(hato: HatoConfig, registry: ModelRegistry): string[] {
     const envMap = readEnvMap(this.envPath);
     const consoleCfg = resolveWebConsoleConfig(hato);
+    const hindsightApiKeyEnv = resolveHindsightConfig(hato).apiKeyEnv;
     const keys = new Set<string>([
       hato.gateway.telegram.bot_token_env,
       hato.gateway.qq.client_secret_env,
       resolveTavilySearchConfig(hato).apiKeyEnv,
       resolveMemoryEchoConfig(hato).apiKeyEnv,
+      ...(hindsightApiKeyEnv ? [hindsightApiKeyEnv] : []),
       ...registry.listProviders().map((p) => p.apiKeyEnv),
       ...(consoleCfg.authTokenEnv ? [consoleCfg.authTokenEnv] : []),
       ...Object.keys(envMap),
@@ -1892,7 +2180,7 @@ export class WebConsoleServer {
         res.end(
           `<!doctype html><html><body style="font-family:sans-serif;padding:32px;line-height:1.6">` +
             `<h2>Hato Web 控制台后端已运行</h2>` +
-            `<p>前端静态产物尚未构建，请运行 <code>npm run build:web</code> 后刷新页面。</p>` +
+            `<p>前端静态产物尚未构建，请运行 <code>bun run build:web</code> 后刷新页面。</p>` +
             `</body></html>`,
         );
       } else {
@@ -1947,13 +2235,17 @@ async function readJsonBody(req: IncomingMessage): Promise<unknown> {
     const buf = chunk as Buffer;
     total += buf.byteLength;
     if (total > MAX_JSON_BODY_BYTES) {
-      throw new Error("Request body exceeds 16MB limit");
+      throw new HttpStatusError(413, "Request body exceeds 16MB limit");
     }
     chunks.push(buf);
   }
   const raw = Buffer.concat(chunks).toString("utf8").trim();
   if (!raw) return {};
-  return JSON.parse(raw);
+  try {
+    return JSON.parse(raw);
+  } catch {
+    throw new HttpStatusError(400, "Invalid JSON request body");
+  }
 }
 
 function sendJson(res: ServerResponse, statusCode: number, body: unknown): void {

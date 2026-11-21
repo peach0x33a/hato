@@ -1,4 +1,4 @@
-import { appendFileSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { createWriteStream, existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { spawn, type ChildProcess } from "node:child_process";
 import { dirname, join, resolve } from "node:path";
 import { createInterface } from "node:readline";
@@ -48,7 +48,7 @@ const WORKER_RESULT_JSON_SCHEMA = {
   type: "object",
   additionalProperties: false,
   properties: {
-    status: { type: "string", enum: ["done", "needs_input", "failed"] },
+    status: { type: "string", enum: ["done", "needs_input", "awaiting_confirm", "failed"] },
     narration_hint: { type: "string" },
     verbatim_blocks: {
       type: "array",
@@ -79,6 +79,7 @@ const WORKER_RESULT_JSON_SCHEMA = {
     required_secrets: { type: "array", items: { type: "string" } },
     caveats: { type: "array", items: { type: "string" } },
     question: { type: ["string", "null"] },
+    confirm_action: { type: ["string", "null"] },
   },
   required: [
     "status",
@@ -92,6 +93,7 @@ const WORKER_RESULT_JSON_SCHEMA = {
 };
 
 const PROGRESS_THROTTLE_MS = 1200;
+const MAX_BUFFER_CHARS = 512 * 1024;
 
 /**
  * Unified ExecutionRunner for `codex`, `agy`, `opencode-v2`, `external-pi`, and `claude-code`.
@@ -147,10 +149,14 @@ export class ExternalCliRunner implements ExecutionRunner {
     if (!child) return;
     child.kill("SIGTERM");
     setTimeout(() => {
-      if (!child.killed) {
+      if (!child.killed && child.exitCode === null) {
         child.kill("SIGKILL");
       }
     }, 3000).unref();
+  }
+
+  async abortAll(): Promise<void> {
+    await Promise.all([...this.activeProcesses.keys()].map((id) => this.abort(id)));
   }
 
   private async runCli(params: {
@@ -287,14 +293,28 @@ export class ExternalCliRunner implements ExecutionRunner {
     let recordedSessionId = ticket.externalSessionId;
     let finalText = "";
     const textDeltas: string[] = [];
+    let textDeltaChars = 0;
     let structuredError: string | undefined;
     let permissionDeniedReason: string | undefined;
     const stderrChunks: string[] = [];
+    let stderrChars = 0;
     let timedOut = false;
 
+    const logStream = createWriteStream(streamLogPath, { flags: "a", encoding: "utf8" });
+    logStream.on("error", () => {
+      // best-effort trace logging
+    });
+
+    let killFallbackTimer: ReturnType<typeof setTimeout> | null = null;
     const timeoutTimer = setTimeout(() => {
       timedOut = true;
       child.kill("SIGTERM");
+      killFallbackTimer = setTimeout(() => {
+        if (!child.killed && child.exitCode === null) {
+          child.kill("SIGKILL");
+        }
+      }, 3000);
+      killFallbackTimer.unref();
     }, mandate.timeout_ms);
     timeoutTimer.unref();
 
@@ -303,11 +323,7 @@ export class ExternalCliRunner implements ExecutionRunner {
       : null;
 
     rl?.on("line", (line) => {
-      try {
-        appendFileSync(streamLogPath, `${line}\n`, "utf8");
-      } catch {
-        // best-effort trace logging
-      }
+      logStream.write(`${line}\n`);
       const ev = adapter.parseStreamLine(line);
       if (!ev) return;
 
@@ -324,14 +340,22 @@ export class ExternalCliRunner implements ExecutionRunner {
         }
       }
 
-      if (ev.textDelta) textDeltas.push(ev.textDelta);
-      if (ev.finalText !== undefined) finalText = ev.finalText;
+      if (ev.textDelta && textDeltaChars < MAX_BUFFER_CHARS) {
+        const remaining = MAX_BUFFER_CHARS - textDeltaChars;
+        const piece = ev.textDelta.slice(0, remaining);
+        textDeltas.push(piece);
+        textDeltaChars += piece.length;
+      }
+      if (ev.finalText !== undefined) finalText = ev.finalText.slice(0, MAX_BUFFER_CHARS);
       if (ev.error) structuredError = ev.error;
       if (ev.permissionDenied) permissionDeniedReason = ev.permissionDenied;
     });
 
     child.stderr?.on("data", (chunk: Buffer | string) => {
-      stderrChunks.push(String(chunk));
+      if (stderrChars >= MAX_BUFFER_CHARS) return;
+      const strChunk = String(chunk).slice(0, MAX_BUFFER_CHARS - stderrChars);
+      stderrChunks.push(strChunk);
+      stderrChars += strChunk.length;
     });
 
     const { exitCode, signal } = await new Promise<{
@@ -348,7 +372,9 @@ export class ExternalCliRunner implements ExecutionRunner {
     });
 
     clearTimeout(timeoutTimer);
+    if (killFallbackTimer) clearTimeout(killFallbackTimer);
     rl?.close();
+    logStream.end();
     this.activeProcesses.delete(ticket.ticketId);
 
     const aborted = this.abortedTickets.delete(ticket.ticketId);
@@ -442,9 +468,10 @@ export function buildContextMcpSpec(params: {
     };
   }
 
+  const isBunRuntime = typeof (globalThis as { Bun?: unknown }).Bun !== "undefined";
   return {
     command: process.execPath,
-    args: ["--import", "tsx", tsEntry],
+    args: isBunRuntime ? [tsEntry] : ["--import", "tsx", tsEntry],
     env,
   };
 }

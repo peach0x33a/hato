@@ -495,6 +495,22 @@ export interface SaveConfigResponse {
   error?: string;
 }
 
+export interface ActiveHomeBinding {
+  bound: boolean;
+  channel: "tg" | "qq" | null;
+  targetId: string | null;
+  source: "runtime" | "config" | null;
+}
+
+export interface PairingCodeResponse {
+  ok: boolean;
+  homeBound: boolean;
+  currentHome: ActiveHomeBinding;
+  code: string | null;
+  command: string | null;
+  expiresAt: number | null;
+}
+
 export interface OverviewResponse {
   ok: boolean;
   version?: string;
@@ -506,6 +522,7 @@ export interface OverviewResponse {
     releaseUrl: string;
   };
   uptimeSec: number;
+  home?: ActiveHomeBinding;
   gateways: {
     telegram: {
       enabled: boolean;
@@ -764,9 +781,21 @@ export const api = {
       method: "DELETE",
     }),
   getPairingCode: (refresh = false) =>
-    requestJson<{ ok: boolean; code: string; command: string }>(
+    requestJson<PairingCodeResponse>(
       refresh ? "/api/pairing-code?refresh=1" : "/api/pairing-code",
     ),
+  unbindHome: (clearChannelWhitelist = false) =>
+    requestJson<{
+      ok: boolean;
+      previousHome: ActiveHomeBinding;
+      home: ActiveHomeBinding;
+      clearedWhitelist: boolean;
+      pairing: { code: string; command: string; expiresAt: number };
+    }>("/api/home/unbind", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ clearChannelWhitelist }),
+    }),
   toggleGateway: (channel: "tg" | "qq", enabled: boolean) =>
     requestJson<{ ok: boolean; channel: "tg" | "qq"; enabled: boolean }>("/api/gateway/toggle", {
       method: "POST",

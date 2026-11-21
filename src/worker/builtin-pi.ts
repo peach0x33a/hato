@@ -1,7 +1,7 @@
 import { execFile } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { basename, resolve, sep } from "node:path";
+import { basename, dirname, resolve, sep } from "node:path";
 import { promisify } from "node:util";
 import { Agent, type AgentMessage, type AgentTool } from "@earendil-works/pi-agent-core";
 import { clampThinkingLevel, type AssistantMessage, type TextContent } from "@earendil-works/pi-ai";
@@ -188,6 +188,10 @@ const AskUserParams = obj({
   question: str({ description: "Clear question for the user to answer before resuming" }),
 });
 
+const RequestConfirmParams = obj({
+  action: str({ description: "Clear description of the high-risk action requiring explicit owner confirmation" }),
+});
+
 const RegisterScriptParams = obj({
   name: str({ description: "Short human-readable name for the scheduled script" }),
   script_path: str({ description: "Path to the executable/script file inside workspace" }),
@@ -207,6 +211,31 @@ const FinishTaskParams = obj({
 interface BuiltinSessionState {
   agent: Agent;
   lookedBackTotal: number;
+  lastActiveAt: number;
+  pendingConfirmKey?: string;
+  approvedConfirmKeys: Set<string>;
+}
+
+const SESSION_IDLE_TTL_MS = 30 * 60_000;
+
+function resolveRealPathOrAncestor(targetPath: string): string {
+  let cursor = resolve(targetPath);
+  const missingSegments: string[] = [];
+  while (!existsSync(cursor)) {
+    const parent = dirname(cursor);
+    if (parent === cursor) break;
+    missingSegments.unshift(basename(cursor));
+    cursor = parent;
+  }
+  let realBase = cursor;
+  try {
+    if (existsSync(cursor)) {
+      realBase = realpathSync(cursor);
+    }
+  } catch {
+    realBase = cursor;
+  }
+  return missingSegments.length > 0 ? resolve(realBase, ...missingSegments) : realBase;
 }
 
 /**
@@ -227,11 +256,20 @@ export class BuiltinPiRunner implements ExecutionRunner {
     },
   ) {}
 
+  private pruneExpiredSessions(nowMs = Date.now()): void {
+    for (const [id, session] of this.sessions.entries()) {
+      if (nowMs - session.lastActiveAt > SESSION_IDLE_TTL_MS) {
+        this.sessions.delete(id);
+      }
+    }
+  }
+
   async execute(
     ticket: TicketExecutionHandle,
     mandate: WorkerMandate,
     callbacks?: ExecutionProgressCallback,
   ): Promise<WorkerResult> {
+    this.pruneExpiredSessions();
     mkdirSync(mandate.workspace_dir, { recursive: true });
 
     const hatoConfig = this.deps.getHatoConfig();
@@ -250,6 +288,8 @@ export class BuiltinPiRunner implements ExecutionRunner {
     const state: BuiltinSessionState = {
       agent: null as unknown as Agent,
       lookedBackTotal: 0,
+      lastActiveAt: Date.now(),
+      approvedConfirmKeys: new Set(),
     };
 
     const tools = await this.buildWorkerTools({
@@ -267,6 +307,20 @@ export class BuiltinPiRunner implements ExecutionRunner {
           required_secrets: [],
           caveats: [],
           question,
+        };
+        state.agent.abort();
+      },
+      onRequestConfirm: (action, confirmKey) => {
+        if (confirmKey) state.pendingConfirmKey = confirmKey;
+        outcome.result = {
+          ticket_id: ticket.ticketId,
+          status: "awaiting_confirm",
+          narration_hint: action,
+          verbatim_blocks: [],
+          artifacts: [],
+          required_secrets: [],
+          caveats: [],
+          confirm_action: action,
         };
         state.agent.abort();
       },
@@ -352,6 +406,7 @@ export class BuiltinPiRunner implements ExecutionRunner {
       await agent.prompt(promptText);
     } catch (err) {
       if (!outcome.result) {
+        this.sessions.delete(ticket.ticketId);
         return {
           ticket_id: ticket.ticketId,
           status: "failed",
@@ -365,6 +420,7 @@ export class BuiltinPiRunner implements ExecutionRunner {
     } finally {
       clearTimeout(timeoutTimer);
       unsubscribe();
+      state.lastActiveAt = Date.now();
     }
 
     return this.finalizeOutcome(ticket.ticketId, outcome.result, agent.state.messages, {
@@ -380,10 +436,17 @@ export class BuiltinPiRunner implements ExecutionRunner {
     userReply: string,
     callbacks?: ExecutionProgressCallback,
   ): Promise<WorkerResult> {
+    this.pruneExpiredSessions();
     const existing = this.sessions.get(ticket.ticketId);
     if (!existing) {
       return this.execute(ticket, mandate, callbacks);
     }
+
+    if (existing.pendingConfirmKey) {
+      existing.approvedConfirmKeys.add(existing.pendingConfirmKey);
+      existing.pendingConfirmKey = undefined;
+    }
+    existing.lastActiveAt = Date.now();
 
     const outcome: { result?: WorkerResult } = {};
     const hatoConfig = this.deps.getHatoConfig();
@@ -405,6 +468,20 @@ export class BuiltinPiRunner implements ExecutionRunner {
         };
         existing.agent.abort();
       },
+      onRequestConfirm: (action, confirmKey) => {
+        if (confirmKey) existing.pendingConfirmKey = confirmKey;
+        outcome.result = {
+          ticket_id: ticket.ticketId,
+          status: "awaiting_confirm",
+          narration_hint: action,
+          verbatim_blocks: [],
+          artifacts: [],
+          required_secrets: [],
+          caveats: [],
+          confirm_action: action,
+        };
+        existing.agent.abort();
+      },
       onFinishTask: (res) => {
         outcome.result = res;
         existing.agent.abort();
@@ -417,19 +494,52 @@ export class BuiltinPiRunner implements ExecutionRunner {
       }
     });
 
+    const timeoutTimer = setTimeout(() => {
+      existing.agent.abort();
+    }, mandate.timeout_ms);
+    timeoutTimer.unref();
+
+    const beforeFilesSnapshot =
+      mandate.workspace_mode === "isolated"
+        ? snapshotWorkspaceFiles(mandate.workspace_dir)
+        : undefined;
+
     try {
       await existing.agent.prompt(`[USER 补充回复]\n${userReply}`);
+    } catch (err) {
+      if (!outcome.result) {
+        this.sessions.delete(ticket.ticketId);
+        return {
+          ticket_id: ticket.ticketId,
+          status: "failed",
+          narration_hint: err instanceof Error ? err.message : String(err),
+          verbatim_blocks: [],
+          artifacts: [],
+          required_secrets: [],
+          caveats: [],
+        };
+      }
     } finally {
+      clearTimeout(timeoutTimer);
       unsubscribe();
+      existing.lastActiveAt = Date.now();
     }
 
-    return this.finalizeOutcome(ticket.ticketId, outcome.result, existing.agent.state.messages);
+    return this.finalizeOutcome(ticket.ticketId, outcome.result, existing.agent.state.messages, {
+      workspaceDir: mandate.workspace_dir,
+      workspaceMode: mandate.workspace_mode,
+      beforeFilesSnapshot,
+    });
   }
 
   async abort(ticketId: string): Promise<void> {
     this.activeAborts.add(ticketId);
     const session = this.sessions.get(ticketId);
     session?.agent.abort();
+  }
+
+  async abortAll(): Promise<void> {
+    await Promise.all([...this.sessions.keys()].map((id) => this.abort(id)));
   }
 
   private finalizeOutcome(
@@ -456,7 +566,7 @@ export class BuiltinPiRunner implements ExecutionRunner {
     }
 
     if (explicitResult) {
-      if (explicitResult.status !== "needs_input") {
+      if (explicitResult.status !== "needs_input" && explicitResult.status !== "awaiting_confirm") {
         this.sessions.delete(ticketId);
       }
       if (
@@ -509,6 +619,7 @@ export class BuiltinPiRunner implements ExecutionRunner {
     hatoConfig: HatoConfig;
     state: BuiltinSessionState;
     onAskUser: (question: string) => void;
+    onRequestConfirm: (action: string, confirmKey?: string) => void;
     onFinishTask: (result: WorkerResult) => void;
   }): Promise<AgentTool<any>[]> {
     const { ticket, mandate, hatoConfig, state } = params;
@@ -529,13 +640,18 @@ export class BuiltinPiRunner implements ExecutionRunner {
             : resolve(homedir(), relPath.slice(2))
           : relPath;
       const target = resolve(workspaceRoot, expanded);
-      if (isProtectedEnvPath(target)) {
+      const realTarget = resolveRealPathOrAncestor(target);
+      if (isProtectedEnvPath(target) || isProtectedEnvPath(realTarget)) {
         throw new Error(`安全策略禁止访问 Hato 的 .env 密钥文件: "${relPath}"`);
       }
-      if (!isVmUnrestricted && target !== workspaceRoot && !target.startsWith(workspaceRoot + sep)) {
+      if (
+        !isVmUnrestricted &&
+        ((target !== workspaceRoot && !target.startsWith(workspaceRoot + sep)) ||
+          (realTarget !== workspaceRoot && !realTarget.startsWith(workspaceRoot + sep)))
+      ) {
         throw new Error(`路径越界: "${relPath}" 超出工单工作区边界`);
       }
-      return target;
+      return realTarget;
     };
 
     const tools: AgentTool<any>[] = [
@@ -776,6 +892,20 @@ export class BuiltinPiRunner implements ExecutionRunner {
         },
       },
       {
+        name: "request_confirm",
+        label: "请求高危操作确认",
+        description:
+          "Pause the ticket in awaiting_confirm state and request explicit owner button/keyword confirmation before executing a high-risk action listed in confirm_before.",
+        parameters: RequestConfirmParams,
+        execute: async (_id, input) => {
+          params.onRequestConfirm(input.action);
+          return {
+            content: [{ type: "text", text: "已向主人发起高危操作确认请求并挂起工单。" }],
+            details: { awaiting_confirm: true },
+          };
+        },
+      },
+      {
         name: "finish_task",
         label: "提交工单结果",
         description: "Submit the final structured result when the ticket completes or fails.",
@@ -831,7 +961,19 @@ export class BuiltinPiRunner implements ExecutionRunner {
     }
 
     if (this.deps.mcpPool && mandate.allowed_mcp_servers.length > 0) {
-      const mcpTools = await this.deps.mcpPool.getToolsForWorker(mandate.allowed_mcp_servers);
+      const mcpTools = await this.deps.mcpPool.getToolsForWorker(mandate.allowed_mcp_servers, {
+        onConfirmRequired: async ({ serverName, toolName, args }) => {
+          const confirmKey = `mcp:${serverName}:${toolName}:${JSON.stringify(args ?? null)}`;
+          if (state.approvedConfirmKeys.has(confirmKey)) {
+            return true;
+          }
+          params.onRequestConfirm(
+            `调用高危 MCP 工具 ${serverName}:${toolName} (${JSON.stringify(args ?? {}).slice(0, 240)})`,
+            confirmKey,
+          );
+          return false;
+        },
+      });
       tools.push(...mcpTools);
     }
 

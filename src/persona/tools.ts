@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, statSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { basename, extname, resolve, sep } from "node:path";
 import type { AgentTool } from "@earendil-works/pi-agent-core";
 import type { ImageContent, TextContent } from "@earendil-works/pi-ai";
@@ -30,6 +30,27 @@ import {
 } from "./self-config.js";
 import { runWebFetch } from "./web-fetch.js";
 import { runTavilySearch } from "./web-search.js";
+
+const MAX_ARTIFACT_READ_BYTES = 20 * 1024 * 1024;
+
+/**
+ * Returns true if the target path (or its resolved symlink target) refers to a `.env` / `.env.*` file.
+ */
+export function isSensitiveEnvFilePath(filePath: string): boolean {
+  const normalized = resolve(filePath);
+  const candidates = [normalized];
+  try {
+    if (existsSync(normalized)) {
+      candidates.push(realpathSync(normalized));
+    }
+  } catch {
+    // ignore realpath errors
+  }
+  return candidates.some((candidate) => {
+    const name = basename(candidate).toLowerCase();
+    return name === ".env" || name.startsWith(".env.");
+  });
+}
 
 const CalcParams = obj({
   expression: str({
@@ -292,6 +313,16 @@ export function createPersonaReadOnlyTools(params: {
     caption?: string;
   }) => Promise<{
     ok: boolean;
+    message: string;
+  }>;
+  onRequestSensitiveFileConfirm?: (input: {
+    channel: "current" | "tg" | "qq" | "web";
+    path: string;
+    caption?: string;
+    text?: string;
+  }) => Promise<{
+    ok: boolean;
+    ticketId?: string;
     message: string;
   }>;
   onStickerSearch?: (input: {
@@ -612,22 +643,52 @@ export function createPersonaReadOnlyTools(params: {
     parameters: ReadArtifactParams,
     async execute(_toolCallId, input) {
       const resolved = resolve(input.path.trim());
-      if (basename(resolved).startsWith(".env")) {
+      if (isSensitiveEnvFilePath(resolved)) {
         return {
           content: [{ type: "text", text: `禁止读取敏感配置文件: ${resolved}` }],
           details: { ok: false, path: resolved },
         };
       }
-      const workspacesRoot = resolve(params.getHatoConfig().paths.workspaces_dir);
+      if (!existsSync(resolved)) {
+        return {
+          content: [{ type: "text", text: `产物文件不存在: ${resolved}` }],
+          details: { ok: false, path: resolved },
+        };
+      }
+      let realTarget = resolved;
+      try {
+        realTarget = realpathSync(resolved);
+      } catch {
+        realTarget = resolved;
+      }
+      if (isSensitiveEnvFilePath(realTarget)) {
+        return {
+          content: [{ type: "text", text: `禁止读取敏感配置文件: ${resolved}` }],
+          details: { ok: false, path: resolved },
+        };
+      }
+      const rawWorkspacesRoot = resolve(params.getHatoConfig().paths.workspaces_dir);
+      const workspacesRoot = existsSync(rawWorkspacesRoot)
+        ? realpathSync(rawWorkspacesRoot)
+        : rawWorkspacesRoot;
       const inWorkspace =
-        resolved === workspacesRoot || resolved.startsWith(`${workspacesRoot}${sep}`);
+        realTarget === workspacesRoot || realTarget.startsWith(`${workspacesRoot}${sep}`);
       const knownArtifact = params.repo.listTickets(params.canonicalUserId, 50).some((t) => {
         if (!t.resultJson) return false;
         try {
           const parsed = JSON.parse(t.resultJson) as {
             artifacts?: Array<{ path?: string }>;
           };
-          return (parsed.artifacts ?? []).some((a) => a.path && resolve(a.path) === resolved);
+          return (parsed.artifacts ?? []).some((a) => {
+            if (!a.path) return false;
+            const artAbs = resolve(a.path);
+            if (artAbs === resolved || artAbs === realTarget) return true;
+            try {
+              return existsSync(artAbs) && realpathSync(artAbs) === realTarget;
+            } catch {
+              return false;
+            }
+          });
         } catch {
           return false;
         }
@@ -638,13 +699,25 @@ export function createPersonaReadOnlyTools(params: {
           details: { ok: false, path: resolved },
         };
       }
-      if (!existsSync(resolved) || !statSync(resolved).isFile()) {
+      const stat = statSync(realTarget);
+      if (!stat.isFile()) {
         return {
           content: [{ type: "text", text: `产物文件不存在: ${resolved}` }],
           details: { ok: false, path: resolved },
         };
       }
-      const buffer = readFileSync(resolved);
+      if (stat.size > MAX_ARTIFACT_READ_BYTES) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: `产物文件过大 (${stat.size} bytes)，超出安全读取上限 (${MAX_ARTIFACT_READ_BYTES} bytes): ${resolved}`,
+            },
+          ],
+          details: { ok: false, path: resolved, bytes: stat.size },
+        };
+      }
+      const buffer = readFileSync(realTarget);
       const ext = extname(resolved).toLowerCase();
       if ([".png", ".jpg", ".jpeg", ".webp", ".gif"].includes(ext)) {
         const image = await convertBufferToModelImage({ buffer, filePath: resolved });
@@ -1023,6 +1096,34 @@ export function createPersonaReadOnlyTools(params: {
               details: { ok: false, path: resolved },
             };
           }
+          if (isSensitiveEnvFilePath(resolved)) {
+            if (!params.onRequestSensitiveFileConfirm) {
+              return {
+                content: [
+                  {
+                    type: "text",
+                    text: `目标文件 "${basename(resolved)}" 为敏感 .env 凭据文件，当前未接入主人二次确认通道，已拒绝直接发送。`,
+                  },
+                ],
+                details: { ok: false, requiresConfirm: true, path: resolved },
+              };
+            }
+            const confirmRes = await params.onRequestSensitiveFileConfirm({
+              channel: input.channel ?? "current",
+              path: resolved,
+              caption: input.caption,
+            });
+            return {
+              content: [{ type: "text", text: confirmRes.message }],
+              details: {
+                ok: confirmRes.ok,
+                requiresConfirm: true,
+                ticketId: confirmRes.ticketId,
+                path: resolved,
+                channel: input.channel ?? "current",
+              },
+            };
+          }
           const res = await sendFileFn({
             path: resolved,
             caption: input.caption,
@@ -1072,6 +1173,35 @@ export function createPersonaReadOnlyTools(params: {
             return {
               content: [{ type: "text", text: `目标路径不是常规文件: ${resolvedFile}` }],
               details: { ok: false, channel: input.channel, path: resolvedFile },
+            };
+          }
+          if (isSensitiveEnvFilePath(resolvedFile)) {
+            if (!params.onRequestSensitiveFileConfirm) {
+              return {
+                content: [
+                  {
+                    type: "text",
+                    text: `目标文件 "${basename(resolvedFile)}" 为敏感 .env 凭据文件，当前未接入主人二次确认通道，已拒绝直接发送。`,
+                  },
+                ],
+                details: { ok: false, requiresConfirm: true, channel: input.channel, path: resolvedFile },
+              };
+            }
+            const confirmRes = await params.onRequestSensitiveFileConfirm({
+              channel: input.channel,
+              path: resolvedFile,
+              caption: input.caption?.trim() || undefined,
+              text,
+            });
+            return {
+              content: [{ type: "text", text: confirmRes.message }],
+              details: {
+                ok: confirmRes.ok,
+                requiresConfirm: true,
+                ticketId: confirmRes.ticketId,
+                channel: input.channel,
+                path: resolvedFile,
+              },
             };
           }
         }

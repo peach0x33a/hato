@@ -83,7 +83,7 @@ export interface ScriptExecutionResult {
 export interface ScriptSchedulerDeps {
   getHatoConfig: () => HatoConfig;
   repo: HatoRepository;
-  runScript?: (scriptPath: string) => Promise<ScriptExecutionResult>;
+  runScript?: (scriptPath: string, requiredSecrets?: readonly string[]) => Promise<ScriptExecutionResult>;
   onScriptOutput?: (params: {
     scriptId: string;
     name: string;
@@ -92,6 +92,53 @@ export interface ScriptSchedulerDeps {
     stdoutTail: string;
     stderrTail: string;
   }) => Promise<void>;
+}
+
+const SAFE_SCRIPT_ENV_KEYS = [
+  "PATH",
+  "HOME",
+  "USER",
+  "LOGNAME",
+  "SHELL",
+  "TERM",
+  "LANG",
+  "LC_ALL",
+  "LC_CTYPE",
+  "TMPDIR",
+  "TEMP",
+  "TMP",
+] as const;
+
+function parseRequiredSecrets(rawJson: string | null | undefined): string[] {
+  if (!rawJson) return [];
+  try {
+    const parsed = JSON.parse(rawJson);
+    return Array.isArray(parsed) ? parsed.filter((x): x is string => typeof x === "string") : [];
+  } catch {
+    return [];
+  }
+}
+
+export function buildSanitizedScriptEnv(
+  requiredSecrets: readonly string[] = [],
+  baseEnv: Readonly<Record<string, string | undefined>> = process.env,
+): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const key of SAFE_SCRIPT_ENV_KEYS) {
+    const val = baseEnv[key];
+    if (typeof val === "string" && val.length > 0) {
+      out[key] = val;
+    }
+  }
+  for (const rawKey of requiredSecrets) {
+    const key = rawKey.trim();
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) continue;
+    const val = baseEnv[key];
+    if (typeof val === "string" && val.length > 0) {
+      out[key] = val;
+    }
+  }
+  return out;
 }
 
 /**
@@ -105,7 +152,7 @@ export class ScriptScheduler {
 
   constructor(private readonly deps: ScriptSchedulerDeps) {}
 
-  start(intervalMs = 60_000): void {
+  start(intervalMs = 15_000): void {
     if (this.timer) return;
     this.timer = setInterval(() => {
       void this.tick().catch((err) => {
@@ -131,42 +178,57 @@ export class ScriptScheduler {
       const minuteKey = `${local.isoDate} ${String(local.hour).padStart(2, "0")}:${String(local.minute).padStart(2, "0")}`;
 
       const scripts = this.deps.repo.listEnabledScripts(50);
-      for (const script of scripts) {
-        if (this.lastMinuteByScript.get(script.id) === minuteKey) continue;
-        if (!matchesCronExpression(script.cronExpr, nowMs, tz)) continue;
-
+      const dueScripts = scripts.filter((script) => {
+        if (this.lastMinuteByScript.get(script.id) === minuteKey) return false;
+        if (!matchesCronExpression(script.cronExpr, nowMs, tz)) return false;
         this.lastMinuteByScript.set(script.id, minuteKey);
+        return true;
+      });
 
-        const execResult = this.deps.runScript
-          ? await this.deps.runScript(script.scriptPath)
-          : await defaultExecuteScript(script.scriptPath);
+      await Promise.allSettled(
+        dueScripts.map(async (script) => {
+          try {
+            const requiredSecrets = parseRequiredSecrets(script.requiredSecretsJson);
+            const execResult = this.deps.runScript
+              ? await this.deps.runScript(script.scriptPath, requiredSecrets)
+              : await defaultExecuteScript(script.scriptPath, requiredSecrets);
 
-        this.deps.repo.recordScriptRun({
-          scriptId: script.id,
-          exitCode: execResult.exitCode,
-          stdoutTail: execResult.stdoutTail,
-          stderrTail: execResult.stderrTail,
-          ranAt: nowMs,
-        });
+            this.deps.repo.recordScriptRun({
+              scriptId: script.id,
+              exitCode: execResult.exitCode,
+              stdoutTail: execResult.stdoutTail,
+              stderrTail: execResult.stderrTail,
+              ranAt: nowMs,
+            });
 
-        if (this.deps.onScriptOutput && (execResult.exitCode !== 0 || execResult.stdoutTail.trim())) {
-          await this.deps.onScriptOutput({
-            scriptId: script.id,
-            name: script.name,
-            notifyChannel: script.notifyChannel,
-            exitCode: execResult.exitCode,
-            stdoutTail: execResult.stdoutTail,
-            stderrTail: execResult.stderrTail,
-          });
-        }
-      }
+            if (
+              this.deps.onScriptOutput &&
+              (execResult.exitCode !== 0 || execResult.stdoutTail.trim())
+            ) {
+              await this.deps.onScriptOutput({
+                scriptId: script.id,
+                name: script.name,
+                notifyChannel: script.notifyChannel,
+                exitCode: execResult.exitCode,
+                stdoutTail: execResult.stdoutTail,
+                stderrTail: execResult.stderrTail,
+              });
+            }
+          } catch (err) {
+            logWarn("SCRIPT", `script "${script.name}" (${script.id}) failed: ${summarizeError(err)}`);
+          }
+        }),
+      );
     } finally {
       this.running = false;
     }
   }
 }
 
-async function defaultExecuteScript(scriptPath: string): Promise<ScriptExecutionResult> {
+async function defaultExecuteScript(
+  scriptPath: string,
+  requiredSecrets: readonly string[] = [],
+): Promise<ScriptExecutionResult> {
   if (!existsSync(scriptPath)) {
     return {
       exitCode: 127,
@@ -192,6 +254,7 @@ async function defaultExecuteScript(scriptPath: string): Promise<ScriptExecution
       cwd: dirname(scriptPath),
       timeout: 60_000,
       maxBuffer: 1024 * 1024,
+      env: buildSanitizedScriptEnv(requiredSecrets),
     });
     return {
       exitCode: 0,

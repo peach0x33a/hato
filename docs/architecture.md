@@ -10,8 +10,9 @@
 
 ```mermaid
 flowchart LR
-    TG["Telegram (grammY) · MVP"] --> GW
-    QQ["QQ 官方 Bot · Planned"] -.-> GW
+    TG["Telegram (grammY)"] --> GW
+    QQ["QQ 官方 Bot"] --> GW
+    WEB["Web Console"] --> BUS
 
     subgraph GW_BOX["Gateway & 会话入口"]
         GW["渠道适配器 (ChannelCapabilities)"] --> AUTH["Owner 白名单 & canonical_user_id"]
@@ -19,34 +20,33 @@ flowchart LR
     end
 
     DEB --> BUS["Event Bus + Per-User Actor Lock"]
-    CRON["Croner (Open Loops / 定时脚本)"] --> BUS
-    WD["Watchdog (工单超时 / 崩溃恢复)"] -.-> DB
+    CRON["ProactiveCareScheduler / ScriptScheduler"] --> BUS
+    WD["Startup Stale Ticket Recovery"] -.-> DB
 
     BUS --> P["Persona Agent (pi-agent-core)"]
-    P -- "只读微工具 + read_skill + Personal MCP" --> P
+    P -- "渐进式微工具 + read_skill + Personal MCP" --> P
     P -- "delegate() 轻量入队" --> COMP["Neutral Router (圈定区间 / 定边界 / 选能力)"]
     BUS -. "带 msg_id 的近 K 轮对话 + 技术画像 + 能力索引" .-> COMP
 
     COMP -- "调度管理操作" --> CRON
-    COMP -- "Ticket(context_id) + Mandate(skills/mcp)" --> DB[("SQLite (唯一事实源)")]
+    COMP -- "Ticket(context_id) + Mandate(skills/mcp)" --> DB[("bun:sqlite (唯一事实源)")]
     DB --> W["Worker Dispatcher (ExecutionRunner)"]
-    W -- "模式 1: builtin-pi (工具拉取 ctx)" --> BOX["工单容器 hato-t_xxx (无 API Key)"]
+    W -- "模式 1: builtin-pi (工具拉取 ctx)" --> BOX["工作区隔离 (isolated / vm_unrestricted)"]
     W -- "模式 2: external-cli (Scoped MCP 拉取 ctx)" --> EXT["Codex CLI / Antigravity CLI / OpenCode V2 / Pi / CC"]
     DB -. "context_id 受限只读切片" .-> W
-    BOX -- "部署确认后" --> JOBS["常驻容器 hato-jobs"]
-    EXT -- "产出的常驻脚本确认后" --> JOBS
-    JOBS -- "退出码 != 0" --> BUS
+    BOX -- "register_script" --> JOBS["ScriptScheduler (script_registry / job_runs)"]
+    JOBS -- "退出码 != 0 / stdout" --> BUS
 
     W -- "统一 Result JSON (narration_hint / verbatim / artifacts)" --> BUS
     DB --> CUR["Memory Curator (异步中立提取)"]
-    CUR --> HS["Hindsight (persona / tech 双 Bank)"]
+    CUR --> HS["MemoryEcho / Hindsight (persona / tech 双 Bank)"]
 ```
 
 ### 关键设计约束
-1. **1v1 私聊限定：** v1 不做群聊，只响应配置的 Owner 账号；TG 与 QQ 的 Home Channel 通过 `canonical_user_id` 归一化为同一个 Owner。
-2. **三道墙靠数据流而非 Prompt 祈祷：** Worker 永远看不到人设文件（`prompts/persona.md`）与情感记忆库；中立 Router 不转述需求正文，只圈定 `[from_msg_id .. to_msg_id]` 区间并签发 `context_id`，让 Worker 零损耗拉取该区间的原文切片（并可在有限步长内向前有限回溯）；Persona 永远拿不到宿主机执行权限。
-3. **Personal 与 Worker 双区能力物理隔离：** Skills 与 MCP 按 `personal` / `worker` 分区注册与注入——Persona 仅见个人轻量化/只读能力（保 Prompt Cache 前缀且防越权），Worker 仅按 `Mandate` 按需注入工程能力；External CLI 复用本机登录态与中转站时通过 Overlay 剥离个人 MCP/Skills，且 Hato 模式配置仅对 Hato 拉起的子进程生效。
-4. **QQ 官方 Bot 暂缓实施：** 作为预留 `ChannelAdapter` 接口保留在架构中，后续参考 Hermes / OpenClaw 等成熟框架的 C2C 适配实现（含 `msg_id`/`msg_seq` 窗口限制与跨端兜底）。
+1. **1v1 私聊限定：** v1 不做群聊，只响应配置的 Owner 账号；TG 与 QQ 的 Home Channel 通过 `canonical_user_id` 归一化为同一个 Owner，且重新执行 `/sethome` 必须先在 Web Console 解绑原 Home。
+2. **三道墙靠数据流而非 Prompt 祈祷：** Worker 永远看不到人设文件（`prompts/soul.md`、`prompts/system.md`、`prompts/blocks/*`）与情感记忆库；中立 Router 不转述需求正文，只圈定 `[from_msg_id .. to_msg_id]` 区间并签发 `context_id`，让 Worker 零损耗拉取该区间的原文切片（并可在有限步长内向前有限回溯）；Persona 永远拿不到宿主机 shell 执行权限，外发敏感 `.env` 文件必须经过主人二次物理确认。
+3. **Personal 与 Worker 双区能力物理隔离：** Skills 与 MCP 按 `personal` / `worker` 分区注册与注入——Persona 仅见个人轻量化能力（保 Prompt Cache 前缀且防越权），Worker 仅按 `Mandate` 按需注入工程能力；External CLI 复用本机登录态与中转站时通过 Overlay 剥离个人 MCP/Skills，且 Hato 模式配置仅对 Hato 拉起的子进程生效。
+4. **多渠道接入已落地：** Telegram (`grammY`)、QQ 官方 Bot（含 C2C `msg_id`/`msg_seq` 窗口控制、富媒体分片上传与跨端兜底）与内置 Web Console 均已实现并统一共享主时间线。
 
 ---
 
@@ -472,10 +472,10 @@ AgentMessage[] ──▶ transformContext() ──▶ convertToLlm() ──▶ M
 
 ---
 
-## 6. 记忆系统（Hindsight + SQLite 分工）
+## 6. 记忆系统（MemoryEcho / Hindsight + bun:sqlite 分工）
 
 ### 6.1 `MemoryStore` 接口与存储分工
-Hato 在业务层定义统一的 `MemoryStore` 接口，底层默认接 **Hindsight（`@vectorize-io/hindsight-client`）+ SQLite（`better-sqlite3` + Drizzle）**：
+Hato 在业务层定义统一的 `MemoryStore` 接口，支持 **MemoryEcho（主力云端后端）** 与 **Hindsight（自托管 REST 后端）** + **SQLite（`bun:sqlite` + Drizzle ORM）**：
 
 | 存储 | 保存内容 | 理由 |
 |---|---|---|

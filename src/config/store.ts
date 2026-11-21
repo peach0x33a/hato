@@ -1,5 +1,14 @@
-import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { dirname, resolve } from "node:path";
+import {
+  chmodSync,
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  renameSync,
+  writeFileSync,
+} from "node:fs";
+import { randomBytes } from "node:crypto";
+import { dirname, join, resolve } from "node:path";
 import dotenv from "dotenv";
 import { parse as parseToml, stringify as stringifyToml } from "smol-toml";
 import type { HatoRepository } from "../db/repo.js";
@@ -80,7 +89,12 @@ export function mergeEnvFile(
   }
 
   const content = `${nextLines.join("\n").replace(/\n+$/, "")}\n`;
-  writeFileSync(absPath, content, "utf8");
+  writeFileAtomic(absPath, content, { mode: 0o600 });
+  try {
+    chmodSync(absPath, 0o600);
+  } catch {
+    // Windows or restricted FS may ignore chmod
+  }
   return { path: absPath, writtenKeys };
 }
 
@@ -247,6 +261,135 @@ export function bindQqHomeChannel(params: {
   };
 }
 
+export interface ActiveHomeBinding {
+  bound: boolean;
+  channel: "tg" | "qq" | null;
+  targetId: string | null;
+  source: "runtime" | "config" | null;
+}
+
+/**
+ * Determine whether a Home Channel is currently bound (either explicitly recorded in SQLite
+ * or configured via `hato.toml` owner whitelists, unless explicitly unbound via Web Console).
+ */
+export function resolveActiveHomeBinding(
+  config: HatoConfig,
+  repo: HatoRepository,
+): ActiveHomeBinding {
+  const runtimeHome = repo.getHomeChannel();
+  if (runtimeHome && (runtimeHome.channel === "tg" || runtimeHome.channel === "qq") && runtimeHome.targetId) {
+    return {
+      bound: true,
+      channel: runtimeHome.channel,
+      targetId: runtimeHome.targetId,
+      source: "runtime",
+    };
+  }
+  if (repo.isHomeExplicitlyUnbound()) {
+    return { bound: false, channel: null, targetId: null, source: null };
+  }
+
+  const firstTg = config.owner.channels.tg.user_ids[0];
+  const firstQq = config.owner.channels.qq.open_ids[0];
+  if (config.owner.proactive_channel === "qq" && firstQq) {
+    return { bound: true, channel: "qq", targetId: String(firstQq), source: "config" };
+  }
+  if (config.owner.proactive_channel === "tg" && firstTg !== undefined) {
+    return { bound: true, channel: "tg", targetId: String(firstTg), source: "config" };
+  }
+  if (firstTg !== undefined) {
+    return { bound: true, channel: "tg", targetId: String(firstTg), source: "config" };
+  }
+  if (firstQq) {
+    return { bound: true, channel: "qq", targetId: String(firstQq), source: "config" };
+  }
+  return { bound: false, channel: null, targetId: null, source: null };
+}
+
+/**
+ * Unbind the current Home Channel from Web Console so a subsequent `/sethome` can take effect.
+ * Optionally clears the bound channel's owner whitelist in `hato.toml` to allow pairing a new account.
+ */
+export function unbindHomeChannel(params: {
+  hatoConfigPath: string;
+  repo: HatoRepository;
+  canonicalUserId: string;
+  currentConfig: HatoConfig;
+  clearChannelWhitelist?: boolean;
+}): {
+  previousHome: ActiveHomeBinding;
+  updatedConfig: HatoConfig;
+  clearedWhitelist: boolean;
+  savedToConfig: boolean;
+  backupPath?: string;
+} {
+  const previousHome = resolveActiveHomeBinding(params.currentConfig, params.repo);
+  const absConfigPath = resolve(params.hatoConfigPath);
+  const baseConfig = existsSync(absConfigPath) ? loadHatoConfig(absConfigPath) : params.currentConfig;
+
+  let updatedConfig: HatoConfig = baseConfig;
+  let clearedWhitelist = false;
+  let savedToConfig = false;
+  let backupPath: string | undefined;
+
+  const shouldClearWhitelist = Boolean(params.clearChannelWhitelist) && previousHome.channel !== null;
+  if (shouldClearWhitelist && previousHome.channel === "tg") {
+    updatedConfig = {
+      ...baseConfig,
+      owner: {
+        ...baseConfig.owner,
+        channels: {
+          ...baseConfig.owner.channels,
+          tg: { ...baseConfig.owner.channels.tg, user_ids: [] },
+        },
+      },
+    };
+    clearedWhitelist = true;
+  } else if (shouldClearWhitelist && previousHome.channel === "qq") {
+    updatedConfig = {
+      ...baseConfig,
+      owner: {
+        ...baseConfig.owner,
+        channels: {
+          ...baseConfig.owner.channels,
+          qq: { ...baseConfig.owner.channels.qq, open_ids: [] },
+        },
+      },
+    };
+    clearedWhitelist = true;
+  }
+
+  if (clearedWhitelist && existsSync(absConfigPath)) {
+    const written = writeHatoConfig(absConfigPath, updatedConfig, { backup: true });
+    savedToConfig = true;
+    backupPath = written.backupPath;
+  }
+
+  params.repo.clearHomeChannel({
+    canonicalUserId: params.canonicalUserId,
+    clearChannel: clearedWhitelist ? (previousHome.channel ?? undefined) : undefined,
+  });
+
+  return {
+    previousHome,
+    updatedConfig,
+    clearedWhitelist,
+    savedToConfig,
+    backupPath,
+  };
+}
+
+function writeFileAtomic(absPath: string, content: string, options?: { mode?: number }): void {
+  const dir = dirname(absPath);
+  mkdirSync(dir, { recursive: true });
+  const tmpPath = join(dir, `.${randomBytes(6).toString("hex")}.tmp`);
+  writeFileSync(tmpPath, content, {
+    encoding: "utf8",
+    ...(options?.mode !== undefined ? { mode: options.mode } : {}),
+  });
+  renameSync(tmpPath, absPath);
+}
+
 function writeTomlFileWithBackup(
   configPath: string,
   tomlContent: string,
@@ -261,7 +404,7 @@ function writeTomlFileWithBackup(
     copyFileSync(absPath, backupPath);
   }
 
-  writeFileSync(absPath, tomlContent, "utf8");
+  writeFileAtomic(absPath, tomlContent);
   return { path: absPath, backupPath };
 }
 

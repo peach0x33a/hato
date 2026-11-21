@@ -29,6 +29,7 @@ export interface ExecutionRunner {
   ): Promise<WorkerResult>;
 
   abort(ticketId: string): Promise<void>;
+  abortAll?(): Promise<void>;
 }
 
 /**
@@ -65,6 +66,13 @@ export class WorkerDispatcher {
     await Promise.all([
       this.builtinRunner.abort(ticketId),
       this.externalRunner.abort(ticketId),
+    ]);
+  }
+
+  async abortAll(): Promise<void> {
+    await Promise.all([
+      this.builtinRunner.abortAll?.(),
+      this.externalRunner.abortAll?.(),
     ]);
   }
 }

@@ -138,9 +138,9 @@ args = ["-y", "@upstash/context7-mcp"]
 
     assert.equal("TG_BOT_TOKEN" in codexOverlay.env, false);
     assert.equal("MEMORYECHO_API_KEY" in codexOverlay.env, false);
+    assert.equal("HATO_CTX_TOKEN" in codexOverlay.env, false);
+    assert.equal("GH_TOKEN" in codexOverlay.env, false);
     assert.equal(codexOverlay.env.HTTPS_PROXY, "http://127.0.0.1:7890");
-    assert.equal(codexOverlay.env.HATO_CTX_TOKEN, "ctx_tok_1");
-    assert.equal(codexOverlay.env.GH_TOKEN, "worker-mcp-secret-xyz");
     assert.ok(codexOverlay.env.CODEX_HOME);
 
     const shadowAuth = join(codexOverlay.env.CODEX_HOME!, "auth.json");
@@ -153,7 +153,9 @@ args = ["-y", "@upstash/context7-mcp"]
     assert.equal(shadowCodexCfg.model, "gpt-5.4");
     assert.equal(shadowCodexCfg.model_providers.my_relay.base_url, "https://relay.example.com/v1");
     assert.ok(shadowCodexCfg.mcp_servers.hato_context);
+    assert.equal(shadowCodexCfg.mcp_servers.hato_context.env.HATO_CTX_TOKEN, "ctx_tok_1");
     assert.ok(shadowCodexCfg.mcp_servers.worker_gh);
+    assert.equal(shadowCodexCfg.mcp_servers.worker_gh.env.GH_TOKEN, "worker-mcp-secret-xyz");
     assert.ok(shadowCodexCfg.mcp_servers.context7);
     assert.equal("personal_calendar" in shadowCodexCfg.mcp_servers, false);
     assert.equal("personal_weather" in shadowCodexCfg.mcp_servers, false);

@@ -328,10 +328,7 @@ export class HindsightStore implements MemoryStore {
     query: string,
     limit: number,
   ): MemoryRecallItem[] {
-    const tokens = query
-      .toLowerCase()
-      .split(/\s+/)
-      .filter((t) => t.length >= 2);
+    const tokens = tokenizeFallbackQuery(query);
     const rows = this.repo.listMemorySyncRecords(canonicalUserId, {
       bank,
       includeErased: false,
@@ -413,6 +410,24 @@ export class HindsightStore implements MemoryStore {
       };
     }
   }
+}
+
+function tokenizeFallbackQuery(query: string): string[] {
+  const normalized = query.toLowerCase().trim();
+  if (!normalized) return [];
+  const out = new Set<string>();
+  for (const part of normalized.split(/[\s,，。！？!?、;；:：()（）\[\]【】"'`]+/)) {
+    if (part.length >= 2) {
+      out.add(part);
+    }
+    const cjkRuns = part.match(/[\u4e00-\u9fff]{2,}/g) ?? [];
+    for (const run of cjkRuns) {
+      for (let i = 0; i < run.length - 1; i++) {
+        out.add(run.slice(i, i + 2));
+      }
+    }
+  }
+  return [...out];
 }
 
 function extractRetainedMemoryId(data: Record<string, unknown>): string | null {

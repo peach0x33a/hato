@@ -363,7 +363,12 @@ export class McpClientPool {
         `MCP tool "${mcpTool.name}" from server "${server.name}".`,
       parameters,
       execute: async (_toolCallId, input, signal) => {
-        if (requiresConfirm && workerOptions?.onConfirmRequired) {
+        if (requiresConfirm) {
+          if (!workerOptions?.onConfirmRequired) {
+            throw new Error(
+              `工具调用 "${server.name}:${mcpTool.name}" 需要用户确认，但当前执行器未接入确认流程，已默认拒绝执行。`,
+            );
+          }
           const approved = await workerOptions.onConfirmRequired({
             serverName: server.name,
             toolName: mcpTool.name,

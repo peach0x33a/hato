@@ -171,6 +171,29 @@ if [[ "$HAS_LOCAL_SOURCE" == "0" ]]; then
   TMP_DOWNLOAD_DIR="$(mktemp -d)"
   log_info "正在下载发行包: ${DOWNLOAD_URL}"
   curl -fL --progress-bar "$DOWNLOAD_URL" -o "${TMP_DOWNLOAD_DIR}/${ARCHIVE_NAME}"
+
+  CHECKSUM_URL="${BASE_URL%/}/SHA256SUMS"
+  if curl -fsSL "$CHECKSUM_URL" -o "${TMP_DOWNLOAD_DIR}/SHA256SUMS" 2>/dev/null; then
+    EXPECTED_SHA="$(awk -v name="$ARCHIVE_NAME" '$2 == name || $2 == "*" name { print $1; exit }' "${TMP_DOWNLOAD_DIR}/SHA256SUMS")"
+    if [[ -n "$EXPECTED_SHA" ]]; then
+      if command -v shasum >/dev/null 2>&1; then
+        ACTUAL_SHA="$(shasum -a 256 "${TMP_DOWNLOAD_DIR}/${ARCHIVE_NAME}" | awk '{print $1}')"
+      elif command -v sha256sum >/dev/null 2>&1; then
+        ACTUAL_SHA="$(sha256sum "${TMP_DOWNLOAD_DIR}/${ARCHIVE_NAME}" | awk '{print $1}')"
+      else
+        ACTUAL_SHA=""
+      fi
+      if [[ -n "$ACTUAL_SHA" && "$ACTUAL_SHA" != "$EXPECTED_SHA" ]]; then
+        log_err "SHA256 校验失败！期望: ${EXPECTED_SHA}，实际: ${ACTUAL_SHA}"
+        exit 1
+      elif [[ -n "$ACTUAL_SHA" ]]; then
+        log_ok "SHA256 校验通过 (${ACTUAL_SHA:0:12}...)"
+      fi
+    fi
+  else
+    log_warn "未获取到 SHA256SUMS（可能为自定义镜像源），跳过完整性校验"
+  fi
+
   tar -xzf "${TMP_DOWNLOAD_DIR}/${ARCHIVE_NAME}" -C "$TMP_DOWNLOAD_DIR"
 
   SOURCE_ROOT="${TMP_DOWNLOAD_DIR}/hato-${TAG}"
@@ -204,8 +227,17 @@ if [[ -n "$TARGET_DIR" ]]; then
         --exclude 'config/mcp.toml' \
         "${SOURCE_ROOT}/" "${TARGET_ABS}/"
     else
-      cp -R "${SOURCE_ROOT}/." "${TARGET_ABS}/"
-      rm -rf "${TARGET_ABS}/node_modules" "${TARGET_ABS}/web/node_modules" "${TARGET_ABS}/.git" "${TARGET_ABS}/data" "${TARGET_ABS}/release"
+      tar -C "${SOURCE_ROOT}" \
+        --exclude='node_modules' \
+        --exclude='web/node_modules' \
+        --exclude='.git' \
+        --exclude='data' \
+        --exclude='release' \
+        --exclude='.env' \
+        --exclude='config/hato.toml' \
+        --exclude='config/models.toml' \
+        --exclude='config/mcp.toml' \
+        -cf - . | tar -C "${TARGET_ABS}" -xf -
     fi
   fi
   INSTALL_DIR="$TARGET_ABS"
@@ -253,7 +285,8 @@ mkdir -p "$HATO_HOME_DIR"
 
 if [[ ! -f "${HATO_HOME_DIR}/.env" && -f "${INSTALL_DIR}/.env.example" ]]; then
   cp "${INSTALL_DIR}/.env.example" "${HATO_HOME_DIR}/.env"
-  log_info "已初始化凭据模板: ${HATO_HOME_DIR}/.env"
+  chmod 600 "${HATO_HOME_DIR}/.env"
+  log_info "已初始化凭据模板 (chmod 600): ${HATO_HOME_DIR}/.env"
 fi
 
 if [[ ! -f "${HATO_HOME_DIR}/mcp.toml" && -f "${INSTALL_DIR}/config/mcp.example.toml" ]]; then

@@ -58,61 +58,76 @@ export class ProactiveCareScheduler {
       const snoozeDelayMs = Math.max(30, cfg.memory.open_loops.defer_after_chat_minutes * 6) * 60_000;
 
       for (const loop of dueLoops) {
-        const override = this.deps.repo.getActiveScheduleOverride(loop.canonicalUserId, nowMs);
-        const tz = override?.tempTimezone || cfg.owner.timezone;
+        try {
+          const override = this.deps.repo.getActiveScheduleOverride(loop.canonicalUserId, nowMs);
+          const tz = override?.tempTimezone || cfg.owner.timezone;
 
-        if (isWithinQuietHours(nowMs, tz, cfg.owner.quiet_hours.start, cfg.owner.quiet_hours.end)) {
-          continue;
-        }
-
-        const lastUserTs = this.deps.repo.getLastUserMessageTimestamp(loop.canonicalUserId);
-        if (lastUserTs !== null && deferMs > 0 && nowMs - lastUserTs < deferMs) {
-          continue;
-        }
-
-        if (loop.unansweredStreak >= maxStreak) {
-          this.deps.repo.updateOpenLoop(loop.id, { status: "paused" });
-          continue;
-        }
-
-        await this.deps.actorLock.run(loop.canonicalUserId, async () => {
-          const latest = this.deps.repo.getOpenLoop(loop.id);
-          if (!latest || latest.status !== "pending" || latest.dueAt > nowMs) {
-            return;
+          if (isWithinQuietHours(nowMs, tz, cfg.owner.quiet_hours.start, cfg.owner.quiet_hours.end)) {
+            continue;
           }
 
-          const outcome = await this.deps.deliverOpenLoop({
-            canonicalUserId: latest.canonicalUserId,
-            notifyChannel: latest.notifyChannel,
-            loopId: latest.id,
-            content: latest.content,
+          const lastUserTs = this.deps.repo.getLastUserMessageTimestamp(loop.canonicalUserId);
+          if (lastUserTs !== null && deferMs > 0 && nowMs - lastUserTs < deferMs) {
+            continue;
+          }
+
+          if (loop.unansweredStreak >= maxStreak) {
+            this.deps.repo.updateOpenLoop(loop.id, { status: "paused" });
+            continue;
+          }
+
+          await this.deps.actorLock.run(loop.canonicalUserId, async () => {
+            const latest = this.deps.repo.getOpenLoop(loop.id);
+            if (!latest || latest.status !== "pending" || latest.dueAt > nowMs) {
+              return;
+            }
+
+            const freshLastUserTs = this.deps.repo.getLastUserMessageTimestamp(
+              latest.canonicalUserId,
+            );
+            if (freshLastUserTs !== null && deferMs > 0 && Date.now() - freshLastUserTs < deferMs) {
+              return;
+            }
+
+            const outcome = await this.deps.deliverOpenLoop({
+              canonicalUserId: latest.canonicalUserId,
+              notifyChannel: latest.notifyChannel,
+              loopId: latest.id,
+              content: latest.content,
+            });
+
+            if (outcome === "no_outbound") {
+              return;
+            }
+
+            if (outcome === "no_reply") {
+              this.deps.repo.updateOpenLoop(latest.id, {
+                dueAt: nowMs + snoozeDelayMs,
+              });
+              return;
+            }
+
+            const nextStreak = latest.unansweredStreak + 1;
+            if (nextStreak >= maxStreak) {
+              this.deps.repo.updateOpenLoop(latest.id, {
+                status: "paused",
+                unansweredStreak: nextStreak,
+              });
+            } else {
+              this.deps.repo.updateOpenLoop(latest.id, {
+                status: "pending",
+                unansweredStreak: nextStreak,
+                dueAt: nowMs + retryDelayMs,
+              });
+            }
           });
-
-          if (outcome === "no_outbound") {
-            return;
-          }
-
-          if (outcome === "no_reply") {
-            this.deps.repo.updateOpenLoop(latest.id, {
-              dueAt: nowMs + snoozeDelayMs,
-            });
-            return;
-          }
-
-          const nextStreak = latest.unansweredStreak + 1;
-          if (nextStreak >= maxStreak) {
-            this.deps.repo.updateOpenLoop(latest.id, {
-              status: "paused",
-              unansweredStreak: nextStreak,
-            });
-          } else {
-            this.deps.repo.updateOpenLoop(latest.id, {
-              status: "pending",
-              unansweredStreak: nextStreak,
-              dueAt: nowMs + retryDelayMs,
-            });
-          }
-        });
+        } catch (err) {
+          logWarn("PROACTIVE", `open_loop ${loop.id} delivery failed: ${summarizeError(err)}`);
+          // Back off failed loop to prevent 60s retry storms while allowing other due loops to proceed.
+          this.deps.repo.updateOpenLoop(loop.id, {
+            dueAt: nowMs + snoozeDelayMs,
+          });
+        }
       }
     } finally {
       this.running = false;

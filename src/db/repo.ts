@@ -1153,6 +1153,9 @@ export class HatoRepository {
       targetId: params.targetId,
       updatedAt: now,
     });
+    this.deleteRuntimeSetting("home_unbound");
+    this.deleteRuntimeSetting("home_pairing_code");
+    this.deleteRuntimeSetting("home_pairing_failures");
 
     const existing = this.db
       .select()
@@ -1187,25 +1190,150 @@ export class HatoRepository {
     );
   }
 
-  getOrCreateHomePairingCode(): string {
-    const existing = this.getRuntimeSetting<{ code?: string }>("home_pairing_code");
-    if (existing?.code && typeof existing.code === "string") {
-      return existing.code;
+  clearHomeChannel(params?: { canonicalUserId?: string; clearChannel?: "tg" | "qq" | "all" }): void {
+    const now = Date.now();
+    this.deleteRuntimeSetting("home_channel");
+    this.deleteRuntimeSetting("home_pairing_code");
+    this.deleteRuntimeSetting("home_pairing_failures");
+    this.setRuntimeSetting("home_unbound", { unbound: true, updatedAt: now });
+
+    if (params?.canonicalUserId && params.clearChannel) {
+      const existing = this.db
+        .select()
+        .from(owners)
+        .where(eq(owners.canonicalUserId, params.canonicalUserId))
+        .get();
+      if (existing) {
+        this.db
+          .update(owners)
+          .set({
+            ...(params.clearChannel === "tg" || params.clearChannel === "all"
+              ? { tgUserId: null }
+              : {}),
+            ...(params.clearChannel === "qq" || params.clearChannel === "all"
+              ? { qqOpenId: null }
+              : {}),
+            updatedAt: now,
+          })
+          .where(eq(owners.canonicalUserId, params.canonicalUserId))
+          .run();
+      }
     }
-    const code = `HATO-${randomBytes(3).toString("hex").toUpperCase()}`;
-    this.setRuntimeSetting("home_pairing_code", { code, createdAt: Date.now() });
-    return code;
   }
 
-  verifyAndConsumeHomePairingCode(candidate: string): boolean {
-    const stored = this.getRuntimeSetting<{ code?: string }>("home_pairing_code");
+  isHomeExplicitlyUnbound(): boolean {
+    const raw = this.getRuntimeSetting<{ unbound?: boolean }>("home_unbound");
+    return Boolean(raw?.unbound);
+  }
+
+  getHomePairingCodeInfo(
+    ttlMs = 15 * 60_000,
+    nowMs = Date.now(),
+  ): { code: string; createdAt: number; expiresAt: number } {
+    const existing = this.getRuntimeSetting<{
+      code?: string;
+      createdAt?: number;
+      expiresAt?: number;
+    }>("home_pairing_code");
+    if (
+      existing?.code &&
+      typeof existing.code === "string" &&
+      typeof existing.expiresAt === "number" &&
+      existing.expiresAt > nowMs
+    ) {
+      return {
+        code: existing.code,
+        createdAt: existing.createdAt ?? nowMs,
+        expiresAt: existing.expiresAt,
+      };
+    }
+    const code = `HATO-${randomBytes(5).toString("hex").toUpperCase()}`;
+    const expiresAt = nowMs + Math.max(60_000, ttlMs);
+    this.setRuntimeSetting("home_pairing_code", { code, createdAt: nowMs, expiresAt });
+    this.deleteRuntimeSetting("home_pairing_failures");
+    return { code, createdAt: nowMs, expiresAt };
+  }
+
+  getOrCreateHomePairingCode(ttlMs = 15 * 60_000, nowMs = Date.now()): string {
+    return this.getHomePairingCodeInfo(ttlMs, nowMs).code;
+  }
+
+  verifyAndConsumeHomePairingCode(candidate: string, nowMs = Date.now()): boolean {
+    const MAX_FAILURES = 5;
+    const LOCKOUT_WINDOW_MS = 5 * 60_000;
+    const failureState = this.getRuntimeSetting<{ count?: number; windowStartMs?: number }>(
+      "home_pairing_failures",
+    );
+    if (
+      failureState &&
+      typeof failureState.count === "number" &&
+      typeof failureState.windowStartMs === "number" &&
+      nowMs - failureState.windowStartMs < LOCKOUT_WINDOW_MS &&
+      failureState.count >= MAX_FAILURES
+    ) {
+      return false;
+    }
+
+    const stored = this.getRuntimeSetting<{ code?: string; expiresAt?: number }>(
+      "home_pairing_code",
+    );
     if (!stored?.code || typeof stored.code !== "string") return false;
+    if (typeof stored.expiresAt === "number" && nowMs > stored.expiresAt) {
+      this.deleteRuntimeSetting("home_pairing_code");
+      return false;
+    }
+
     const expected = Buffer.from(stored.code.trim().toUpperCase(), "utf8");
     const provided = Buffer.from(candidate.trim().toUpperCase(), "utf8");
-    if (expected.length === 0 || expected.length !== provided.length) return false;
-    if (!timingSafeEqual(expected, provided)) return false;
+    const matched = expected.length > 0 && expected.length === provided.length && timingSafeEqual(expected, provided);
+    if (!matched) {
+      const withinWindow =
+        failureState &&
+        typeof failureState.windowStartMs === "number" &&
+        nowMs - failureState.windowStartMs < LOCKOUT_WINDOW_MS;
+      this.setRuntimeSetting("home_pairing_failures", {
+        count: withinWindow ? (failureState.count ?? 0) + 1 : 1,
+        windowStartMs: withinWindow ? failureState.windowStartMs : nowMs,
+      });
+      return false;
+    }
+
     this.deleteRuntimeSetting("home_pairing_code");
+    this.deleteRuntimeSetting("home_pairing_failures");
     return true;
+  }
+
+  failStaleInFlightTickets(reason = "服务重启，中断未完成的后台任务"): number {
+    const stale = this.db
+      .select()
+      .from(tickets)
+      .where(inArray(tickets.status, ["routing", "running"]))
+      .all();
+    if (stale.length === 0) return 0;
+    const now = Date.now();
+    for (const row of stale) {
+      this.db
+        .update(tickets)
+        .set({
+          status: "failed",
+          progressNote: reason,
+          resultJson:
+            row.resultJson ??
+            JSON.stringify({
+              ticket_id: row.id,
+              status: "failed",
+              narration_hint: reason,
+              verbatim_blocks: [],
+              artifacts: [],
+              required_secrets: [],
+              caveats: ["process restarted while ticket was in progress"],
+            }),
+          updatedAt: now,
+        })
+        .where(eq(tickets.id, row.id))
+        .run();
+    }
+    return stale.length;
   }
 
   insertTurnTrace(trace: {

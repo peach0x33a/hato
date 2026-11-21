@@ -251,6 +251,7 @@ export class QqAdapter implements ChannelAdapter {
   private stopped = true;
   private ws: WebSocket | null = null;
   private loopPromise: Promise<void> | null = null;
+  private reconnectAbort: AbortController | null = null;
   private sessionId = "";
   private seq = 0;
   private markdownSupported: boolean | null = null;
@@ -284,6 +285,7 @@ export class QqAdapter implements ChannelAdapter {
   async start(): Promise<void> {
     if (!this.stopped) return;
     this.stopped = false;
+    this.reconnectAbort = new AbortController();
     logInfo("QQ", `starting QQ Official Bot gateway (appId=${this.deps.appId})...`);
     this.loopPromise = this.runGatewayLoop().catch((err) => {
       if (!this.stopped) {
@@ -294,6 +296,8 @@ export class QqAdapter implements ChannelAdapter {
 
   async stop(): Promise<void> {
     this.stopped = true;
+    this.reconnectAbort?.abort();
+    this.reconnectAbort = null;
     try {
       this.ws?.close(1000, "shutdown");
     } catch {
@@ -523,7 +527,7 @@ export class QqAdapter implements ChannelAdapter {
       if (becameReady) {
         backoffMs = 1000;
       }
-      await new Promise((r) => setTimeout(r, backoffMs));
+      await sleepAbortable(backoffMs, this.reconnectAbort?.signal);
       backoffMs = Math.min(30_000, backoffMs * 2);
     }
   }
@@ -602,6 +606,10 @@ export class QqAdapter implements ChannelAdapter {
             });
           }
 
+          if (hbTimer) {
+            clearInterval(hbTimer);
+            hbTimer = null;
+          }
           hbAcked = true;
           hbTimer = setInterval(() => {
             if (!hbAcked) {
@@ -615,6 +623,7 @@ export class QqAdapter implements ChannelAdapter {
               d: this.seq > 0 ? this.seq : null,
             });
           }, intervalMs);
+          hbTimer.unref?.();
           return;
         }
 
@@ -694,17 +703,27 @@ export class QqAdapter implements ChannelAdapter {
     const text = (evt.content ?? "").trim();
 
     if (!this.isAllowedOwner(userOpenId)) {
-      const claimMatch = /^\/sethome(?:@\S+)?\s+([A-Za-z0-9_-]+)\s*$/i.exec(text);
-      if (claimMatch && this.deps.onClaimHome) {
-        const result = await this.deps.onClaimHome({
-          channel: "qq",
-          platformUserId: userOpenId,
-          code: claimMatch[1]!,
-        });
-        await this.sendText(userOpenId, result.reply, evt.id);
-      } else {
-        logWarn("QQ", `rejected message from unbound open_id=${userOpenId}`);
+      if (this.config.owner.channels.qq.open_ids.length === 0 && this.deps.onClaimHome) {
+        const claimMatch = /^\/sethome(?:@\S+)?(?:\s+([A-Za-z0-9_-]+))?\s*$/i.exec(text);
+        if (claimMatch) {
+          if (!claimMatch[1]) {
+            await this.sendText(
+              userOpenId,
+              "当前 QQ 机器人尚未绑定主人账号，请带上控制台或启动终端中显示的配对码发送：/sethome <配对码>",
+              evt.id,
+            );
+            return;
+          }
+          const result = await this.deps.onClaimHome({
+            channel: "qq",
+            platformUserId: userOpenId,
+            code: claimMatch[1],
+          });
+          await this.sendText(userOpenId, result.reply, evt.id);
+          return;
+        }
       }
+      logWarn("QQ", `rejected message from unbound open_id=${userOpenId}`);
       return;
     }
 
@@ -736,10 +755,23 @@ export class QqAdapter implements ChannelAdapter {
       }
 
       try {
+        const parsedAttUrl = new URL(att.url);
+        if (parsedAttUrl.protocol !== "https:" && parsedAttUrl.protocol !== "http:") {
+          logWarn("QQ", `skipped attachment with unsupported URL scheme: ${parsedAttUrl.protocol}`);
+          continue;
+        }
         const buf = await this.proxyRouter.runWithScope("gateway.qq", async () => {
-          const resp = await fetch(att.url!, { signal: AbortSignal.timeout(25_000) });
+          const resp = await fetch(parsedAttUrl.toString(), { signal: AbortSignal.timeout(25_000) });
           if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-          return Buffer.from(await resp.arrayBuffer());
+          const contentLen = Number(resp.headers.get("content-length") ?? "");
+          if (Number.isFinite(contentLen) && contentLen > MAX_INBOUND_FILE_BYTES) {
+            throw new Error(`attachment exceeds ${MAX_INBOUND_FILE_BYTES} bytes limit`);
+          }
+          const data = Buffer.from(await resp.arrayBuffer());
+          if (data.byteLength > MAX_INBOUND_FILE_BYTES) {
+            throw new Error(`attachment exceeds ${MAX_INBOUND_FILE_BYTES} bytes limit`);
+          }
+          return data;
         });
 
         const dataDir = dirname(this.config.paths.sqlite);
@@ -831,4 +863,20 @@ export function splitQqText(text: string, maxLen = QQ_MAX_MESSAGE_LENGTH): strin
   }
   if (remaining) chunks.push(remaining);
   return chunks;
+}
+
+function sleepAbortable(ms: number, signal?: AbortSignal): Promise<void> {
+  if (ms <= 0 || signal?.aborted) return Promise.resolve();
+  return new Promise((resolve) => {
+    const onAbort = () => {
+      clearTimeout(timer);
+      resolve();
+    };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    timer.unref?.();
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
 }

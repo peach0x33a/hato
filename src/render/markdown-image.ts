@@ -204,6 +204,13 @@ const BASE_CSS = `
   }
 `;
 
+function sanitizeRenderedHtml(html: string): string {
+  return html
+    .replace(/<(script|iframe|object|embed|applet|base|meta|link|form)\b[^>]*>[\s\S]*?<\/\1>/gi, "")
+    .replace(/<(script|iframe|object|embed|applet|base|meta|link)\b[^>]*\/?>/gi, "")
+    .replace(/\son[a-z]+\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)/gi, "");
+}
+
 /**
  * Convert Markdown into a self-contained HTML5 document styled for light or dark mode.
  */
@@ -211,13 +218,14 @@ export function buildMarkdownDocumentHtml(
   markdown: string,
   theme: MarkdownRenderTheme = "light",
 ): string {
-  const bodyHtml = Bun.markdown.html(markdown);
+  const bodyHtml = sanitizeRenderedHtml(Bun.markdown.html(markdown));
   const themeCss = theme === "dark" ? DARK_THEME_CSS : LIGHT_THEME_CSS;
 
   return `<!DOCTYPE html>
 <html lang="zh-CN" data-theme="${theme}">
 <head>
 <meta charset="utf-8" />
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src data:; font-src data:;" />
 <style>${themeCss}${BASE_CSS}</style>
 </head>
 <body>
@@ -240,7 +248,7 @@ export class MarkdownImageRenderer {
   private queue: Promise<unknown> = Promise.resolve();
   private disposed = false;
 
-  private readonly browserConfig: Pick<ResolvedWebBrowserConfig, "channel" | "executablePath">;
+  private browserConfig: Pick<ResolvedWebBrowserConfig, "channel" | "executablePath">;
   private readonly idleTimeoutMs: number;
   private readonly viewportWidth: number;
   private readonly deviceScaleFactor: number;
@@ -250,6 +258,16 @@ export class MarkdownImageRenderer {
     this.idleTimeoutMs = options?.idleTimeoutMs ?? DEFAULT_IDLE_TIMEOUT_MS;
     this.viewportWidth = options?.viewportWidth ?? DEFAULT_VIEWPORT_WIDTH;
     this.deviceScaleFactor = options?.deviceScaleFactor ?? DEFAULT_DEVICE_SCALE_FACTOR;
+  }
+
+  updateBrowserConfig(browserConfig: Pick<ResolvedWebBrowserConfig, "channel" | "executablePath">): void {
+    const changed =
+      browserConfig.channel !== this.browserConfig.channel ||
+      browserConfig.executablePath !== this.browserConfig.executablePath;
+    this.browserConfig = browserConfig;
+    if (changed) {
+      void this.enqueue(() => this.closeBrowser());
+    }
   }
 
   /**
@@ -323,6 +341,15 @@ export class MarkdownImageRenderer {
       this.context = await browser.newContext({
         viewport: { width: this.viewportWidth, height: 600 },
         deviceScaleFactor: this.deviceScaleFactor,
+        javaScriptEnabled: false,
+        offline: true,
+      });
+      await this.context.route("**/*", (route) => {
+        const url = route.request().url();
+        if (url.startsWith("data:") || url === "about:blank") {
+          return route.continue();
+        }
+        return route.abort("blockedbyclient");
       });
     }
     this.page = await this.context.newPage();

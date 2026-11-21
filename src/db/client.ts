@@ -69,6 +69,7 @@ CREATE TABLE IF NOT EXISTS tickets (
   updated_at INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_tickets_user_status ON tickets (canonical_user_id, status);
+CREATE INDEX IF NOT EXISTS idx_tickets_context_id ON tickets (context_id);
 
 CREATE TABLE IF NOT EXISTS script_registry (
   id TEXT PRIMARY KEY,
@@ -92,6 +93,7 @@ CREATE TABLE IF NOT EXISTS job_runs (
   stderr_tail TEXT NOT NULL DEFAULT '',
   ran_at INTEGER NOT NULL
 );
+CREATE INDEX IF NOT EXISTS idx_job_runs_script_time ON job_runs (script_id, ran_at);
 
 CREATE TABLE IF NOT EXISTS open_loops (
   id TEXT PRIMARY KEY,
@@ -104,6 +106,7 @@ CREATE TABLE IF NOT EXISTS open_loops (
   source_msg_id TEXT,
   created_at INTEGER NOT NULL
 );
+CREATE INDEX IF NOT EXISTS idx_open_loops_user_status_due ON open_loops (canonical_user_id, status, due_at);
 
 CREATE TABLE IF NOT EXISTS schedule_overrides (
   id TEXT PRIMARY KEY,
@@ -113,6 +116,7 @@ CREATE TABLE IF NOT EXISTS schedule_overrides (
   expires_at INTEGER NOT NULL,
   created_at INTEGER NOT NULL
 );
+CREATE INDEX IF NOT EXISTS idx_schedule_overrides_user_exp ON schedule_overrides (canonical_user_id, expires_at);
 
 CREATE TABLE IF NOT EXISTS relationship_facts (
   key TEXT PRIMARY KEY,
@@ -210,13 +214,26 @@ CREATE INDEX IF NOT EXISTS idx_stickers_sha256 ON stickers (canonical_user_id, s
 CREATE INDEX IF NOT EXISTS idx_stickers_tg_unique ON stickers (canonical_user_id, tg_file_unique_id);
 `;
 
-export function openDatabase(sqlitePath: string): DbHandle {
-  if (sqlitePath !== ":memory:") {
+export interface OpenDatabaseOptions {
+  readonly?: boolean;
+}
+
+export function openDatabase(sqlitePath: string, options?: OpenDatabaseOptions): DbHandle {
+  const isReadonly = Boolean(options?.readonly);
+  if (sqlitePath !== ":memory:" && !isReadonly) {
     mkdirSync(dirname(resolve(sqlitePath)), { recursive: true });
   }
-  const sqlite = new Database(sqlitePath);
-  sqlite.exec("PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL; PRAGMA foreign_keys = ON;");
-  sqlite.exec(INIT_SQL);
+  const sqlite = isReadonly
+    ? new Database(sqlitePath, { readonly: true })
+    : new Database(sqlitePath);
+  if (isReadonly) {
+    sqlite.exec("PRAGMA busy_timeout = 5000;");
+  } else {
+    sqlite.exec(
+      "PRAGMA busy_timeout = 5000; PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL; PRAGMA foreign_keys = ON;",
+    );
+    sqlite.exec(INIT_SQL);
+  }
 
   const db = drizzle(sqlite, { schema });
   return {

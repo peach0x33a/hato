@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import { existsSync, mkdirSync } from "node:fs";
+import { existsSync, mkdirSync, realpathSync } from "node:fs";
 import { basename, resolve, sep } from "node:path";
 import type { EventBus } from "../bus/actor-bus.js";
 import {
@@ -27,6 +27,15 @@ import {
   type WorkerResult,
 } from "./schema.js";
 
+export interface SensitiveFileConfirmPayload {
+  kind: "send_env_file";
+  channel: ChannelName;
+  strictChannel?: boolean;
+  path: string;
+  caption?: string;
+  text?: string;
+}
+
 export interface TicketCoordinatorDeps {
   getHatoConfig: () => HatoConfig;
   repo: HatoRepository;
@@ -35,7 +44,14 @@ export interface TicketCoordinatorDeps {
   bus: EventBus;
   getModelRegistry?: () => ModelRegistry;
   proxyRouter?: ScopedProxyRouter;
+  maxConcurrentTickets?: number;
+  executeSensitiveFileConfirm?: (
+    canonicalUserId: string,
+    payload: SensitiveFileConfirmPayload,
+  ) => Promise<{ ok: boolean; message: string }>;
 }
+
+const DEFAULT_MAX_CONCURRENT_TICKETS = 5;
 
 /**
  * Coordinates fast `delegate()` queueing, asynchronous Neutral Router boundary setting,
@@ -43,8 +59,22 @@ export interface TicketCoordinatorDeps {
  */
 export class TicketCoordinator {
   private readonly pendingRuns = new Set<Promise<void>>();
+  private readonly maxConcurrentTickets: number;
 
-  constructor(private readonly deps: TicketCoordinatorDeps) {}
+  constructor(private readonly deps: TicketCoordinatorDeps) {
+    this.maxConcurrentTickets = Math.max(1, deps.maxConcurrentTickets ?? DEFAULT_MAX_CONCURRENT_TICKETS);
+  }
+
+  /**
+   * Mark tickets left in `routing`/`running` from a previous crashed/restarted process as failed.
+   */
+  recoverStaleTickets(): number {
+    return this.deps.repo.failStaleInFlightTickets();
+  }
+
+  async abortAll(): Promise<void> {
+    await this.deps.dispatcher.abortAll();
+  }
 
   enqueueDelegation(params: {
     canonicalUserId: string;
@@ -53,6 +83,11 @@ export class TicketCoordinator {
     urgency?: "normal" | "high";
     deliverFiles?: boolean;
   }): { ticketId: string; status: "routing" } {
+    if (this.pendingRuns.size >= this.maxConcurrentTickets) {
+      throw new Error(
+        `当前后台并发任务已达上限 (${this.maxConcurrentTickets})，请等待已有任务完成后再派发。`,
+      );
+    }
     const cfg = this.deps.getHatoConfig();
     const ticketId = `t_${randomBytes(4).toString("hex")}`;
     const briefTitle = params.hint.trim().slice(0, 48) || "后台任务";
@@ -73,6 +108,113 @@ export class TicketCoordinator {
     this.trackPending(job);
 
     return { ticketId, status: "routing" };
+  }
+
+  /**
+   * Create an `awaiting_confirm` ticket for sending a sensitive `.env` file, emitting
+   * a physical confirmation prompt (TG Inline Keyboard / QQ confirm prompt / Web Console).
+   */
+  async enqueueSensitiveFileConfirm(params: {
+    canonicalUserId: string;
+    channel: ChannelName;
+    strictChannel?: boolean;
+    path: string;
+    caption?: string;
+    text?: string;
+  }): Promise<{ ok: boolean; ticketId: string; message: string }> {
+    const ticketId = `t_${randomBytes(4).toString("hex")}`;
+    const filename = basename(params.path);
+    const briefTitle = `确认发送敏感文件: ${filename}`.slice(0, 48);
+    const payload: SensitiveFileConfirmPayload = {
+      kind: "send_env_file",
+      channel: params.channel,
+      strictChannel: params.strictChannel,
+      path: params.path,
+      caption: params.caption,
+      text: params.text,
+    };
+    const promptText = `请求外发敏感凭据文件：${params.path}（目标通道：${params.channel.toUpperCase()}）。请确认是否允许发送该 .env 文件。`;
+
+    this.deps.repo.createTicket({
+      id: ticketId,
+      canonicalUserId: params.canonicalUserId,
+      status: "awaiting_confirm",
+      backend: "builtin-pi",
+      briefTitle,
+      originChannel: params.channel,
+      progressNote: "等待主人确认外发敏感 .env 文件",
+    });
+    this.deps.repo.updateTicket(ticketId, {
+      resultJson: JSON.stringify({
+        ticket_id: ticketId,
+        status: "awaiting_confirm",
+        narration_hint: promptText,
+        verbatim_blocks: [],
+        artifacts: [],
+        required_secrets: [],
+        caveats: [],
+        confirm_action: promptText,
+        sensitive_file_confirm: payload,
+      }),
+    });
+
+    await this.deps.bus.emit({
+      type: "ticket_confirm_required",
+      canonicalUserId: params.canonicalUserId,
+      originChannel: params.channel,
+      ticketId,
+      briefTitle,
+      promptText,
+    });
+
+    return {
+      ok: true,
+      ticketId,
+      message: `目标文件 ${filename} 属于敏感 .env 凭据文件，已发送二次确认请求 (${ticketId})，需主人显式确认后才会发出。`,
+    };
+  }
+
+  /**
+   * Parse explicit text confirmation replies (primarily for QQ where inline keyboards are unavailable):
+   * e.g. `确认 t_abcd1234`, `取消 t_abcd1234`, or bare `确认`/`取消` when exactly one ticket awaits confirm.
+   */
+  async tryHandleConfirmText(
+    canonicalUserId: string,
+    text: string,
+  ): Promise<{ handled: boolean; reply?: string }> {
+    const trimmed = text.trim();
+    const match = /^(确认|同意|批准|取消|拒绝)(?:\s+(t_[a-zA-Z0-9_-]+))?$/i.exec(trimmed);
+    if (!match) {
+      return { handled: false };
+    }
+    const approved = ["确认", "同意", "批准"].includes(match[1]!);
+    const explicitId = match[2]?.trim();
+
+    const active = this.deps.repo
+      .listActiveTickets(canonicalUserId, 10)
+      .filter((t) => t.status === "awaiting_confirm");
+    if (active.length === 0) {
+      return { handled: false };
+    }
+
+    let targetId = explicitId;
+    if (!targetId) {
+      if (active.length > 1) {
+        return {
+          handled: true,
+          reply: `当前有多个待确认工单（${active.map((t) => t.id).join(", ")}），请携带工单号回复，例如：确认 ${active[0]!.id}`,
+        };
+      }
+      targetId = active[0]!.id;
+    }
+
+    const existsForUser = active.some((t) => t.id === targetId);
+    if (!existsForUser) {
+      return { handled: true, reply: `未找到待确认的工单 ${targetId}。` };
+    }
+
+    const reply = await this.handleConfirmAction(targetId, approved);
+    return { handled: true, reply };
   }
 
   /**
@@ -320,6 +462,39 @@ export class TicketCoordinator {
         progressNote: "用户已取消执行",
       });
       return `已取消工单 ${ticketId}`;
+    }
+
+    const sensitivePayload = parseSensitiveFileConfirmPayload(ticket.resultJson);
+    if (sensitivePayload) {
+      if (!this.deps.executeSensitiveFileConfirm) {
+        this.deps.repo.updateTicket(ticketId, {
+          status: "failed",
+          progressNote: "缺少敏感文件发送执行器",
+        });
+        return `工单 ${ticketId} 执行失败：未接入文件发送通道。`;
+      }
+      this.deps.repo.updateTicket(ticketId, {
+        status: "running",
+        progressNote: "主人已确认，正在发送敏感文件",
+      });
+      try {
+        const res = await this.deps.executeSensitiveFileConfirm(
+          ticket.canonicalUserId,
+          sensitivePayload,
+        );
+        this.deps.repo.updateTicket(ticketId, {
+          status: res.ok ? "done" : "failed",
+          progressNote: res.message.slice(0, 120),
+        });
+        return res.ok ? `已确认并执行：${res.message}` : `发送失败：${res.message}`;
+      } catch (err) {
+        const msg = summarizeError(err);
+        this.deps.repo.updateTicket(ticketId, {
+          status: "failed",
+          progressNote: msg.slice(0, 120),
+        });
+        return `发送失败：${msg}`;
+      }
     }
 
     const cfg = this.deps.getHatoConfig();
@@ -740,13 +915,27 @@ function buildMandateFromRouterDecision(
 
   if (decision.workspace_mode === "host_repo" && decision.repo_path?.trim()) {
     const candidate = resolve(decision.repo_path.trim());
-    const allowed = extCfg.allowedRepos.some((rawRoot) => {
-      const root = resolve(rawRoot);
-      return candidate === root || candidate.startsWith(root + sep);
-    });
-    if (allowed && existsSync(candidate)) {
-      workspaceDir = candidate;
-      isHostRepo = true;
+    if (existsSync(candidate)) {
+      let realCandidate = candidate;
+      try {
+        realCandidate = realpathSync(candidate);
+      } catch {
+        realCandidate = candidate;
+      }
+      const allowed = extCfg.allowedRepos.some((rawRoot) => {
+        const root = resolve(rawRoot);
+        let realRoot = root;
+        try {
+          if (existsSync(root)) realRoot = realpathSync(root);
+        } catch {
+          realRoot = root;
+        }
+        return realCandidate === realRoot || realCandidate.startsWith(realRoot + sep);
+      });
+      if (allowed) {
+        workspaceDir = realCandidate;
+        isHostRepo = true;
+      }
     }
   }
 
@@ -760,4 +949,34 @@ function buildMandateFromRouterDecision(
     allowed_mcp_servers: decision.allowed_mcp_servers ?? [],
     confirm_before: decision.confirm_before ?? [],
   };
+}
+
+function parseSensitiveFileConfirmPayload(
+  resultJson: string | null | undefined,
+): SensitiveFileConfirmPayload | null {
+  if (!resultJson) return null;
+  try {
+    const parsed = JSON.parse(resultJson) as {
+      sensitive_file_confirm?: Partial<SensitiveFileConfirmPayload>;
+    };
+    const payload = parsed?.sensitive_file_confirm;
+    if (
+      payload &&
+      payload.kind === "send_env_file" &&
+      typeof payload.path === "string" &&
+      (payload.channel === "tg" || payload.channel === "qq" || payload.channel === "web")
+    ) {
+      return {
+        kind: "send_env_file",
+        channel: payload.channel,
+        strictChannel: Boolean(payload.strictChannel),
+        path: payload.path,
+        caption: typeof payload.caption === "string" ? payload.caption : undefined,
+        text: typeof payload.text === "string" ? payload.text : undefined,
+      };
+    }
+  } catch {
+    return null;
+  }
+  return null;
 }

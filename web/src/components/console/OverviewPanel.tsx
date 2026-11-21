@@ -12,11 +12,18 @@ import {
   Play,
   RefreshCw,
   Timer,
+  Unlink,
   Wifi,
 } from "lucide-react";
 import { AnimatePresence, LayoutGroup, motion } from "motion/react";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { api, type OverviewResponse, type ProbeItemResult, type ProbeResponse } from "@/api";
+import {
+  api,
+  type OverviewResponse,
+  type PairingCodeResponse,
+  type ProbeItemResult,
+  type ProbeResponse,
+} from "@/api";
 import { AnimatedBadge } from "@/components/motion/animated-badge";
 import { Button } from "@/components/motion/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/motion/card";
@@ -291,9 +298,11 @@ export function OverviewPanel({
   );
   const [probingChannel, setProbingChannel] = useState<"telegram" | "qq" | null>(null);
   const [togglingChannel, setTogglingChannel] = useState<"tg" | "qq" | null>(null);
-  const [pairingInfo, setPairingInfo] = useState<{ code: string; command: string } | null>(null);
+  const [pairingInfo, setPairingInfo] = useState<PairingCodeResponse | null>(null);
   const [pairingOpen, setPairingOpen] = useState(false);
   const [pairingLoading, setPairingLoading] = useState(false);
+  const [unbindingHome, setUnbindingHome] = useState(false);
+  const [clearWhitelistOnUnbind, setClearWhitelistOnUnbind] = useState(false);
   const [copiedPairing, setCopiedPairing] = useState(false);
   const copiedTimerRef = useRef<number | null>(null);
 
@@ -391,7 +400,7 @@ export function OverviewPanel({
     setPairingLoading(true);
     try {
       const res = await api.getPairingCode(refresh);
-      setPairingInfo({ code: res.code, command: res.command });
+      setPairingInfo(res);
       setPairingOpen(true);
     } catch (err) {
       onToast({
@@ -404,8 +413,40 @@ export function OverviewPanel({
     }
   };
 
+  const handleUnbindHome = async () => {
+    setUnbindingHome(true);
+    try {
+      const res = await api.unbindHome(clearWhitelistOnUnbind);
+      setPairingInfo({
+        ok: true,
+        homeBound: res.home.bound,
+        currentHome: res.home,
+        code: res.pairing.code,
+        command: res.pairing.command,
+        expiresAt: res.pairing.expiresAt,
+      });
+      setPairingOpen(true);
+      await loadOverview(true);
+      onToast({
+        title: "已解绑原 Home Channel",
+        description: res.clearedWhitelist
+          ? "已同时清空原通道主人白名单，现在可使用 /sethome 绑定新账号。"
+          : "现在可在 Telegram 或 QQ 发送 /sethome 重新绑定。",
+        status: "success",
+      });
+    } catch (err) {
+      onToast({
+        title: "解绑原 Home 失败",
+        description: err instanceof Error ? err.message : String(err),
+        status: "error",
+      });
+    } finally {
+      setUnbindingHome(false);
+    }
+  };
+
   const handleCopyPairing = async () => {
-    if (!pairingInfo) return;
+    if (!pairingInfo?.command) return;
     try {
       await navigator.clipboard.writeText(pairingInfo.command);
       setCopiedPairing(true);
@@ -480,7 +521,7 @@ export function OverviewPanel({
             }}
           >
             <KeyRound className="size-3.5" />
-            {pairingOpen ? "收起配对码" : "查看配对码"}
+            {pairingOpen ? "收起 Home 绑定" : "Home 绑定 / 配对码"}
           </Button>
           <Button
             type="button"
@@ -506,32 +547,87 @@ export function OverviewPanel({
             transition={{ ...SPRING_LAYOUT, opacity: { duration: 0.16 } }}
             className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-primary/30 bg-primary/5 px-4 py-3 text-xs"
           >
-            <div className="flex flex-wrap items-center gap-2">
-              <KeyRound className="size-4 text-primary" />
-              <span className="font-medium text-foreground">主人绑定指令：</span>
-              <code className="rounded-md bg-muted px-2 py-1 font-mono text-xs font-semibold text-foreground">
-                {pairingInfo.command}
-              </code>
-              <span className="text-muted-foreground">
-                在 Telegram 或 QQ 私聊机器人发送即可绑定并设为 Home Channel
-              </span>
-            </div>
-            <div className="flex items-center gap-2">
-              <Button type="button" variant="outline" size="sm" onClick={() => void handleCopyPairing()}>
-                {copiedPairing ? <Check className="size-3.5 text-emerald-500" /> : <Copy className="size-3.5" />}
-                {copiedPairing ? "已复制" : "复制"}
-              </Button>
-              <Button
-                type="button"
-                variant="ghost"
-                size="sm"
-                disabled={pairingLoading}
-                onClick={() => void handleLoadPairingCode(true)}
-              >
-                <RefreshCw className={`size-3.5 ${pairingLoading ? "animate-spin" : ""}`} />
-                换一个
-              </Button>
-            </div>
+            {pairingInfo.homeBound ? (
+              <>
+                <div className="flex flex-col gap-1.5">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <KeyRound className="size-4 text-primary" />
+                    <span className="font-medium text-foreground">当前已绑定 Home Channel：</span>
+                    <code className="rounded-md bg-muted px-2 py-0.5 font-mono text-xs font-semibold text-foreground">
+                      {pairingInfo.currentHome.channel === "tg" ? "Telegram" : "QQ"} ·{" "}
+                      {pairingInfo.currentHome.targetId}
+                    </code>
+                    <span className="text-muted-foreground">
+                      如需执行 /sethome 更换 Home，必须先在此解绑原 Home
+                    </span>
+                  </div>
+                  <label className="inline-flex cursor-pointer items-center gap-1.5 text-[11px] text-muted-foreground select-none">
+                    <input
+                      type="checkbox"
+                      className="size-3.5 rounded border-border accent-primary"
+                      checked={clearWhitelistOnUnbind}
+                      onChange={(e) => setClearWhitelistOnUnbind(e.target.checked)}
+                    />
+                    同时清空原通道主人白名单（换绑同平台新账号时勾选）
+                  </label>
+                </div>
+                <div className="flex items-center gap-2">
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    className="border-destructive/40 text-destructive hover:bg-destructive/10"
+                    disabled={unbindingHome}
+                    onClick={() => void handleUnbindHome()}
+                  >
+                    {unbindingHome ? (
+                      <Loader2 className="size-3.5 animate-spin" />
+                    ) : (
+                      <Unlink className="size-3.5" />
+                    )}
+                    解绑原 Home
+                  </Button>
+                </div>
+              </>
+            ) : (
+              <>
+                <div className="flex flex-wrap items-center gap-2">
+                  <KeyRound className="size-4 text-primary" />
+                  <span className="font-medium text-foreground">主人绑定指令（15 分钟有效）：</span>
+                  <code className="rounded-md bg-muted px-2 py-1 font-mono text-xs font-semibold text-foreground">
+                    {pairingInfo.command}
+                  </code>
+                  <span className="text-muted-foreground">
+                    在 Telegram 或 QQ 私聊机器人发送即可绑定并设为 Home Channel（已在白名单的账号可直接发送 /sethome）
+                  </span>
+                </div>
+                <div className="flex items-center gap-2">
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    onClick={() => void handleCopyPairing()}
+                  >
+                    {copiedPairing ? (
+                      <Check className="size-3.5 text-emerald-500" />
+                    ) : (
+                      <Copy className="size-3.5" />
+                    )}
+                    {copiedPairing ? "已复制" : "复制"}
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    disabled={pairingLoading}
+                    onClick={() => void handleLoadPairingCode(true)}
+                  >
+                    <RefreshCw className={`size-3.5 ${pairingLoading ? "animate-spin" : ""}`} />
+                    换一个
+                  </Button>
+                </div>
+              </>
+            )}
           </motion.div>
         ) : null}
       </AnimatePresence>

@@ -14,6 +14,12 @@ test("validateFetchUrl and extractReadableTextFromHtml sanitize HTML cleanly", (
   assert.equal(validateFetchUrl("https://example.com/post?a=1").hostname, "example.com");
   assert.throws(() => validateFetchUrl("file:///etc/passwd"), /http/);
   assert.throws(() => validateFetchUrl("http://169.254.169.254/latest/meta-data"), /安全限制/);
+  assert.throws(() => validateFetchUrl("http://127.0.0.1:3820/api/config"), /安全限制/);
+  assert.throws(() => validateFetchUrl("http://localhost:3820/api/config"), /安全限制/);
+  assert.throws(() => validateFetchUrl("http://[::1]:3820/api/config"), /安全限制/);
+  assert.throws(() => validateFetchUrl("http://[::ffff:169.254.169.254]/"), /安全限制/);
+  assert.throws(() => validateFetchUrl("http://192.168.1.1/admin"), /安全限制/);
+  assert.throws(() => validateFetchUrl("http://10.0.0.1/internal"), /安全限制/);
 
   const html = `
     <!doctype html>
@@ -25,7 +31,7 @@ test("validateFetchUrl and extractReadableTextFromHtml sanitize HTML cleanly", (
       </head>
       <body>
         <h1>Welcome</h1>
-        <p>Read <a href="https://example.com/docs">the docs</a> carefully.</p>
+        <p>Read <a href="https://example.com/docs">the docs</a> carefully. Invalid entity: &#999999999; &#x110000;</p>
         <ul>
           <li>First item</li>
           <li>Second item</li>
@@ -62,6 +68,12 @@ test("runWebFetch fetches HTML and JSON via web_access proxy scope and handles e
       res.end(Buffer.from([0x89, 0x50, 0x4e, 0x47]));
       return;
     }
+    if (req.url === "/redirect-meta") {
+      res.statusCode = 302;
+      res.setHeader("Location", "http://169.254.169.254/latest/meta-data");
+      res.end();
+      return;
+    }
     res.statusCode = 404;
     res.end("Not Found");
   });
@@ -75,10 +87,30 @@ test("runWebFetch fetches HTML and JSON via web_access proxy scope and handles e
     const cfg = resolveWebFetchConfig(createDefaultHatoConfig());
     const proxyRouter = new ScopedProxyRouter([]);
 
+    // Default SSRF guard rejects loopback
+    const blockedLocal = await runWebFetch({
+      config: cfg,
+      proxyRouter,
+      input: { url: `${baseUrl}/article` },
+    });
+    assert.equal(blockedLocal.ok, false);
+    assert.match(blockedLocal.text, /安全限制/);
+
+    // Redirect to metadata is blocked even with allowPrivateNetworks
+    const blockedRedirect = await runWebFetch({
+      config: cfg,
+      proxyRouter,
+      input: { url: `${baseUrl}/redirect-meta` },
+      allowPrivateNetworks: true,
+    });
+    assert.equal(blockedRedirect.ok, false);
+    assert.match(blockedRedirect.text, /安全限制/);
+
     const htmlRes = await runWebFetch({
       config: cfg,
       proxyRouter,
       input: { url: `${baseUrl}/article` },
+      allowPrivateNetworks: true,
     });
     assert.equal(htmlRes.ok, true);
     assert.equal(htmlRes.title, "News");
@@ -88,6 +120,7 @@ test("runWebFetch fetches HTML and JSON via web_access proxy scope and handles e
       config: cfg,
       proxyRouter,
       input: { url: `${baseUrl}/data.json` },
+      allowPrivateNetworks: true,
     });
     assert.equal(jsonRes.ok, true);
     assert.ok(jsonRes.text.includes('"count": 42'));
@@ -96,6 +129,7 @@ test("runWebFetch fetches HTML and JSON via web_access proxy scope and handles e
       config: cfg,
       proxyRouter,
       input: { url: `${baseUrl}/image.png` },
+      allowPrivateNetworks: true,
     });
     assert.equal(binaryRes.ok, false);
     assert.ok(binaryRes.text.includes("browser_task"));
@@ -104,6 +138,7 @@ test("runWebFetch fetches HTML and JSON via web_access proxy scope and handles e
       config: cfg,
       proxyRouter,
       input: { url: `${baseUrl}/missing` },
+      allowPrivateNetworks: true,
     });
     assert.equal(notFoundRes.ok, false);
     assert.ok(notFoundRes.text.includes("HTTP 404"));

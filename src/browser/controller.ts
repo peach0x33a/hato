@@ -915,6 +915,12 @@ export class BrowserController {
   }
 }
 
+const BLOCKED_BROWSER_HOSTS = new Set([
+  "169.254.169.254",
+  "metadata.google.internal",
+  "metadata.goog",
+]);
+
 function normalizeNavigationUrl(rawUrl: string): string {
   const trimmed = rawUrl.trim();
   let parsed: URL;
@@ -925,6 +931,14 @@ function normalizeNavigationUrl(rawUrl: string): string {
   }
   if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
     throw new Error(`浏览器任务仅允许访问 http:// 或 https:// 网址，收到 "${parsed.protocol}"`);
+  }
+  const bareHost = parsed.hostname.toLowerCase().replace(/^\[|\]$/g, "");
+  if (
+    BLOCKED_BROWSER_HOSTS.has(bareHost) ||
+    bareHost.startsWith("169.254.") ||
+    bareHost.startsWith("::ffff:169.254.")
+  ) {
+    throw new Error(`出于安全限制，浏览器任务禁止访问云元数据地址 "${parsed.hostname}"`);
   }
   return parsed.toString();
 }
