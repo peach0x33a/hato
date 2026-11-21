@@ -398,33 +398,6 @@ export function TrajectoryPanel({
       const tools = parseJsonArray(tr.toolCallsJson);
       const recalled = parseJsonArray(tr.recalledIdsJson);
 
-      if (showInputs && tr.userPreview) {
-        events.push({
-          key: `${tr.id}:input`,
-          traceId: tr.id,
-          turnNumber,
-          kind: "input",
-          slot: tr.slot,
-          primaryText: tr.userPreview,
-          meta: `#${turnNumber}`,
-          createdAt: tr.createdAt,
-        });
-      }
-
-      if (showRecall && recalled.length > 0) {
-        events.push({
-          key: `${tr.id}:recall`,
-          traceId: tr.id,
-          turnNumber,
-          kind: "recall",
-          slot: tr.slot,
-          primaryText: `召回记忆 ${recalled.length} 条`,
-          secondaryText: recalled.slice(0, 4).join(", "),
-          meta: `#${turnNumber}`,
-          createdAt: tr.createdAt,
-        });
-      }
-
       if (steps.length > 0) {
         for (let sIdx = steps.length - 1; sIdx >= 0; sIdx--) {
           const st = steps[sIdx]!;
@@ -528,6 +501,33 @@ export function TrajectoryPanel({
             });
           }
         }
+      }
+
+      if (showRecall && recalled.length > 0) {
+        events.push({
+          key: `${tr.id}:recall`,
+          traceId: tr.id,
+          turnNumber,
+          kind: "recall",
+          slot: tr.slot,
+          primaryText: `召回记忆 ${recalled.length} 条`,
+          secondaryText: recalled.slice(0, 4).join(", "),
+          meta: `#${turnNumber}`,
+          createdAt: tr.createdAt,
+        });
+      }
+
+      if (showInputs && tr.userPreview) {
+        events.push({
+          key: `${tr.id}:input`,
+          traceId: tr.id,
+          turnNumber,
+          kind: "input",
+          slot: tr.slot,
+          primaryText: tr.userPreview,
+          meta: `#${turnNumber}`,
+          createdAt: tr.createdAt,
+        });
       }
     }
     return events;
