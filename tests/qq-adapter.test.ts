@@ -220,4 +220,72 @@ describe("QQ Official Bot adapter", () => {
       rmSync(tempDir, { recursive: true, force: true });
     }
   });
+
+  it("shares msg_seq across explicit replyToPlatformMsgId ack and subsequent passive sendBubbles", async () => {
+    const sentPayloads: Array<Record<string, unknown>> = [];
+    const server = createServer((req, res) => {
+      const chunks: Buffer[] = [];
+      req.on("data", (c) => chunks.push(c));
+      req.on("end", () => {
+        if (req.url === "/app/getAppAccessToken") {
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ access_token: "tok_ok", expires_in: 7200 }));
+          return;
+        }
+        if (req.url === "/v2/users/owner_qq_1/messages") {
+          sentPayloads.push(JSON.parse(Buffer.concat(chunks).toString("utf8")) as Record<string, unknown>);
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ id: `m_${sentPayloads.length}` }));
+          return;
+        }
+        res.writeHead(404);
+        res.end();
+      });
+    });
+
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", () => resolve()));
+    const port = (server.address() as AddressInfo).port;
+    const baseUrl = `http://127.0.0.1:${port}`;
+
+    try {
+      const cfg = createDefaultHatoConfig();
+      cfg.gateway.qq.base_url = baseUrl;
+      cfg.owner.channels.qq.open_ids = ["owner_qq_1"];
+
+      const adapter = new QqAdapter({
+        config: cfg,
+        appId: "102000001",
+        clientSecret: "sec_xyz",
+        proxyRouter: new ScopedProxyRouter([]),
+        tokenUrl: `${baseUrl}/app/getAppAccessToken`,
+        onInboundMessage: () => {},
+      });
+
+      await (adapter as unknown as { handleC2CMessage: (evt: unknown) => Promise<void> }).handleC2CMessage({
+        id: "inbound_steer_1",
+        content: "？？我没给你发链接啊",
+        timestamp: "2026-11-21T13:43:00Z",
+        author: { user_openid: "owner_qq_1" },
+      });
+
+      await adapter.sendText("owner_qq_1", "知道了", "inbound_steer_1");
+      await adapter.sendBubbles("owner_qq_1", ["第一句", "第二句"], [0, 0]);
+      await adapter.sendText("owner_qq_1", "第四句");
+      await adapter.sendText("owner_qq_1", "第五句（超出被动上限转主动）");
+
+      assert.equal(sentPayloads.length, 5);
+      assert.equal(sentPayloads[0]?.msg_id, "inbound_steer_1");
+      assert.equal(sentPayloads[0]?.msg_seq, 1);
+      assert.equal(sentPayloads[1]?.msg_id, "inbound_steer_1");
+      assert.equal(sentPayloads[1]?.msg_seq, 2);
+      assert.equal(sentPayloads[2]?.msg_id, "inbound_steer_1");
+      assert.equal(sentPayloads[2]?.msg_seq, 3);
+      assert.equal(sentPayloads[3]?.msg_id, "inbound_steer_1");
+      assert.equal(sentPayloads[3]?.msg_seq, 4);
+      assert.equal(sentPayloads[4]?.msg_id, undefined);
+      assert.equal(sentPayloads[4]?.msg_seq, undefined);
+    } finally {
+      server.close();
+    }
+  });
 });

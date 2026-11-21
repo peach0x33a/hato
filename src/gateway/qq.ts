@@ -226,7 +226,6 @@ function formatQqArkSummary(ark: QqC2CMessageEvent["ark"]): string | null {
 interface PassiveReplyState {
   msgId: string;
   receivedAtMs: number;
-  nextSeq: number;
 }
 
 /**
@@ -246,7 +245,7 @@ export class QqAdapter implements ChannelAdapter {
   private readonly proxyRouter: ScopedProxyRouter;
   private readonly deps: QqAdapterDeps;
   private readonly passiveState = new Map<string, PassiveReplyState>();
-  private readonly explicitSeq = new Map<string, number>();
+  private readonly msgSeqByMsgId = new Map<string, number>();
 
   private stopped = true;
   private ws: WebSocket | null = null;
@@ -317,20 +316,26 @@ export class QqAdapter implements ChannelAdapter {
     });
   }
 
+  private allocateMsgSeq(msgId: string): number | undefined {
+    const seq = this.msgSeqByMsgId.get(msgId) ?? 1;
+    if (seq > QQ_MAX_PASSIVE_SEQ) {
+      return undefined;
+    }
+    this.msgSeqByMsgId.set(msgId, seq + 1);
+    if (this.msgSeqByMsgId.size > 200) {
+      const firstKey = this.msgSeqByMsgId.keys().next().value;
+      if (firstKey) this.msgSeqByMsgId.delete(firstKey);
+    }
+    return seq;
+  }
+
   private resolvePassiveReply(
     platformUserId: string,
     explicitMsgId?: string,
   ): { msg_id: string; msg_seq: number } | undefined {
     if (explicitMsgId) {
-      const seq = this.explicitSeq.get(explicitMsgId) ?? 1;
-      this.explicitSeq.set(explicitMsgId, seq + 1);
-      if (this.explicitSeq.size > 200) {
-        const firstKey = this.explicitSeq.keys().next().value;
-        if (firstKey) this.explicitSeq.delete(firstKey);
-      }
-      if (seq <= QQ_MAX_PASSIVE_SEQ) {
-        return { msg_id: explicitMsgId, msg_seq: seq };
-      }
+      const seq = this.allocateMsgSeq(explicitMsgId);
+      return seq !== undefined ? { msg_id: explicitMsgId, msg_seq: seq } : undefined;
     }
 
     const state = this.passiveState.get(platformUserId);
@@ -339,12 +344,8 @@ export class QqAdapter implements ChannelAdapter {
       this.passiveState.delete(platformUserId);
       return undefined;
     }
-    if (state.nextSeq > QQ_MAX_PASSIVE_SEQ) {
-      return undefined;
-    }
-    const seq = state.nextSeq;
-    state.nextSeq += 1;
-    return { msg_id: state.msgId, msg_seq: seq };
+    const seq = this.allocateMsgSeq(state.msgId);
+    return seq !== undefined ? { msg_id: state.msgId, msg_seq: seq } : undefined;
   }
 
   async sendText(
@@ -697,7 +698,6 @@ export class QqAdapter implements ChannelAdapter {
     this.passiveState.set(userOpenId, {
       msgId: evt.id,
       receivedAtMs: Date.now(),
-      nextSeq: 1,
     });
 
     const text = (evt.content ?? "").trim();
