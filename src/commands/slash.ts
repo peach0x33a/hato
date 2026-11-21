@@ -3,6 +3,7 @@ import { resolveReplyMessageText } from "../gateway/reply-context.js";
 import type { ChannelName } from "../gateway/types.js";
 import type { ForgetRunSummary, RetainRunSummary } from "../memory/curator.js";
 import type { MemoryUsageSummary, MemoryVaultInfo } from "../memory/store.js";
+import type { NotebookService } from "../notebook/service.js";
 import type { MarkdownRenderTheme } from "../render/markdown-image.js";
 import { computeTurnMetrics, formatCacheHitRate } from "../stats/metrics.js";
 
@@ -30,7 +31,7 @@ export interface MemoryStatusView {
   configured: boolean;
   recallMode: string;
   curatorEnabled: boolean;
-  vaultIds: { persona: string | null; tech: string | null };
+  vaultIds: { persona: string | null; tech: string | null; notebook?: string | null };
   vaults?: MemoryVaultInfo[];
   usage?: MemoryUsageSummary | null;
 }
@@ -71,6 +72,7 @@ export interface SlashCommandDeps {
   syncMemory?(canonicalUserId: string, opts?: { includeDenied?: boolean }): Promise<RetainRunSummary>;
   forgetMemory?(canonicalUserId: string, query: string): Promise<ForgetRunSummary>;
   renderMarkdownImage?(markdown: string, options?: { theme?: MarkdownRenderTheme }): Promise<Buffer>;
+  notebookService?: NotebookService | null;
 }
 
 export interface SlashCommandInput {
@@ -456,7 +458,7 @@ export function createDefaultSlashCommandRegistry(): SlashCommandRegistry {
             `- 提供商: ${statusView.provider} (${statusView.configured ? "已就绪" : "未就绪/未启用"}) · 召回模式=${statusView.recallMode} · Curator=${statusView.curatorEnabled ? "开启" : "关闭"}`,
           );
           lines.push(
-            `- Vaults: persona=${statusView.vaultIds.persona ?? "(未绑定)"} · tech=${statusView.vaultIds.tech ?? "(未绑定)"}`,
+            `- Vaults: persona=${statusView.vaultIds.persona ?? "(未绑定)"} · tech=${statusView.vaultIds.tech ?? "(未绑定)"} · notebook=${statusView.vaultIds.notebook ?? "(未绑定)"}`,
           );
           if (statusView.usage) {
             lines.push(
@@ -546,6 +548,36 @@ export function createDefaultSlashCommandRegistry(): SlashCommandRegistry {
           const msg = err instanceof Error ? err.message : String(err);
           return `渲染图片失败：${msg}`;
         }
+      },
+    })
+    .register({
+      command: "notebook",
+      description: "查看或搜索 Hato 的小本本",
+      helpLine: "- `/notebook [关键词]`：列出或搜索 Hato 小本本中的备忘与图片条目",
+      async execute(ctx) {
+        const svc = ctx.deps.notebookService;
+        if (!svc) {
+          return "小本本服务当前未初始化。";
+        }
+        const query = ctx.rawArgs.trim();
+        const res = await svc.searchEntries(ctx.canonicalUserId, {
+          query: query || undefined,
+          limit: 10,
+        });
+        if (res.entries.length === 0) {
+          return query
+            ? `小本本里没有找到与「${query}」相关的条目。`
+            : "小本本目前还是空的。";
+        }
+        const header = query
+          ? `【小本本检索: ${query}】(${res.usedSemanticIndex ? "语义+本地" : "本地"} · 共 ${res.entries.length} 条)`
+          : `【Hato 的小本本】最近 ${res.entries.length} 条`;
+        const lines = res.entries.map((entry) => {
+          const titlePart = entry.title ? `${entry.title} — ` : "";
+          const kindLabel = entry.kind === "mixed" ? "图文" : entry.kind === "image" ? "图片" : "文本";
+          return `- [${entry.id}] (${kindLabel}) ${titlePart}${entry.summary}（原因：${entry.reason}）`;
+        });
+        return [header, ...lines].join("\n");
       },
     });
 

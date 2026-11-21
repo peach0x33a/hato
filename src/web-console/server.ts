@@ -74,6 +74,8 @@ import {
   summarizeTurnTraces,
 } from "../stats/metrics.js";
 import type { LiveTraceTracker } from "../stats/live-trace.js";
+import type { NotebookService } from "../notebook/service.js";
+import type { NotebookEntryKind } from "../notebook/store.js";
 import type { StickerService } from "../stickers/service.js";
 import { logInfo, logWarn, summarizeError } from "../utils/logger.js";
 import {
@@ -99,6 +101,7 @@ export interface WebConsoleServerDeps {
   getModelRegistry: () => ModelRegistry;
   getProxyRouter: () => ScopedProxyRouter;
   getStickerService?: () => StickerService;
+  getNotebookService?: () => NotebookService | null;
   getRepo: () => HatoRepository;
   getPersonaRuntime: () => PersonaRuntime;
   getBrowserRuntime: () => BrowserRuntime;
@@ -562,6 +565,170 @@ export class WebConsoleServer {
           sendJson(res, 200, { ok: true });
           return;
         }
+        if (pathname === "/api/notebook" && method === "GET") {
+          const svc = this.deps.getNotebookService?.();
+          if (!svc) {
+            sendJson(res, 200, {
+              ok: true,
+              entries: [],
+              usedSemanticIndex: false,
+              degraded: false,
+              memoryConfigured: false,
+              stats: { total: 0, textCount: 0, imageCount: 0, mixedCount: 0, syncedCount: 0 },
+            });
+            return;
+          }
+          const uid = this.deps.getConfig().owner.canonical_user_id;
+          const q = parsedUrl.searchParams.get("q") ?? undefined;
+          const rawKind = parsedUrl.searchParams.get("kind") ?? "all";
+          const kind: NotebookEntryKind | "all" =
+            rawKind === "text" || rawKind === "image" || rawKind === "mixed" ? rawKind : "all";
+          const result = await svc.searchEntries(uid, { query: q, kind, limit: 100 });
+          const stats = svc.getStore().getStats(uid);
+          sendJson(res, 200, {
+            ok: true,
+            entries: result.entries,
+            usedSemanticIndex: result.usedSemanticIndex,
+            degraded: result.degraded,
+            ...(result.errorMessage ? { errorMessage: result.errorMessage } : {}),
+            memoryConfigured: svc.isMemoryIndexConfigured(),
+            stats,
+          });
+          return;
+        }
+        if (pathname === "/api/notebook" && method === "POST") {
+          const svc = this.deps.getNotebookService?.();
+          if (!svc) {
+            sendJson(res, 503, { ok: false, error: "Notebook service unavailable" });
+            return;
+          }
+          const uid = this.deps.getConfig().owner.canonical_user_id;
+          const body = (await readJsonBody(req)) as {
+            title?: unknown;
+            summary?: unknown;
+            reason?: unknown;
+            content?: unknown;
+            tags?: unknown;
+            imageDataUrl?: unknown;
+          };
+          try {
+            const entry = await svc.saveEntry(uid, {
+              title: typeof body.title === "string" ? body.title : undefined,
+              summary: typeof body.summary === "string" ? body.summary : "",
+              reason: typeof body.reason === "string" ? body.reason : "",
+              content: typeof body.content === "string" ? body.content : undefined,
+              tags: Array.isArray(body.tags)
+                ? body.tags.map((x) => String(x).trim()).filter(Boolean)
+                : undefined,
+              imageDataUrl: typeof body.imageDataUrl === "string" ? body.imageDataUrl : undefined,
+            });
+            sendJson(res, 201, { ok: true, entry });
+          } catch (err) {
+            sendJson(res, 400, { ok: false, error: summarizeError(err) });
+          }
+          return;
+        }
+        if (pathname === "/api/notebook/reindex" && method === "POST") {
+          const svc = this.deps.getNotebookService?.();
+          if (!svc) {
+            sendJson(res, 503, { ok: false, error: "Notebook service unavailable" });
+            return;
+          }
+          const uid = this.deps.getConfig().owner.canonical_user_id;
+          const body = (await readJsonBody(req).catch(() => ({}))) as { force?: unknown };
+          const result = await svc.reindexAll(uid, { force: body.force === true });
+          sendJson(res, 200, { ...result, ok: result.ok });
+          return;
+        }
+        const notebookImageMatch = pathname.match(/^\/api\/notebook\/([^/]+)\/image$/);
+        if (notebookImageMatch && method === "GET") {
+          const svc = this.deps.getNotebookService?.();
+          const uid = this.deps.getConfig().owner.canonical_user_id;
+          const id = decodeURIComponent(notebookImageMatch[1]!);
+          const entry = svc?.getStore().getById(uid, id);
+          if (!entry || !entry.imagePath || !existsSync(entry.imagePath)) {
+            sendJson(res, 404, { ok: false, error: "Notebook image not found" });
+            return;
+          }
+          res.writeHead(200, {
+            "Content-Type": entry.imageMimeType || "image/png",
+            "Cache-Control": "private, max-age=300",
+          });
+          res.end(readFileSync(entry.imagePath));
+          return;
+        }
+        const notebookItemMatch = pathname.match(/^\/api\/notebook\/([^/]+)$/);
+        if (notebookItemMatch && method === "GET") {
+          const svc = this.deps.getNotebookService?.();
+          if (!svc) {
+            sendJson(res, 503, { ok: false, error: "Notebook service unavailable" });
+            return;
+          }
+          const uid = this.deps.getConfig().owner.canonical_user_id;
+          const id = decodeURIComponent(notebookItemMatch[1]!);
+          const entry = svc.getStore().getById(uid, id);
+          if (!entry) {
+            sendJson(res, 404, { ok: false, error: "Notebook entry not found" });
+            return;
+          }
+          sendJson(res, 200, { ok: true, entry });
+          return;
+        }
+        if (notebookItemMatch && method === "PATCH") {
+          const svc = this.deps.getNotebookService?.();
+          if (!svc) {
+            sendJson(res, 503, { ok: false, error: "Notebook service unavailable" });
+            return;
+          }
+          const uid = this.deps.getConfig().owner.canonical_user_id;
+          const id = decodeURIComponent(notebookItemMatch[1]!);
+          const body = (await readJsonBody(req)) as {
+            title?: unknown;
+            summary?: unknown;
+            reason?: unknown;
+            content?: unknown;
+            tags?: unknown;
+            imageDataUrl?: unknown;
+            removeImage?: unknown;
+          };
+          try {
+            const updated = await svc.updateEntry(uid, id, {
+              ...(typeof body.title === "string" ? { title: body.title } : {}),
+              ...(typeof body.summary === "string" ? { summary: body.summary } : {}),
+              ...(typeof body.reason === "string" ? { reason: body.reason } : {}),
+              ...(typeof body.content === "string" ? { content: body.content } : {}),
+              ...(Array.isArray(body.tags)
+                ? { tags: body.tags.map((x) => String(x).trim()).filter(Boolean) }
+                : {}),
+              ...(typeof body.imageDataUrl === "string" ? { imageDataUrl: body.imageDataUrl } : {}),
+              ...(body.removeImage === true ? { removeImage: true } : {}),
+            });
+            if (!updated) {
+              sendJson(res, 404, { ok: false, error: "Notebook entry not found" });
+              return;
+            }
+            sendJson(res, 200, { ok: true, entry: updated });
+          } catch (err) {
+            sendJson(res, 400, { ok: false, error: summarizeError(err) });
+          }
+          return;
+        }
+        if (notebookItemMatch && method === "DELETE") {
+          const svc = this.deps.getNotebookService?.();
+          if (!svc) {
+            sendJson(res, 503, { ok: false, error: "Notebook service unavailable" });
+            return;
+          }
+          const uid = this.deps.getConfig().owner.canonical_user_id;
+          const id = decodeURIComponent(notebookItemMatch[1]!);
+          const deleted = await svc.deleteEntry(uid, id);
+          if (!deleted) {
+            sendJson(res, 404, { ok: false, error: "Notebook entry not found" });
+            return;
+          }
+          sendJson(res, 200, { ok: true });
+          return;
+        }
         if (pathname === "/api/tickets" && method === "GET") {
           this.handleListTickets(res);
           return;
@@ -697,10 +864,11 @@ export class WebConsoleServer {
       return true;
     }
 
-    // Support query token exclusively for image <img> tags on sticker thumbnails.
+    // Support query token exclusively for image <img> tags on sticker & notebook thumbnails.
     if (
       (req.method ?? "GET").toUpperCase() === "GET" &&
-      /^\/api\/stickers\/[^/]+\/image$/.test(pathname)
+      (/^\/api\/stickers\/[^/]+\/image$/.test(pathname) ||
+        /^\/api\/notebook\/[^/]+\/image$/.test(pathname))
     ) {
       const queryToken = parsedUrl.searchParams.get("token")?.trim() ?? "";
       if (queryToken && timingSafeTokenEqual(queryToken, requiredToken)) {

@@ -56,6 +56,8 @@ import { HindsightStore } from "./memory/hindsight.js";
 import { MemoryEchoStore } from "./memory/memoryecho.js";
 import type { MemoryStore } from "./memory/store.js";
 import { PersonaRuntime } from "./persona/agent.js";
+import { NotebookService } from "./notebook/service.js";
+import { NotebookStore } from "./notebook/store.js";
 import { probeTelegramGateway, updateTelegramBotProfile } from "./setup/probe.js";
 import { StickerService } from "./stickers/service.js";
 import { StickerStore } from "./stickers/store.js";
@@ -82,6 +84,7 @@ async function main(): Promise<void> {
   const dbHandle = openDatabase(hatoConfig.paths.sqlite);
   const repo = new HatoRepository(dbHandle.db);
   const stickerStore = new StickerStore(dbHandle.db);
+  const notebookStore = new NotebookStore(dbHandle.db);
 
   repo.ensureOwner({
     canonicalUserId: hatoConfig.owner.canonical_user_id,
@@ -149,6 +152,11 @@ async function main(): Promise<void> {
     getModelRegistry: () => modelRegistry,
     getProxyRouter: () => proxyRouter,
     getTelegramAdapter: () => tgAdapter,
+  });
+  const notebookService = new NotebookService({
+    store: notebookStore,
+    getHatoConfig: () => hatoConfig,
+    getMemoryStore: () => memoryStore,
   });
   const ticketCoordinator = new TicketCoordinator({
     getHatoConfig: () => hatoConfig,
@@ -312,6 +320,118 @@ async function main(): Promise<void> {
         ok: true,
         message: `批量收图模式当前${active ? "开启中" : "未开启"}，库内共 ${total} 张。`,
       };
+    },
+  });
+  personaRuntime.setNotebookHandlers({
+    onSave: async ({ canonicalUserId, summary, reason, title, content, imagePath, tags }) => {
+      try {
+        const saved = await notebookService.saveEntry(canonicalUserId, {
+          summary,
+          reason,
+          title,
+          content,
+          imagePath,
+          tags,
+        });
+        const kindLabel = saved.kind === "mixed" ? "图文" : saved.kind === "image" ? "图片" : "纯文本";
+        const idxLabel =
+          saved.indexStatus === "synced"
+            ? "已同步语义索引"
+            : saved.indexStatus === "local_only"
+              ? "仅本地索引"
+              : `索引状态=${saved.indexStatus}`;
+        const pathNote = saved.imagePath ? `，image_path=${saved.imagePath}` : "";
+        return {
+          ok: true,
+          entryId: saved.id,
+          message: `已存入小本本 [${saved.id}] (${kindLabel} · ${idxLabel}${pathNote})`,
+        };
+      } catch (err) {
+        return {
+          ok: false,
+          message: `存入小本本失败: ${summarizeError(err)}`,
+        };
+      }
+    },
+    onSearch: async ({ canonicalUserId, query, kind, limit }) => {
+      const res = await notebookService.searchEntries(canonicalUserId, { query, kind, limit });
+      if (res.entries.length === 0) {
+        return query?.trim()
+          ? `小本本中没有找到与「${query.trim()}」相关的条目。`
+          : "小本本目前还是空的。";
+      }
+      const header = query?.trim()
+        ? `小本本检索结果（${res.usedSemanticIndex ? "语义索引+本地" : "本地检索"}${res.degraded ? "，语义检索降级" : ""}，共 ${res.entries.length} 条）：`
+        : `小本本最近条目（共 ${res.entries.length} 条）：`;
+      const lines = res.entries.map((e) => {
+        const tagText = e.tags.length > 0 ? ` | 标签: ${e.tags.join(", ")}` : "";
+        const titleText = e.title ? ` ${e.title} |` : "";
+        return `- [${e.id}] (${e.kind})${titleText} 概要: ${e.summary} | 原因: ${e.reason}${tagText} | 更新: ${new Date(e.updatedAt).toISOString().slice(0, 10)}`;
+      });
+      return [header, ...lines].join("\n");
+    },
+    onRead: async ({ canonicalUserId, entryId }) => {
+      const entry = notebookService.readEntry(canonicalUserId, entryId);
+      if (!entry) {
+        return { ok: false, text: `未找到小本本条目: ${entryId}` };
+      }
+      const lines = [
+        `[${entry.id}] (${entry.kind})`,
+        ...(entry.title ? [`标题: ${entry.title}`] : []),
+        `概要: ${entry.summary}`,
+        `存入原因: ${entry.reason}`,
+        ...(entry.tags.length > 0 ? [`标签: ${entry.tags.join(", ")}`] : []),
+        `索引状态: ${entry.indexStatus}`,
+        ...(entry.imagePath ? [`image_path: ${entry.imagePath}`] : []),
+        ...(entry.content.trim() ? ["", "正文内容:", entry.content] : []),
+      ];
+      return {
+        ok: true,
+        text: lines.join("\n"),
+        imagePath: entry.imagePath,
+      };
+    },
+    onManage: async ({
+      canonicalUserId,
+      action,
+      entryId,
+      title,
+      summary,
+      reason,
+      content,
+      tags,
+      imagePath,
+      removeImage,
+    }) => {
+      try {
+        if (action === "delete") {
+          const ok = await notebookService.deleteEntry(canonicalUserId, entryId);
+          return ok
+            ? { ok: true, message: `已从小本本删除条目 ${entryId}（同步清理关联索引）。` }
+            : { ok: false, message: `未找到小本本条目: ${entryId}` };
+        }
+        const updated = await notebookService.updateEntry(canonicalUserId, entryId, {
+          title,
+          summary,
+          reason,
+          content,
+          tags,
+          imagePath,
+          removeImage,
+        });
+        if (!updated) {
+          return { ok: false, message: `未找到小本本条目: ${entryId}` };
+        }
+        return {
+          ok: true,
+          message: `已更新小本本条目 [${updated.id}] (${updated.kind} · 索引=${updated.indexStatus})`,
+        };
+      } catch (err) {
+        return {
+          ok: false,
+          message: `操作小本本条目失败: ${summarizeError(err)}`,
+        };
+      }
     },
   });
   const resolveStrictOutboundTarget = (
@@ -620,25 +740,27 @@ async function main(): Promise<void> {
       const provider = resolveMemoryProvider(hatoConfig);
       const recallCfg = resolveMemoryRecallConfig(hatoConfig);
       const curatorCfg = resolveMemoryCuratorConfig(hatoConfig);
-      const [personaVault, techVault, usage] = memoryStore
+      const [personaVault, techVault, notebookVault, usage] = memoryStore
         ? await Promise.all([
             memoryStore.resolveVaultId(uid, "persona", { createIfMissing: false }).catch(() => null),
             memoryStore.resolveVaultId(uid, "tech", { createIfMissing: false }).catch(() => null),
+            memoryStore.resolveVaultId(uid, "notebook", { createIfMissing: false }).catch(() => null),
             memoryStore.getUsage?.().catch(() => null) ?? Promise.resolve(null),
           ])
-        : [null, null, null];
+        : [null, null, null, null];
       return {
         provider,
         configured: Boolean(memoryStore?.isConfigured()),
         recallMode: recallCfg.mode,
         curatorEnabled: curatorCfg.enabled,
-        vaultIds: { persona: personaVault, tech: techVault },
+        vaultIds: { persona: personaVault, tech: techVault, notebook: notebookVault },
         usage,
       };
     },
     syncMemory: (uid: string, opts?: { includeDenied?: boolean }) =>
       memoryCurator.retainPending(uid, { includeDeniedRetries: opts?.includeDenied ?? true }),
     forgetMemory: (uid: string, query: string) => memoryCurator.forgetByQuery(uid, query),
+    notebookService,
     ...(platformInfo?.channel === "tg" || platformInfo?.channel === "qq"
       ? {
           setHomeChannel: async () => {
@@ -1260,6 +1382,7 @@ async function main(): Promise<void> {
     getModelRegistry: () => modelRegistry,
     getProxyRouter: () => proxyRouter,
     getStickerService: () => stickerService,
+    getNotebookService: () => notebookService,
     getRepo: () => repo,
     getPersonaRuntime: () => personaRuntime,
     getBrowserRuntime: () => browserRuntime,

@@ -448,7 +448,9 @@ export class MemoryEchoStore implements MemoryStore {
     const description =
       bank === "persona"
         ? `Hato persona companion memory vault for ${canonicalUserId}`
-        : `Hato technical environment memory vault for ${canonicalUserId}`;
+        : bank === "tech"
+          ? `Hato technical environment memory vault for ${canonicalUserId}`
+          : `Hato notebook index vault for ${canonicalUserId}`;
 
     const createRes = await this.requestJson<RawVaultPayload>("/api/v1/memory/vaults", {
       method: "POST",

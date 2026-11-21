@@ -150,7 +150,7 @@ export const memorySyncRecords = sqliteTable("memory_sync_records", {
   id: text("id").primaryKey(),
   canonicalUserId: text("canonical_user_id").notNull(),
   provider: text("provider").notNull(),
-  bank: text("bank").notNull(), // "persona" | "tech"
+  bank: text("bank").notNull(), // "persona" | "tech" | "notebook"
   vaultId: text("vault_id"),
   sourceMsgIdsJson: text("source_msg_ids_json").notNull().default("[]"),
   content: text("content").notNull(),
@@ -182,6 +182,28 @@ export const stickers = sqliteTable("stickers", {
   errorMessage: text("error_message"),
   useCount: integer("use_count").notNull().default(0),
   lastUsedAt: integer("last_used_at"),
+  createdAt: integer("created_at").notNull(),
+  updatedAt: integer("updated_at").notNull(),
+});
+
+export const notebookEntries = sqliteTable("notebook_entries", {
+  id: text("id").primaryKey(),
+  canonicalUserId: text("canonical_user_id").notNull(),
+  title: text("title").notNull().default(""),
+  summary: text("summary").notNull(),
+  reason: text("reason").notNull(),
+  tagsJson: text("tags_json").notNull().default("[]"),
+  content: text("content").notNull().default(""),
+  imagePath: text("image_path"),
+  imageMimeType: text("image_mime_type"),
+  imageSha256: text("image_sha256"),
+  memoryProvider: text("memory_provider"),
+  memoryVaultId: text("memory_vault_id"),
+  externalMemoryId: text("external_memory_id"),
+  indexStatus: text("index_status").notNull().default("local_only"), // "synced" | "degraded" | "denied" | "error" | "local_only"
+  indexError: text("index_error"),
+  accessCount: integer("access_count").notNull().default(0),
+  lastAccessedAt: integer("last_accessed_at"),
   createdAt: integer("created_at").notNull(),
   updatedAt: integer("updated_at").notNull(),
 });

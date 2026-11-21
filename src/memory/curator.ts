@@ -244,12 +244,14 @@ export class MemoryCurator {
         };
       }
 
-      const byBank: Record<MemorySyncBank, MemorySyncRecordView[]> = {
+      const byBank: Record<"persona" | "tech", MemorySyncRecordView[]> = {
         persona: [],
         tech: [],
       };
       for (const rec of matches) {
-        byBank[rec.bank].push(rec);
+        if (rec.bank === "persona" || rec.bank === "tech") {
+          byBank[rec.bank].push(rec);
+        }
       }
 
       const summary: ForgetRunSummary = {

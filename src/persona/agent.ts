@@ -200,6 +200,39 @@ export class PersonaRuntime {
     onSave: (input: { canonicalUserId: string; path?: string; packUrl?: string; note?: string; source?: "user_send" | "auto_save" }) => Promise<{ ok: boolean; message: string }>;
     onCollect: (input: { canonicalUserId: string; action: "start" | "stop" | "status" }) => Promise<{ ok: boolean; message: string }>;
   } | null = null;
+  private notebookHandlers: {
+    onSave: (input: {
+      canonicalUserId: string;
+      summary: string;
+      reason: string;
+      title?: string;
+      content?: string;
+      imagePath?: string;
+      tags?: string[];
+    }) => Promise<{ ok: boolean; message: string; entryId?: string }>;
+    onSearch: (input: {
+      canonicalUserId: string;
+      query?: string;
+      kind?: "all" | "text" | "image" | "mixed";
+      limit?: number;
+    }) => Promise<string>;
+    onRead: (input: {
+      canonicalUserId: string;
+      entryId: string;
+    }) => Promise<{ ok: boolean; text: string; imagePath?: string | null }>;
+    onManage: (input: {
+      canonicalUserId: string;
+      action: "update" | "delete";
+      entryId: string;
+      title?: string;
+      summary?: string;
+      reason?: string;
+      content?: string;
+      tags?: string[];
+      imagePath?: string;
+      removeImage?: boolean;
+    }) => Promise<{ ok: boolean; message: string }>;
+  } | null = null;
   private activeTurnOriginChannel: InboundBatch["originChannel"] = "tg";
 
   constructor(
@@ -449,6 +482,47 @@ export class PersonaRuntime {
     } | null,
   ): void {
     this.stickerHandlers = handlers;
+    if (!this.activeTurn) {
+      this.syncTools();
+    }
+  }
+
+  setNotebookHandlers(
+    handlers: {
+      onSave: (input: {
+        canonicalUserId: string;
+        summary: string;
+        reason: string;
+        title?: string;
+        content?: string;
+        imagePath?: string;
+        tags?: string[];
+      }) => Promise<{ ok: boolean; message: string; entryId?: string }>;
+      onSearch: (input: {
+        canonicalUserId: string;
+        query?: string;
+        kind?: "all" | "text" | "image" | "mixed";
+        limit?: number;
+      }) => Promise<string>;
+      onRead: (input: {
+        canonicalUserId: string;
+        entryId: string;
+      }) => Promise<{ ok: boolean; text: string; imagePath?: string | null }>;
+      onManage: (input: {
+        canonicalUserId: string;
+        action: "update" | "delete";
+        entryId: string;
+        title?: string;
+        summary?: string;
+        reason?: string;
+        content?: string;
+        tags?: string[];
+        imagePath?: string;
+        removeImage?: boolean;
+      }) => Promise<{ ok: boolean; message: string }>;
+    } | null,
+  ): void {
+    this.notebookHandlers = handlers;
     if (!this.activeTurn) {
       this.syncTools();
     }
@@ -775,6 +849,51 @@ export class PersonaRuntime {
               this.stickerHandlers!.onCollect({
                 canonicalUserId,
                 action: input.action,
+              }),
+          }
+        : {}),
+      ...(this.notebookHandlers
+        ? {
+            onNotebookSave: (input: {
+              summary: string;
+              reason: string;
+              title?: string;
+              content?: string;
+              imagePath?: string;
+              tags?: string[];
+            }) =>
+              this.notebookHandlers!.onSave({
+                canonicalUserId,
+                ...input,
+              }),
+            onNotebookSearch: (input: {
+              query?: string;
+              kind?: "all" | "text" | "image" | "mixed";
+              limit?: number;
+            }) =>
+              this.notebookHandlers!.onSearch({
+                canonicalUserId,
+                ...input,
+              }),
+            onNotebookRead: (input: { entryId: string }) =>
+              this.notebookHandlers!.onRead({
+                canonicalUserId,
+                entryId: input.entryId,
+              }),
+            onNotebookManage: (input: {
+              action: "update" | "delete";
+              entryId: string;
+              title?: string;
+              summary?: string;
+              reason?: string;
+              content?: string;
+              tags?: string[];
+              imagePath?: string;
+              removeImage?: boolean;
+            }) =>
+              this.notebookHandlers!.onManage({
+                canonicalUserId,
+                ...input,
               }),
           }
         : {}),

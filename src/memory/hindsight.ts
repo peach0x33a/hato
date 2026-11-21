@@ -316,7 +316,9 @@ export class HindsightStore implements MemoryStore {
         mission:
           bank === "persona"
             ? "Personal companion facts, preferences, and life events."
-            : "Technical environment, workflows, and engineering preferences.",
+            : bank === "tech"
+              ? "Technical environment, workflows, and engineering preferences."
+              : "Index of Hato's notebook entries (reusable notes and images) with entry IDs, titles, summaries, and reasons for saving.",
       },
     );
     return res.ok;

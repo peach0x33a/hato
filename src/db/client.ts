@@ -212,6 +212,30 @@ CREATE TABLE IF NOT EXISTS stickers (
 CREATE INDEX IF NOT EXISTS idx_stickers_user_status ON stickers (canonical_user_id, status, created_at);
 CREATE INDEX IF NOT EXISTS idx_stickers_sha256 ON stickers (canonical_user_id, sha256);
 CREATE INDEX IF NOT EXISTS idx_stickers_tg_unique ON stickers (canonical_user_id, tg_file_unique_id);
+
+CREATE TABLE IF NOT EXISTS notebook_entries (
+  id TEXT PRIMARY KEY,
+  canonical_user_id TEXT NOT NULL,
+  title TEXT NOT NULL DEFAULT '',
+  summary TEXT NOT NULL,
+  reason TEXT NOT NULL,
+  tags_json TEXT NOT NULL DEFAULT '[]',
+  content TEXT NOT NULL DEFAULT '',
+  image_path TEXT,
+  image_mime_type TEXT,
+  image_sha256 TEXT,
+  memory_provider TEXT,
+  memory_vault_id TEXT,
+  external_memory_id TEXT,
+  index_status TEXT NOT NULL DEFAULT 'local_only',
+  index_error TEXT,
+  access_count INTEGER NOT NULL DEFAULT 0,
+  last_accessed_at INTEGER,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_notebook_user_updated ON notebook_entries (canonical_user_id, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_notebook_ext_mem ON notebook_entries (canonical_user_id, external_memory_id);
 `;
 
 export interface OpenDatabaseOptions {

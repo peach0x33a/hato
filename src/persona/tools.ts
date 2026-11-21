@@ -298,6 +298,53 @@ const BotProfileParams = obj({
   avatar_path: opt(str({ description: "Local image file path (.jpg/.png/.webp) to set as bot avatar" })),
 });
 
+const NotebookSaveParams = obj({
+  summary: str({ description: "Concise summary of what this notebook entry contains" }),
+  reason: str({ description: "Why this entry is being saved and when it will be reused" }),
+  title: opt(str({ description: "Optional short title for quick scanning" })),
+  content: opt(str({ description: "Optional verbatim plain text content to preserve" })),
+  image_path: opt(
+    str({
+      description:
+        "Optional local image path (e.g. `(path: ...)` from conversation attachments or generated image) to copy into the notebook",
+    }),
+  ),
+  tags: opt(arr(str({ description: "Optional tags for categorizing or filtering" }))),
+});
+
+const NotebookSearchParams = obj({
+  query: opt(
+    str({
+      description:
+        "Semantic or keyword query to search the notebook index; omit to list the most recently updated entries",
+    }),
+  ),
+  kind: opt(
+    oneOf(["all", "text", "image", "mixed"], {
+      description: "Optional filter by entry type: all (default), text, image, or mixed",
+    }),
+  ),
+  limit: opt(num({ description: "Maximum number of entries to return (1-30, default 10)" })),
+});
+
+const NotebookReadParams = obj({
+  entry_id: str({ description: "Notebook entry ID returned by notebook_search or notebook_save (e.g. nb_...)" }),
+});
+
+const NotebookManageParams = obj({
+  action: oneOf(["update", "delete"], {
+    description: "Whether to update or delete the notebook entry",
+  }),
+  entry_id: str({ description: "Target notebook entry ID (nb_...)" }),
+  title: opt(str({ description: "Updated title" })),
+  summary: opt(str({ description: "Updated summary" })),
+  reason: opt(str({ description: "Updated reason for keeping this entry" })),
+  content: opt(str({ description: "Updated plain text content" })),
+  tags: opt(arr(str({ description: "Replacement tag list" }))),
+  image_path: opt(str({ description: "New local image path to attach or replace existing image" })),
+  remove_image: opt(bool({ description: "Set true when updating to remove the attached image" })),
+});
+
 /**
  * Zero-side-effect, read-only micro-tools + isolated web/browser + personal skills/MCP + guarded self-config + fast delegate() exposed to Persona.
  */
@@ -373,6 +420,33 @@ export function createPersonaReadOnlyTools(params: {
   }) => Promise<{ ok: boolean; message: string }>;
   onStickerCollect?: (input: {
     action: "start" | "stop" | "status";
+  }) => Promise<{ ok: boolean; message: string }>;
+  onNotebookSave?: (input: {
+    summary: string;
+    reason: string;
+    title?: string;
+    content?: string;
+    imagePath?: string;
+    tags?: string[];
+  }) => Promise<{ ok: boolean; message: string; entryId?: string }>;
+  onNotebookSearch?: (input: {
+    query?: string;
+    kind?: "all" | "text" | "image" | "mixed";
+    limit?: number;
+  }) => Promise<string>;
+  onNotebookRead?: (input: {
+    entryId: string;
+  }) => Promise<{ ok: boolean; text: string; imagePath?: string | null }>;
+  onNotebookManage?: (input: {
+    action: "update" | "delete";
+    entryId: string;
+    title?: string;
+    summary?: string;
+    reason?: string;
+    content?: string;
+    tags?: string[];
+    imagePath?: string;
+    removeImage?: boolean;
   }) => Promise<{ ok: boolean; message: string }>;
   onBotProfile?: (input: {
     platform: "tg" | "qq";
@@ -1354,6 +1428,111 @@ export function createPersonaReadOnlyTools(params: {
       async execute(_toolCallId, input) {
         const res = await collectFn({ action: input.action });
         return { content: [{ type: "text", text: res.message }], details: { ok: res.ok } };
+      },
+    });
+  }
+
+  if (params.onNotebookSave) {
+    const saveNbFn = params.onNotebookSave;
+    tools.push({
+      name: "notebook_save",
+      label: "Save to Notebook",
+      description:
+        "Save reusable plain text and/or an image into Hato's notebook (小本本) with a summary and reason for keeping it, and index it in the notebook memory bank.",
+      parameters: NotebookSaveParams,
+      async execute(_toolCallId, input) {
+        const res = await saveNbFn({
+          summary: input.summary,
+          reason: input.reason,
+          title: input.title,
+          content: input.content,
+          imagePath: input.image_path,
+          tags: input.tags,
+        });
+        return {
+          content: [{ type: "text", text: res.message }],
+          details: { ok: res.ok, ...(res.entryId ? { entryId: res.entryId } : {}) },
+        };
+      },
+    });
+  }
+
+  if (params.onNotebookSearch) {
+    const searchNbFn = params.onNotebookSearch;
+    tools.push({
+      name: "notebook_search",
+      label: "Search Notebook",
+      description:
+        "Search Hato's notebook (小本本) via its semantic memory index and local fallback, or list recent entries when query is omitted.",
+      parameters: NotebookSearchParams,
+      async execute(_toolCallId, input) {
+        const text = await searchNbFn({
+          query: input.query,
+          kind: input.kind,
+          limit: input.limit,
+        });
+        return { content: [{ type: "text", text }], details: { ok: true } };
+      },
+    });
+  }
+
+  if (params.onNotebookRead) {
+    const readNbFn = params.onNotebookRead;
+    tools.push({
+      name: "notebook_read",
+      label: "Read Notebook Entry",
+      description:
+        "Read the full verbatim text and/or inspect the stored image of a notebook entry by entry_id. Also returns the local image_path for image_gen or send_file.",
+      parameters: NotebookReadParams,
+      async execute(_toolCallId, input) {
+        const res = await readNbFn({ entryId: input.entry_id.trim() });
+        if (!res.ok) {
+          return { content: [{ type: "text", text: res.text }], details: { ok: false } };
+        }
+        const content: (TextContent | ImageContent)[] = [{ type: "text", text: res.text }];
+        if (res.imagePath && existsSync(res.imagePath)) {
+          try {
+            const buffer = readFileSync(res.imagePath);
+            const image = await convertBufferToModelImage({ buffer, filePath: res.imagePath });
+            if (image) {
+              content.push(image);
+            }
+          } catch {
+            // keep text output even if image decode fails
+          }
+        }
+        return {
+          content,
+          details: { ok: true, entryId: input.entry_id.trim(), hasImage: Boolean(res.imagePath) },
+        };
+      },
+    });
+  }
+
+  if (params.onNotebookManage) {
+    const manageNbFn = params.onNotebookManage;
+    tools.push({
+      name: "notebook_manage",
+      label: "Manage Notebook Entry",
+      description:
+        "Update or delete an existing notebook entry (小本本) by entry_id and keep its semantic memory index in sync.",
+      parameters: NotebookManageParams,
+      async execute(_toolCallId, input) {
+        const res = await manageNbFn({
+          action: input.action,
+          entryId: input.entry_id.trim(),
+          title: input.title,
+          summary: input.summary,
+          reason: input.reason,
+          content: input.content,
+          tags: input.tags,
+          imagePath: input.image_path,
+          removeImage: input.remove_image,
+        });
+        return {
+          content: [{ type: "text", text: res.message }],
+          details: { ok: res.ok, entryId: input.entry_id.trim(), action: input.action },
+        };
       },
     });
   }

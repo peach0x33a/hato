@@ -782,6 +782,60 @@ export interface StickerRecord {
   updatedAt: number;
 }
 
+export type NotebookEntryKind = "text" | "image" | "mixed";
+export type NotebookIndexStatus = "synced" | "degraded" | "denied" | "error" | "local_only";
+
+export interface NotebookEntryRecord {
+  id: string;
+  canonicalUserId: string;
+  title: string;
+  summary: string;
+  reason: string;
+  tags: string[];
+  content: string;
+  imagePath: string | null;
+  imageMimeType: string | null;
+  imageSha256: string | null;
+  kind: NotebookEntryKind;
+  hasText: boolean;
+  hasImage: boolean;
+  memoryProvider: string | null;
+  memoryVaultId: string | null;
+  externalMemoryId: string | null;
+  indexStatus: NotebookIndexStatus;
+  indexError: string | null;
+  accessCount: number;
+  lastAccessedAt: number | null;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface NotebookStats {
+  total: number;
+  textCount: number;
+  imageCount: number;
+  mixedCount: number;
+  syncedCount: number;
+}
+
+export interface NotebookListResponse {
+  ok: boolean;
+  entries: NotebookEntryRecord[];
+  usedSemanticIndex: boolean;
+  degraded: boolean;
+  errorMessage?: string;
+  memoryConfigured: boolean;
+  stats: NotebookStats;
+}
+
+export interface NotebookReindexResponse {
+  ok: boolean;
+  total: number;
+  synced: number;
+  failed: number;
+  errorMessage?: string;
+}
+
 export const api = {
   getHealth: () => fetch("/api/health").then((r) => r.json() as Promise<HealthResponse>),
   getOverview: () => requestJson<OverviewResponse>("/api/overview"),
@@ -806,6 +860,65 @@ export const api = {
   deleteSticker: (id: string) =>
     requestJson<{ ok: boolean }>(`/api/stickers/${encodeURIComponent(id)}`, {
       method: "DELETE",
+    }),
+  listNotebook: (params?: { q?: string; kind?: NotebookEntryKind | "all" }) => {
+    const search = new URLSearchParams();
+    if (params?.q?.trim()) search.set("q", params.q.trim());
+    if (params?.kind && params.kind !== "all") search.set("kind", params.kind);
+    const qs = search.toString();
+    return requestJson<NotebookListResponse>(qs ? `/api/notebook?${qs}` : "/api/notebook");
+  },
+  notebookImageUrl: (id: string, version?: number) => {
+    const token = getStoredToken();
+    const base = `/api/notebook/${encodeURIComponent(id)}/image`;
+    const search = new URLSearchParams();
+    if (token) search.set("token", token);
+    if (version !== undefined) search.set("v", String(version));
+    const qs = search.toString();
+    return qs ? `${base}?${qs}` : base;
+  },
+  createNotebookEntry: (payload: {
+    title?: string;
+    summary: string;
+    reason: string;
+    content?: string;
+    tags?: string[];
+    imageDataUrl?: string;
+  }) =>
+    requestJson<{ ok: boolean; entry: NotebookEntryRecord }>("/api/notebook", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    }),
+  updateNotebookEntry: (
+    id: string,
+    payload: {
+      title?: string;
+      summary?: string;
+      reason?: string;
+      content?: string;
+      tags?: string[];
+      imageDataUrl?: string;
+      removeImage?: boolean;
+    },
+  ) =>
+    requestJson<{ ok: boolean; entry: NotebookEntryRecord }>(
+      `/api/notebook/${encodeURIComponent(id)}`,
+      {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      },
+    ),
+  deleteNotebookEntry: (id: string) =>
+    requestJson<{ ok: boolean }>(`/api/notebook/${encodeURIComponent(id)}`, {
+      method: "DELETE",
+    }),
+  reindexNotebook: (force = false) =>
+    requestJson<NotebookReindexResponse>("/api/notebook/reindex", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ force }),
     }),
   getPairingCode: (refresh = false) =>
     requestJson<PairingCodeResponse>(

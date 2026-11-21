@@ -1,6 +1,7 @@
 import {
   AlertTriangle,
   ArrowLeft,
+  BookMarked,
   Bot,
   Compass,
   Cpu,
@@ -30,6 +31,7 @@ import {
 import { ChatPanel } from "@/components/console/ChatPanel";
 import { ConsoleInput } from "@/components/console/ConsolePrimitives";
 import { ModelsConfigPanel } from "@/components/console/ModelsConfigPanel";
+import { NotebookPanel } from "@/components/console/NotebookPanel";
 import { OverviewPanel } from "@/components/console/OverviewPanel";
 import { PromptPanel } from "@/components/console/PromptPanel";
 import { RemoteBrowserPanel } from "@/components/console/RemoteBrowserPanel";
@@ -56,7 +58,15 @@ import { SharedLayoutBg } from "@/components/motion/shared-layout-bg";
 import { ThemeToggle } from "@/components/motion/theme-toggle";
 import { EASE_OUT, SPRING_LAYOUT } from "@/lib/ease";
 
-type ConsoleTab = "overview" | "chat" | "stickers" | "browser" | "models" | "prompt" | "settings";
+type ConsoleTab =
+  | "overview"
+  | "chat"
+  | "stickers"
+  | "notebook"
+  | "browser"
+  | "models"
+  | "prompt"
+  | "settings";
 
 const NAV_ITEMS: Array<{
   id: Exclude<ConsoleTab, "settings">;
@@ -66,6 +76,7 @@ const NAV_ITEMS: Array<{
   { id: "overview", label: "概览", icon: LayoutDashboard },
   { id: "chat", label: "对话", icon: MessageSquare },
   { id: "stickers", label: "表情包库", icon: Smile },
+  { id: "notebook", label: "小本本", icon: BookMarked },
   { id: "browser", label: "远程浏览器", icon: Compass },
   { id: "models", label: "模型与供应商", icon: Cpu },
   { id: "prompt", label: "提示词", icon: FileText },
@@ -75,6 +86,7 @@ const VALID_TABS = new Set<ConsoleTab>([
   "overview",
   "chat",
   "stickers",
+  "notebook",
   "browser",
   "models",
   "prompt",
@@ -775,6 +787,8 @@ function ConsoleShell() {
                 )}
 
                 {workspaceTab === "stickers" && <StickersPanel onToast={notify} />}
+
+                {workspaceTab === "notebook" && <NotebookPanel onToast={notify} />}
 
                 {workspaceTab === "browser" && (
                   <div className="flex h-full min-h-0 w-full flex-col p-3 sm:p-5">

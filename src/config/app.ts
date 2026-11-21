@@ -199,6 +199,7 @@ export const HatoConfigSchema = Type.Object({
         vaults: Type.Object({
           persona: Type.String(),
           tech: Type.String(),
+          notebook: Type.Optional(Type.String()),
         }),
       }),
     ),
@@ -209,6 +210,7 @@ export const HatoConfigSchema = Type.Object({
         banks: Type.Object({
           persona: Type.String({ minLength: 1 }),
           tech: Type.String({ minLength: 1 }),
+          notebook: Type.Optional(Type.String({ minLength: 1 })),
         }),
       }),
     ),
@@ -458,6 +460,7 @@ export interface ResolvedMemoryEchoConfig {
   vaults: {
     persona: string;
     tech: string;
+    notebook?: string;
   };
 }
 
@@ -470,6 +473,7 @@ export interface ResolvedHindsightConfig {
   banks: {
     persona: string;
     tech: string;
+    notebook?: string;
   };
 }
 
@@ -511,6 +515,7 @@ export function resolveMemoryEchoConfig(config: HatoConfig): ResolvedMemoryEchoC
     vaults: {
       persona: me?.vaults?.persona?.trim() ?? "",
       tech: me?.vaults?.tech?.trim() ?? "",
+      notebook: me?.vaults?.notebook?.trim() ?? "",
     },
   };
 }
@@ -530,6 +535,7 @@ export function resolveHindsightConfig(config: HatoConfig): ResolvedHindsightCon
     banks: {
       persona: hs?.banks?.persona?.trim() || "persona",
       tech: hs?.banks?.tech?.trim() || "tech",
+      notebook: hs?.banks?.notebook?.trim() || "notebook",
     },
   };
 }

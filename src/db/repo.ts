@@ -54,7 +54,7 @@ export interface WorkingMemoryState {
   retainedUntilMsgId: string | null;
 }
 
-export type MemorySyncBank = "persona" | "tech";
+export type MemorySyncBank = "persona" | "tech" | "notebook";
 export type MemorySyncStatus = "synced" | "degraded" | "denied" | "error" | "erased";
 
 export interface MemorySyncRecordView {

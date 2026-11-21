@@ -21,9 +21,16 @@ export interface ToolDomainPack {
 export const TOOL_DOMAIN_PACKS: readonly ToolDomainPack[] = [
   {
     id: "memory",
-    tools: ["recall_memory", "search_past_sessions"],
+    tools: [
+      "recall_memory",
+      "search_past_sessions",
+      "notebook_save",
+      "notebook_search",
+      "notebook_read",
+      "notebook_manage",
+    ],
     matches: ({ userText }) =>
-      /记得|记忆|回忆|喜好|偏好|以前|之前说过|我喜欢|我不喜欢|我用什么|忌口|习惯|上次|上个会话|之前聊|历史对话|聊天记录|前几天|那次|翻一下|会话|\brecall\b|\bmemory\b|\bpast\b|\bsession\b/i.test(
+      /记得|记忆|回忆|喜好|偏好|以前|之前说过|我喜欢|我不喜欢|我用什么|忌口|习惯|上次|上个会话|之前聊|历史对话|聊天记录|前几天|那次|翻一下|会话|小本本|本子|记下来|记一下|记一笔|存下来|存一下|存到|备忘|笔记|手账|翻本子|参考图|三视图|模板|清单|\brecall\b|\bmemory\b|\bpast\b|\bsession\b|\bnotebook\b|\bnote\b|\bmemo\b/i.test(
         userText,
       ),
   },
