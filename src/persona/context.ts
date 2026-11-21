@@ -42,6 +42,8 @@ export interface HatoEphemeralTailMessage {
   role: "hato_ephemeral_tail";
   text: string;
   timestamp: number;
+  anchorMessageId?: string;
+  anchorAgentIndex?: number;
 }
 
 declare module "@earendil-works/pi-agent-core" {
@@ -229,43 +231,75 @@ export function buildEphemeralContextBlock(input: EphemeralTailBuilderInput): {
   return { tailText: sections.join("\n\n"), timeCardText };
 }
 
+type UserPartKind = "summary" | "event" | "user" | "ephemeral";
+
 /**
  * Convert Hato AgentMessages to standard LLM Message[] with:
  * - Immutable absolute timestamps ([MM-DD HH:mm])
  * - Channel switch tags ([TG]/[QQ]) only on channel change
  * - Deterministic gap dividers (—— 2 天 12 小时后 ——)
- * - Ephemeral tail context merged onto the final UserMessage to preserve prefix cache & role alternation
+ * - Consecutive same-kind user blocks merged into one TextContent part; cross-kind blocks split into separate parts
+ * - Ephemeral tail context anchored to the triggering UserMessage (independent final part) to preserve prefix cache
+ * - Plain-string folding for text-only user messages on `openai-completions`
  */
 export function convertHatoMessagesToLlm(
   messages: AgentMessage[],
   opts: {
     getTimezone: () => string;
     gapMarkerThresholdMinutes: number;
+    modelApi?: string;
   },
 ): Message[] {
   const tz = opts.getTimezone();
-  let ephemeralTail: string | null = null;
+  let ephemeralTail: {
+    text: string;
+    anchorMessageId?: string;
+    anchorAgentIndex?: number;
+  } | null = null;
 
   const filtered: AgentMessage[] = [];
   for (const msg of messages) {
     if (msg.role === "hato_ephemeral_tail") {
-      ephemeralTail = msg.text;
+      ephemeralTail = {
+        text: msg.text,
+        anchorMessageId: msg.anchorMessageId,
+        anchorAgentIndex: msg.anchorAgentIndex,
+      };
     } else {
       filtered.push(msg);
     }
   }
 
   const out: Message[] = [];
+  const userLastPartKind: Array<UserPartKind | null> = [];
+  let anchoredUserOutIndex: number | null = null;
   let prevConvTimestamp: number | null = null;
   let prevChannel: ChannelName | null = null;
 
-  for (const msg of filtered) {
+  const trackAnchor = (msg: AgentMessage, idx: number): void => {
+    const msgId = "id" in msg && typeof msg.id === "string" ? msg.id : undefined;
+    if (ephemeralTail?.anchorMessageId && msgId === ephemeralTail.anchorMessageId) {
+      anchoredUserOutIndex = out.length - 1;
+    } else if (ephemeralTail?.anchorAgentIndex !== undefined && idx === ephemeralTail.anchorAgentIndex) {
+      anchoredUserOutIndex = out.length - 1;
+    }
+  };
+
+  for (let idx = 0; idx < filtered.length; idx++) {
+    const msg = filtered[idx]!;
+
     if (msg.role === "hato_compaction_summary") {
-      pushOrMergeUserMessage(out, {
-        role: "user",
-        content: `[前情对话滚动摘要（截至 ${formatLocalDateTime(msg.compactedUntilTs, tz).compactStamp}）]\n${msg.text}`,
-        timestamp: msg.timestamp,
-      });
+      pushOrMergeUserPart(
+        out,
+        userLastPartKind,
+        {
+          type: "text",
+          text: `[前情对话滚动摘要（截至 ${formatLocalDateTime(msg.compactedUntilTs, tz).compactStamp}）]\n${msg.text}`,
+        },
+        "summary",
+        msg.timestamp,
+      );
+      trackAnchor(msg, idx);
       continue;
     }
 
@@ -276,11 +310,17 @@ export function convertHatoMessagesToLlm(
           : null;
       const stamp = formatLocalDateTime(msg.timestamp, tz).compactStamp;
       const prefix = gap ? `${gap}\n` : "";
-      pushOrMergeUserMessage(out, {
-        role: "user",
-        content: `${prefix}[事件 ${stamp} 已执行] ${msg.text}`,
-        timestamp: msg.timestamp,
-      });
+      pushOrMergeUserPart(
+        out,
+        userLastPartKind,
+        {
+          type: "text",
+          text: `${prefix}[事件 ${stamp} 已执行] ${msg.text}`,
+        },
+        "event",
+        msg.timestamp,
+      );
+      trackAnchor(msg, idx);
       prevConvTimestamp = msg.timestamp;
       continue;
     }
@@ -294,15 +334,17 @@ export function convertHatoMessagesToLlm(
       const channelTag = prevChannel && prevChannel !== msg.channel ? ` [来自 ${msg.channel.toUpperCase()}]` : "";
       const prefix = gap ? `${gap}\n[${stamp}]${channelTag} ` : `[${stamp}]${channelTag} `;
 
-      if (msg.images.length > 0) {
-        const blocks: (TextContent | ImageContent)[] = [
-          { type: "text", text: `${prefix}${msg.text}` },
-          ...msg.images,
-        ];
-        pushOrMergeUserMessage(out, { role: "user", content: blocks, timestamp: msg.timestamp });
-      } else {
-        pushOrMergeUserMessage(out, { role: "user", content: `${prefix}${msg.text}`, timestamp: msg.timestamp });
+      pushOrMergeUserPart(
+        out,
+        userLastPartKind,
+        { type: "text", text: `${prefix}${msg.text}` },
+        "user",
+        msg.timestamp,
+      );
+      for (const img of msg.images) {
+        pushOrMergeUserPart(out, userLastPartKind, img, "user", msg.timestamp);
       }
+      trackAnchor(msg, idx);
       prevConvTimestamp = msg.timestamp;
       prevChannel = msg.channel;
       continue;
@@ -328,6 +370,7 @@ export function convertHatoMessagesToLlm(
         stopReason: "stop",
         timestamp: msg.timestamp,
       });
+      userLastPartKind.push(null);
       prevConvTimestamp = msg.timestamp;
       prevChannel = msg.channel;
       continue;
@@ -336,11 +379,26 @@ export function convertHatoMessagesToLlm(
     // Pass through standard pi-agent-core runtime messages (system prompt/tool declarations, assistant toolCalls, toolResults)
     if (msg.role === "system") {
       out.push(msg);
+      userLastPartKind.push(null);
     } else if (msg.role === "user") {
-      pushOrMergeUserMessage(out, msg);
+      if (typeof msg.content === "string") {
+        pushOrMergeUserPart(
+          out,
+          userLastPartKind,
+          { type: "text", text: msg.content },
+          "user",
+          msg.timestamp,
+        );
+      } else {
+        for (const block of msg.content) {
+          pushOrMergeUserPart(out, userLastPartKind, block, "user", msg.timestamp);
+        }
+      }
+      trackAnchor(msg, idx);
       prevConvTimestamp = msg.timestamp;
     } else if (msg.role === "assistant" || msg.role === "toolResult") {
       out.push(msg);
+      userLastPartKind.push(null);
       if (msg.role === "assistant") {
         prevConvTimestamp = msg.timestamp;
       }
@@ -348,57 +406,100 @@ export function convertHatoMessagesToLlm(
   }
 
   if (ephemeralTail) {
-    attachEphemeralTailToLastUserMessage(out, ephemeralTail);
+    attachEphemeralTailToUserMessage(out, ephemeralTail.text, anchoredUserOutIndex);
+  }
+
+  if (opts.modelApi === "openai-completions") {
+    for (let i = 0; i < out.length; i++) {
+      const m = out[i]!;
+      if (m.role !== "user" || typeof m.content === "string") continue;
+      if (m.content.every((block) => block.type === "text")) {
+        out[i] = {
+          ...m,
+          content: m.content.map((block) => block.text).join("\n\n"),
+        };
+      }
+    }
   }
 
   return out;
 }
 
-function pushOrMergeUserMessage(out: Message[], next: UserMessage): void {
+function pushOrMergeUserPart(
+  out: Message[],
+  userLastPartKind: Array<UserPartKind | null>,
+  block: TextContent | ImageContent,
+  kind: UserPartKind,
+  timestamp: number,
+): void {
   const prev = out[out.length - 1];
   if (!prev || prev.role !== "user") {
-    out.push(next);
-    return;
-  }
-
-  if (typeof prev.content === "string" && typeof next.content === "string") {
-    out[out.length - 1] = {
+    out.push({
       role: "user",
-      content: `${prev.content}\n\n${next.content}`,
-      timestamp: next.timestamp,
-    };
+      content: [block],
+      timestamp,
+    });
+    userLastPartKind.push(block.type === "text" ? kind : null);
     return;
   }
 
   const prevBlocks: (TextContent | ImageContent)[] =
-    typeof prev.content === "string" ? [{ type: "text", text: prev.content }] : prev.content;
-  const nextBlocks: (TextContent | ImageContent)[] =
-    typeof next.content === "string" ? [{ type: "text", text: next.content }] : next.content;
+    typeof prev.content === "string" ? [{ type: "text", text: prev.content }] : [...prev.content];
+  const lastKind = userLastPartKind[out.length - 1] ?? null;
+
+  if (block.type === "text") {
+    const lastBlock = prevBlocks[prevBlocks.length - 1];
+    if (lastKind === kind && lastBlock && lastBlock.type === "text") {
+      prevBlocks[prevBlocks.length - 1] = {
+        type: "text",
+        text: `${lastBlock.text}\n\n${block.text}`,
+      };
+    } else {
+      prevBlocks.push(block);
+    }
+    userLastPartKind[out.length - 1] = kind;
+  } else {
+    prevBlocks.push(block);
+    userLastPartKind[out.length - 1] = null;
+  }
 
   out[out.length - 1] = {
     role: "user",
-    content: [...prevBlocks, ...nextBlocks],
-    timestamp: next.timestamp,
+    content: prevBlocks,
+    timestamp,
   };
 }
 
-function attachEphemeralTailToLastUserMessage(messages: Message[], tailText: string): void {
-  for (let i = messages.length - 1; i >= 0; i--) {
-    const m = messages[i]!;
-    if (m.role !== "user") continue;
+function attachEphemeralTailToUserMessage(
+  messages: Message[],
+  tailText: string,
+  anchoredUserOutIndex: number | null,
+): void {
+  const appendPart = (idx: number): void => {
+    const m = messages[idx] as UserMessage;
+    const prevBlocks: (TextContent | ImageContent)[] =
+      typeof m.content === "string" ? [{ type: "text", text: m.content }] : [...m.content];
+    messages[idx] = {
+      ...m,
+      content: [...prevBlocks, { type: "text", text: tailText }],
+    };
+  };
 
-    if (typeof m.content === "string") {
-      messages[i] = { ...m, content: `${m.content}\n\n${tailText}` };
-    } else {
-      const nextContent = [...m.content, { type: "text" as const, text: `\n\n${tailText}` }];
-      messages[i] = { ...m, content: nextContent };
-    }
+  if (anchoredUserOutIndex !== null && messages[anchoredUserOutIndex]?.role === "user") {
+    appendPart(anchoredUserOutIndex);
     return;
+  }
+
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (messages[i]?.role === "user") {
+      appendPart(i);
+      return;
+    }
   }
 
   const userMsg: UserMessage = {
     role: "user",
-    content: tailText,
+    content: [{ type: "text", text: tailText }],
     timestamp: Date.now(),
   };
   messages.push(userMsg);

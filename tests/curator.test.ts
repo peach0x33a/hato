@@ -272,10 +272,17 @@ hindsight_llm = "faux-provider/faux-model-1"
     faux.setResponses([
       (ctx) => {
         const lastMsg = ctx.messages[ctx.messages.length - 1];
-        if (lastMsg && lastMsg.role === "user" && typeof lastMsg.content === "string") {
+        if (lastMsg && lastMsg.role === "user") {
+          const text =
+            typeof lastMsg.content === "string"
+              ? lastMsg.content
+              : lastMsg.content
+                  .filter((b): b is { type: "text"; text: string } => b.type === "text")
+                  .map((b) => b.text)
+                  .join("\n");
           sawPersonaMemoryInTail =
-            lastMsg.content.includes("<recalled_memories>") &&
-            lastMsg.content.includes("用户不吃香菜");
+            text.includes("<recalled_memories>") &&
+            text.includes("用户不吃香菜");
         }
         return fauxAssistantMessage([fauxToolCall("recall_memory", { query: "项目用什么语言", bank: "tech" })], {
           stopReason: "toolUse",

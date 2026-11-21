@@ -152,6 +152,18 @@ function formatDateTime(ms: number): string {
   }
 }
 
+function formatDuration(ms: number): string {
+  if (!Number.isFinite(ms) || ms < 0) return "0ms";
+  if (ms < 1000) return `${Math.round(ms)}ms`;
+  return `${(ms / 1000).toFixed(1)}s`;
+}
+
+function formatCompactTokens(n: number): string {
+  if (!Number.isFinite(n) || n < 0) return "0";
+  if (n >= 1000) return `${(n / 1000).toFixed(1)}k`;
+  return String(Math.round(n));
+}
+
 function getKindBadge(kind: LedgerKind, slot: string): { text: string; cls: string } {
   if (kind === "tool") {
     return {
@@ -442,7 +454,22 @@ export function TrajectoryPanel({
               (st.toolCalls.length > 0
                 ? `（仅工具调用：${st.toolCalls.map((c) => c.name).join(", ")}）`
                 : `${tr.provider}/${tr.modelId}`);
-            const tokStr = st.tokens?.output ? `${st.tokens.output} tok` : `${tr.outputTokens} tok`;
+            const totalTok =
+              tr.inputTokens + tr.cacheReadTokens + tr.cacheWriteTokens + tr.outputTokens;
+            const stepOutTok = st.tokens?.output ?? tr.outputTokens;
+            const cacheDenominator = tr.inputTokens + tr.cacheReadTokens + tr.cacheWriteTokens;
+            const cachePct =
+              cacheDenominator > 0 ? Math.round((tr.cacheReadTokens / cacheDenominator) * 100) : 0;
+            const secondaryText =
+              mode === "duration"
+                ? tr.ttftMs !== null
+                  ? `${formatDuration(tr.latencyMs)} (TTFT ${formatDuration(tr.ttftMs)})`
+                  : formatDuration(tr.latencyMs)
+                : mode === "tokens"
+                  ? tr.cacheReadTokens > 0
+                    ? `${formatCompactTokens(totalTok)} tok (出 ${formatCompactTokens(stepOutTok)} · 缓存 ${cachePct}%)`
+                    : `${formatCompactTokens(totalTok)} tok (出 ${formatCompactTokens(stepOutTok)})`
+                  : `第 ${turnNumber} 轮 · ${steps.length} 步${tools.length > 0 ? ` · ${tools.length} 工具` : ""}`;
             events.push({
               key: `${tr.id}:step:${st.step}`,
               traceId: tr.id,
@@ -451,7 +478,7 @@ export function TrajectoryPanel({
               kind: "assistant",
               slot: tr.slot,
               primaryText: displayText,
-              secondaryText: tokStr,
+              secondaryText,
               meta: `#${turnNumber}.${st.step}`,
               createdAt: tr.createdAt,
               stepData: st,
@@ -461,6 +488,16 @@ export function TrajectoryPanel({
       } else {
         // Fallback for older trace rows recorded before stepsJson migration
         if (showModels) {
+          const totalTok =
+            tr.inputTokens + tr.cacheReadTokens + tr.cacheWriteTokens + tr.outputTokens;
+          const secondaryText =
+            mode === "duration"
+              ? tr.ttftMs !== null
+                ? `${formatDuration(tr.latencyMs)} (TTFT ${formatDuration(tr.ttftMs)})`
+                : formatDuration(tr.latencyMs)
+              : mode === "tokens"
+                ? `${formatCompactTokens(totalTok)} tok (出 ${formatCompactTokens(tr.outputTokens)})`
+                : `第 ${turnNumber} 轮${tools.length > 0 ? ` · ${tools.length} 工具` : ""}`;
           events.push({
             key: `${tr.id}:assistant`,
             traceId: tr.id,
@@ -471,7 +508,7 @@ export function TrajectoryPanel({
               tools.length > 0
                 ? `（历史调用 · 工具：${tools.join(", ")}）`
                 : `${tr.provider}/${tr.modelId}`,
-            secondaryText: `${tr.outputTokens} tok · ${tr.latencyMs}ms`,
+            secondaryText,
             meta: `#${turnNumber}`,
             createdAt: tr.createdAt,
           });
@@ -494,7 +531,7 @@ export function TrajectoryPanel({
       }
     }
     return events;
-  }, [filteredTraces, showInputs, showRecall, showTools, showModels]);
+  }, [filteredTraces, mode, showInputs, showRecall, showTools, showModels]);
 
   const selectedEvent = useMemo(
     () => ledgerEvents.find((ev) => ev.key === selectedEventKey) ?? null,
@@ -683,68 +720,111 @@ export function TrajectoryPanel({
             <span>工具</span>
           </div>
 
-          <div className="flex min-w-0 flex-1 touch-pan-x overflow-x-auto">
-            {filteredTraces.map((tr) => {
-              const weight =
-                mode === "turns"
-                  ? 1
-                  : mode === "tokens"
-                    ? Math.max(1, tr.inputTokens + tr.cacheReadTokens + tr.cacheWriteTokens + tr.outputTokens)
-                    : Math.max(1, tr.latencyMs);
-              const pct = Math.max(2, (weight / totalSpanWeight) * 100);
-              const ttftRatio =
-                tr.ttftMs !== null && tr.latencyMs > 0
-                  ? Math.min(0.9, Math.max(0.08, tr.ttftMs / tr.latencyMs))
-                  : 0.25;
-              const tools = parseJsonArray(tr.toolCallsJson);
-              const isSelected = selectedTrace?.id === tr.id;
+          <div className="min-w-0 flex-1 touch-pan-x overflow-x-auto">
+            <div
+              className="flex h-full w-full"
+              style={{ minWidth: `${filteredTraces.length * 32}px` }}
+            >
+              {filteredTraces.map((tr, idx) => {
+                const totalTokens =
+                  tr.inputTokens + tr.cacheReadTokens + tr.cacheWriteTokens + tr.outputTokens;
+                const weight =
+                  mode === "turns"
+                    ? 1
+                    : mode === "tokens"
+                      ? Math.max(1, totalTokens)
+                      : Math.max(1, tr.latencyMs);
+                const sharePct = Math.round((weight / totalSpanWeight) * 100);
+                const ttftRatio =
+                  tr.ttftMs !== null && tr.latencyMs > 0
+                    ? Math.min(0.9, Math.max(0.08, tr.ttftMs / tr.latencyMs))
+                    : 0.25;
+                const uncachedInput = tr.inputTokens + tr.cacheWriteTokens;
+                const safeTokSum = Math.max(1, totalTokens);
+                const cacheReadPct = (tr.cacheReadTokens / safeTokSum) * 100;
+                const uncachedInputPct = (uncachedInput / safeTokSum) * 100;
+                const outputPct = (tr.outputTokens / safeTokSum) * 100;
+                const tools = parseJsonArray(tr.toolCallsJson);
+                const isSelected = selectedTrace?.id === tr.id;
+                const tooltipText =
+                  mode === "duration"
+                    ? `[${tr.slot}] ${formatDuration(tr.latencyMs)}${tr.ttftMs !== null ? ` (TTFT ${formatDuration(tr.ttftMs)})` : ""} · 占比 ${sharePct}% · ${formatCompactTokens(totalTokens)} tok · ${tr.provider}/${tr.modelId}`
+                    : mode === "tokens"
+                      ? `[${tr.slot}] ${totalTokens.toLocaleString()} tok (输入 ${(tr.inputTokens + tr.cacheWriteTokens).toLocaleString()} / 缓存 ${tr.cacheReadTokens.toLocaleString()} / 输出 ${tr.outputTokens.toLocaleString()}) · 占比 ${sharePct}% · ${tr.provider}/${tr.modelId}`
+                      : `[${tr.slot}] 第 ${idx + 1}/${filteredTraces.length} 轮${tools.length > 0 ? ` · ${tools.length} 个工具` : ""} · ${formatDuration(tr.latencyMs)} · ${formatCompactTokens(totalTokens)} tok · ${tr.provider}/${tr.modelId}`;
 
-              return (
-                <button
-                  key={tr.id}
-                  type="button"
-                  onClick={() => {
-                    setSelectedTraceId(tr.id);
-                    const matching = ledgerEvents.find(
-                      (ev) => ev.traceId === tr.id && ev.kind === "assistant",
-                    );
-                    setSelectedEventKey(matching?.key ?? null);
-                    setInspectorOpen(true);
-                  }}
-                  style={{ flexBasis: `${pct}%`, flexGrow: weight, minWidth: 18 }}
-                  title={`[${tr.slot}] ${tr.provider}/${tr.modelId} · ${tr.latencyMs}ms`}
-                  className={`flex h-full flex-col justify-between border-r border-border/50 px-0.5 py-1 transition-colors ${
-                    isSelected ? "bg-primary/10 shadow-[inset_0_-2px_0_0_var(--primary)]" : "hover:bg-muted/35"
-                  }`}
-                >
-                  <div className="flex h-2.5 items-center">
-                    <span
-                      className={`block h-2 w-full rounded-[2px] ${
-                        tr.slot === "worker"
-                          ? "bg-cyan-500/80"
-                          : tr.slot === "curator"
-                            ? "bg-emerald-500/80"
-                            : tr.userPreview
-                              ? "bg-sky-500/80"
-                              : "bg-sky-500/35"
-                      }`}
-                    />
-                  </div>
-                  <div className="flex h-2.5 overflow-hidden rounded-[2px] bg-violet-500/20">
-                    <span
-                      className="block h-full bg-violet-400/50"
-                      style={{ width: `${ttftRatio * 100}%` }}
-                    />
-                    <span className="block h-full flex-1 bg-violet-500/85" />
-                  </div>
-                  <div className="flex h-2.5 items-center">
-                    {tools.length > 0 && (
-                      <span className="block h-2 w-full rounded-[2px] bg-amber-500/85" />
-                    )}
-                  </div>
-                </button>
-              );
-            })}
+                return (
+                  <button
+                    key={tr.id}
+                    type="button"
+                    onClick={() => {
+                      setSelectedTraceId(tr.id);
+                      const matching = ledgerEvents.find(
+                        (ev) => ev.traceId === tr.id && ev.kind === "assistant",
+                      );
+                      setSelectedEventKey(matching?.key ?? null);
+                      setInspectorOpen(true);
+                    }}
+                    style={{ flexGrow: weight, flexShrink: 0, flexBasis: 0, minWidth: 10 }}
+                    title={tooltipText}
+                    className={`flex h-full flex-col justify-between border-r border-border/50 px-0.5 py-1 transition-colors ${
+                      isSelected ? "bg-primary/10 shadow-[inset_0_-2px_0_0_var(--primary)]" : "hover:bg-muted/35"
+                    }`}
+                  >
+                    <div className="flex h-2.5 items-center">
+                      <span
+                        className={`block h-2 w-full rounded-[2px] ${
+                          tr.slot === "worker"
+                            ? "bg-cyan-500/80"
+                            : tr.slot === "curator"
+                              ? "bg-emerald-500/80"
+                              : tr.userPreview
+                                ? "bg-sky-500/80"
+                                : "bg-sky-500/35"
+                        }`}
+                      />
+                    </div>
+                    <div className="flex h-2.5 overflow-hidden rounded-[2px] bg-violet-500/20">
+                      {mode === "duration" ? (
+                        <>
+                          <span
+                            className="block h-full bg-violet-400/50"
+                            style={{ width: `${ttftRatio * 100}%` }}
+                          />
+                          <span className="block h-full flex-1 bg-violet-500/85" />
+                        </>
+                      ) : mode === "tokens" ? (
+                        <>
+                          {cacheReadPct > 0 && (
+                            <span
+                              className="block h-full bg-emerald-400/80"
+                              style={{ width: `${cacheReadPct}%` }}
+                            />
+                          )}
+                          {uncachedInputPct > 0 && (
+                            <span
+                              className="block h-full bg-sky-400/80"
+                              style={{ width: `${uncachedInputPct}%` }}
+                            />
+                          )}
+                          <span
+                            className="block h-full flex-1 bg-violet-500/85"
+                            style={{ width: `${outputPct}%` }}
+                          />
+                        </>
+                      ) : (
+                        <span className="block h-full w-full bg-violet-500/75" />
+                      )}
+                    </div>
+                    <div className="flex h-2.5 items-center">
+                      {tools.length > 0 && (
+                        <span className="block h-2 w-full rounded-[2px] bg-amber-500/85" />
+                      )}
+                    </div>
+                  </button>
+                );
+              })}
+            </div>
           </div>
         </div>
       )}

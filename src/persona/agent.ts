@@ -118,6 +118,13 @@ export class PersonaRuntime {
   private activeTurnRecalledMemories: MemoryRecallItem[] = [];
   private activeTurnRecalledIds = new Set<string>();
   private activeTurn: ActivePersonaTurnState | null = null;
+  private activeTurnEphemeralTail: {
+    tailText: string;
+    timeCardText: string;
+    timestamp: number;
+    anchorMessageId?: string;
+    anchorAgentIndex?: number;
+  } | null = null;
   private liveTraceTracker: LiveTraceTracker | null = null;
   private readonly pendingSupersededImages = new Map<string, ImageContent[]>();
   private reloadHandler: (() => Promise<void>) | null = null;
@@ -261,8 +268,22 @@ export class PersonaRuntime {
         );
       },
       transformContext: async (messages) => {
+        const frozen = this.activeTurnEphemeralTail;
+        if (frozen) {
+          return [
+            ...messages,
+            {
+              role: "hato_ephemeral_tail",
+              text: frozen.tailText,
+              timestamp: frozen.timestamp,
+              anchorMessageId: frozen.anchorMessageId,
+              anchorAgentIndex: frozen.anchorAgentIndex,
+            },
+          ];
+        }
+        const nowMs = Date.now();
         const { tailText, timeCardText } = buildEphemeralContextBlock({
-          nowMs: Date.now(),
+          nowMs,
           repo: this.repo,
           canonicalUserId,
           baseTimezone: this.hatoConfig.owner.timezone,
@@ -275,7 +296,7 @@ export class PersonaRuntime {
           {
             role: "hato_ephemeral_tail",
             text: tailText,
-            timestamp: Date.now(),
+            timestamp: nowMs,
           },
         ];
       },
@@ -290,6 +311,7 @@ export class PersonaRuntime {
         return convertHatoMessagesToLlm(messages, {
           getTimezone: () => this.getEffectiveTimezone(canonicalUserId),
           gapMarkerThresholdMinutes: this.hatoConfig.context.gap_marker_threshold_minutes,
+          modelApi: this.agent.state.model?.api,
         });
       },
     });
@@ -1149,6 +1171,23 @@ export class PersonaRuntime {
         this.agent.state.messages = [refreshedLeading];
       }
     }
+    const frozenNowMs = Date.now();
+    const frozenEphemeral = buildEphemeralContextBlock({
+      nowMs: frozenNowMs,
+      repo: this.repo,
+      canonicalUserId,
+      baseTimezone: this.hatoConfig.owner.timezone,
+      quietHours: this.hatoConfig.owner.quiet_hours,
+      recalledMemories: this.activeTurnRecalledMemories,
+    });
+    this.lastTimeCardSnapshot = frozenEphemeral.timeCardText;
+    this.activeTurnEphemeralTail = {
+      tailText: frozenEphemeral.tailText,
+      timeCardText: frozenEphemeral.timeCardText,
+      timestamp: frozenNowMs,
+      anchorMessageId: userAgentMsg.role === "hato_user_batch" ? userAgentMsg.id : undefined,
+    };
+
     let promptErr: unknown = null;
     try {
       if (!turnState.abortedForSupersede && !options?.shouldSuppressSend?.()) {
@@ -1170,6 +1209,7 @@ export class PersonaRuntime {
       telemetry.unsubscribe();
       this.activeCallStartPerf = null;
       this.activeTurnRecalledMemories = [];
+      this.activeTurnEphemeralTail = null;
       this.liveTraceTracker?.finish(liveTraceId);
       if (this.activeTurn === turnState) {
         this.activeTurn = null;
@@ -1444,6 +1484,22 @@ export class PersonaRuntime {
       liveTraceId,
     });
 
+    const frozenNowMs = Date.now();
+    const frozenEphemeral = buildEphemeralContextBlock({
+      nowMs: frozenNowMs,
+      repo: this.repo,
+      canonicalUserId: params.canonicalUserId,
+      baseTimezone: this.hatoConfig.owner.timezone,
+      quietHours: this.hatoConfig.owner.quiet_hours,
+    });
+    this.lastTimeCardSnapshot = frozenEphemeral.timeCardText;
+    this.activeTurnEphemeralTail = {
+      tailText: frozenEphemeral.tailText,
+      timeCardText: frozenEphemeral.timeCardText,
+      timestamp: frozenNowMs,
+      anchorAgentIndex: startIndex,
+    };
+
     let promptErr: unknown = null;
     try {
       const attachedImages = params.images?.slice(0, 4) ?? [];
@@ -1457,6 +1513,7 @@ export class PersonaRuntime {
     } finally {
       telemetry.unsubscribe();
       this.activeCallStartPerf = null;
+      this.activeTurnEphemeralTail = null;
       this.liveTraceTracker?.finish(liveTraceId);
     }
 
@@ -1690,6 +1747,7 @@ export class PersonaRuntime {
     const llmMessages: Message[] = convertHatoMessagesToLlm(agentMessages, {
       getTimezone: () => tz,
       gapMarkerThresholdMinutes: this.hatoConfig.context.gap_marker_threshold_minutes,
+      modelApi: resolved.model.api,
     });
 
     llmMessages.push({

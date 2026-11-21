@@ -58,8 +58,15 @@ hindsight_llm = "faux-provider/faux-persona-1"
       (ctx) => {
         observedScope = proxyRouter.getCurrentScope();
         const lastMsg = ctx.messages[ctx.messages.length - 1];
-        if (lastMsg && lastMsg.role === "user" && typeof lastMsg.content === "string") {
-          observedPromptHasTime = lastMsg.content.includes("<time>") && lastMsg.content.includes("现在:");
+        if (lastMsg && lastMsg.role === "user") {
+          const text =
+            typeof lastMsg.content === "string"
+              ? lastMsg.content
+              : lastMsg.content
+                  .filter((b): b is { type: "text"; text: string } => b.type === "text")
+                  .map((b) => b.text)
+                  .join("\n");
+          observedPromptHasTime = text.includes("<time>") && text.includes("现在:");
         }
         return fauxAssistantMessage([fauxToolCall("calc", { expression: "356 * 24" })], {
           stopReason: "toolUse",
@@ -260,8 +267,14 @@ hindsight_llm = "faux-provider/faux-persona-1"
       },
       (ctx) => {
         const lastUser = [...ctx.messages].reverse().find((m) => m.role === "user");
-        if (lastUser && typeof lastUser.content === "string") {
-          rethoughtPromptText = lastUser.content;
+        if (lastUser) {
+          rethoughtPromptText =
+            typeof lastUser.content === "string"
+              ? lastUser.content
+              : lastUser.content
+                  .filter((b): b is { type: "text"; text: string } => b.type === "text")
+                  .map((b) => b.text)
+                  .join("\n");
         }
         return fauxAssistantMessage("收到啦，明天早上八点准时睡");
       },
@@ -329,7 +342,14 @@ hindsight_llm = "faux-provider/faux-persona-1"
       (ctx) => {
         const joinedUserText = ctx.messages
           .filter((m) => m.role === "user")
-          .map((m) => (typeof m.content === "string" ? m.content : ""))
+          .map((m) =>
+            typeof m.content === "string"
+              ? m.content
+              : m.content
+                  .filter((b): b is { type: "text"; text: string } => b.type === "text")
+                  .map((b) => b.text)
+                  .join("\n"),
+          )
           .join("\n");
         sawSteeredMessagesInSecondLlmStep =
           joinedUserText.includes("顺便加 10") && joinedUserText.includes("还要再加 5");
@@ -632,6 +652,112 @@ hindsight_llm = "faux-provider/faux-persona-thinking"
       lastTimestampMs: Date.now() + 60,
     });
     assert.equal(persistedTurnReasoning, "high");
+  } finally {
+    dbHandle.close();
+    rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("PersonaRuntime freezes ephemeral tail across multi-step tool loops and releases after turn", async () => {
+  const faux = fauxProvider({
+    api: "hato-faux-api",
+    provider: "faux-provider",
+    models: [{ id: "faux-persona-1", name: "Faux Persona" }],
+    tokensPerSecond: 10000,
+  });
+
+  const tempDir = mkdtempSync(join(tmpdir(), "hato-cache-test-"));
+  const hatoTomlPath = join(tempDir, "hato.toml");
+  const modelsTomlPath = join(tempDir, "models.toml");
+
+  writeHatoConfig(hatoTomlPath, createDefaultHatoConfig(), { backup: false });
+  writeFileSync(
+    modelsTomlPath,
+    `
+[slots]
+persona = "faux-provider/faux-persona-1"
+router = "faux-provider/faux-persona-1"
+curator = "faux-provider/faux-persona-1"
+worker = "faux-provider/faux-persona-1"
+hindsight_llm = "faux-provider/faux-persona-1"
+
+[providers]
+`,
+    "utf8",
+  );
+
+  const dbHandle = openDatabase(":memory:");
+  try {
+    const hatoConfig = loadHatoConfig(hatoTomlPath);
+    const repo = new HatoRepository(dbHandle.db);
+    const modelRegistry = new ModelRegistry(modelsTomlPath, repo, {
+      extraProviders: [faux.provider],
+    });
+    const proxyRouter = new ScopedProxyRouter([]);
+    const runtime = new PersonaRuntime(hatoConfig, modelRegistry, proxyRouter, repo);
+
+    let step1UserContent: unknown = null;
+    let step2UserContent: unknown = null;
+    let turn2UserContent: unknown = null;
+
+    faux.setResponses([
+      (ctx) => {
+        step1UserContent = ctx.messages[0]?.content;
+        // Simulate a new ticket being created during tool execution in this turn
+        repo.createTicket({
+          canonicalUserId: "owner",
+          originChannel: "tg",
+          backend: "builtin-pi",
+          briefTitle: "新工单-缓存测试",
+          status: "running",
+        });
+        return fauxAssistantMessage([fauxToolCall("calc", { expression: "1 + 1" })], {
+          stopReason: "toolUse",
+        });
+      },
+      (ctx) => {
+        // Step 2 in the same turn must keep the exact same frozen user content (no <ticket_board> mutation)
+        step2UserContent = ctx.messages[0]?.content;
+        return fauxAssistantMessage("算好了，是 2");
+      },
+      (ctx) => {
+        // Next turn after release must pick up the new ticket in <ticket_board>
+        const lastUser = [...ctx.messages].reverse().find((m) => m.role === "user");
+        turn2UserContent = lastUser?.content;
+        return fauxAssistantMessage("好的");
+      },
+    ]);
+
+    await runtime.handleUserBatch({
+      canonicalUserId: "owner",
+      originChannel: "tg",
+      originPlatformUserId: "123",
+      platformMsgIds: ["m1"],
+      latestPlatformMsgId: "m1",
+      combinedText: "算一下 1 + 1",
+      attachments: [],
+      firstTimestampMs: Date.now(),
+      lastTimestampMs: Date.now(),
+    });
+
+    assert.deepEqual(step2UserContent, step1UserContent);
+    const step1Text = JSON.stringify(step1UserContent);
+    assert.ok(!step1Text.includes("新工单-缓存测试"));
+
+    await runtime.handleUserBatch({
+      canonicalUserId: "owner",
+      originChannel: "tg",
+      originPlatformUserId: "123",
+      platformMsgIds: ["m2"],
+      latestPlatformMsgId: "m2",
+      combinedText: "现在有任务吗",
+      attachments: [],
+      firstTimestampMs: Date.now() + 100,
+      lastTimestampMs: Date.now() + 100,
+    });
+
+    const turn2Text = JSON.stringify(turn2UserContent);
+    assert.ok(turn2Text.includes("新工单-缓存测试"));
   } finally {
     dbHandle.close();
     rmSync(tempDir, { recursive: true, force: true });

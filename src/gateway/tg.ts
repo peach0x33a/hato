@@ -58,6 +58,7 @@ export function parseSethomeCommand(text: string): { isSethome: boolean; code: s
 }
 
 const TG_MAX_MESSAGE_LENGTH = 4000;
+const TG_CLIENT_TIMEOUT_SECONDS = 60;
 
 /**
  * Telegram Bot API gateway adapter backed by grammY.
@@ -84,17 +85,8 @@ export class TelegramAdapter implements ChannelAdapter {
     this.bot = new Bot(deps.botToken, {
       client: {
         apiRoot: deps.config.gateway.telegram.base_url,
-        baseFetchConfig: {
-          agent: (parsedUrl: URL) =>
-            deps.proxyRouter.getNodeAgent(
-              "gateway.telegram",
-              parsedUrl.protocol === "http:" ? "http:" : "https:",
-            ),
-        } as NonNullable<ConstructorParameters<typeof Bot>[1]>["client"] extends infer C
-          ? C extends { baseFetchConfig?: infer F }
-            ? F
-            : never
-          : never,
+        timeoutSeconds: TG_CLIENT_TIMEOUT_SECONDS,
+        fetch: deps.proxyRouter.createScopedFetch("gateway.telegram"),
       },
     });
 
