@@ -169,6 +169,7 @@ export function createDefaultHatoConfig(): HatoConfig {
       pre_compact_after_minutes: 50,
       idle_commit_after_minutes: 60,
       clear_mode: "cache",
+      compaction_mode: "curator",
       scheduled_clear_time: "01:00",
       scheduled_defer_minutes: 30,
       gap_marker_threshold_minutes: 30,

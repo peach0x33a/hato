@@ -18,7 +18,7 @@ export interface CompactionConfig {
 }
 
 export interface CompactionHooks {
-  /** Summarize messages up to cutoff using the same persona prefix for cache reuse. */
+  /** Summarize messages up to cutoff using the curator slot for rolling context compaction. */
   summarizeBlock(params: {
     canonicalUserId: string;
     previousSummary: string;

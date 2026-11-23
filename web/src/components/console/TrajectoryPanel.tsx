@@ -186,7 +186,7 @@ function getKindBadge(kind: LedgerKind, slot: string): { text: string; cls: stri
     }
     if (slot === "curator") {
       return {
-        text: "压缩",
+        text: "整理",
         cls: "border-emerald-500/35 bg-emerald-500/15 text-emerald-700 dark:text-emerald-300",
       };
     }

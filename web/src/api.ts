@@ -246,6 +246,7 @@ export interface HatoConfig {
     pre_compact_after_minutes: number;
     idle_commit_after_minutes: number;
     clear_mode?: "cache" | "scheduled";
+    compaction_mode?: "curator" | "reuse_conversation";
     scheduled_clear_time?: string;
     scheduled_defer_minutes?: number;
     gap_marker_threshold_minutes: number;

@@ -57,6 +57,7 @@ const ALLOWED_SELF_CONFIG_PATHS = new Set<string>([
   "context.pre_compact_after_minutes",
   "context.idle_commit_after_minutes",
   "context.clear_mode",
+  "context.compaction_mode",
   "context.scheduled_clear_time",
   "context.scheduled_defer_minutes",
   "context.gap_marker_threshold_minutes",

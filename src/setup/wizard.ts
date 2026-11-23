@@ -48,7 +48,7 @@ type ModelEntry = ProviderTable["models"][number];
 const SLOT_DESCRIPTIONS: Record<ModelSlot, string> = {
   persona: "persona（主对话陪聊与微工具）",
   router: "router（轻路由、工单区间划定与追问判定）",
-  curator: "curator（异步记忆提炼与附件摘要）",
+  curator: "curator（上下文压缩与异步记忆提炼）",
   worker: "worker（工程执行与写脚本）",
   hindsight_llm: "hindsight_llm（记忆抽取与反思）",
   vision: "vision（图像理解与表情包打标，未配则回退 persona）",

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -111,12 +111,20 @@ hindsight_llm = "faux-provider/faux-persona-1"
     const hot = repo.getHotMessages("owner", 0);
     assert.equal(hot.length, 2);
 
-    const summary = await runtime.summarizeBlockWithWarmPrefix({
+    const summary = await runtime.summarizeCompactionBlock({
       canonicalUserId: "owner",
       previousSummary: "",
       messagesToSummarize: hot,
     });
     assert.equal(summary, "用户询问了乘法计算，助手已给出结果 8544。");
+
+    const compactionTrace = repo.getLatestTurnTrace("owner");
+    assert.ok(compactionTrace);
+    assert.equal(compactionTrace.slot, "curator");
+    assert.ok(compactionTrace.userPreview.startsWith("[上下文压缩]"));
+    assert.ok(compactionTrace.timeCardText.includes("task: context_compaction"));
+    assert.ok(compactionTrace.timeCardText.includes("compacted_messages: 2"));
+    assert.ok(!compactionTrace.timeCardText.includes("warm_prefix_slot: persona"));
 
     // Simulate /new clearing both rolled summary and hot messages, even if next Telegram
     // message carries a 1-second-truncated timestamp slightly <= reset cutoff.
@@ -758,6 +766,338 @@ hindsight_llm = "faux-provider/faux-persona-1"
 
     const turn2Text = JSON.stringify(turn2UserContent);
     assert.ok(turn2Text.includes("新工单-缓存测试"));
+  } finally {
+    dbHandle.close();
+    rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("summarizeCompactionBlock uses curator slot and neutral compaction system prompt", async () => {
+  const faux = fauxProvider({
+    api: "hato-faux-api",
+    provider: "faux-provider",
+    models: [
+      { id: "faux-persona-1", name: "Faux Persona", reasoning: true },
+      { id: "faux-curator-1", name: "Faux Curator" },
+    ],
+    tokensPerSecond: 10000,
+  });
+
+  const tempDir = mkdtempSync(join(tmpdir(), "hato-compaction-slot-test-"));
+  const promptsDir = join(tempDir, "prompts");
+  mkdirSync(promptsDir, { recursive: true });
+  const personaMarker = "UNIQUE_PERSONA_SOUL_MARKER_DO_NOT_LEAK";
+  writeFileSync(join(promptsDir, "soul.md"), personaMarker, "utf8");
+
+  const hatoTomlPath = join(tempDir, "hato.toml");
+  const modelsTomlPath = join(tempDir, "models.toml");
+
+  const defaultCfg = createDefaultHatoConfig();
+  defaultCfg.paths.prompts_dir = promptsDir;
+  writeHatoConfig(hatoTomlPath, defaultCfg, { backup: false });
+  writeFileSync(
+    modelsTomlPath,
+    `
+[slots]
+persona = "faux-provider/faux-persona-1"
+router = "faux-provider/faux-curator-1"
+curator = "faux-provider/faux-curator-1"
+worker = "faux-provider/faux-persona-1"
+hindsight_llm = "faux-provider/faux-curator-1"
+
+[slot_thinking]
+persona = "high"
+curator = "minimal"
+
+[providers]
+`,
+    "utf8",
+  );
+
+  const dbHandle = openDatabase(":memory:");
+  try {
+    const hatoConfig = loadHatoConfig(hatoTomlPath);
+    const repo = new HatoRepository(dbHandle.db);
+    const modelRegistry = new ModelRegistry(modelsTomlPath, repo, {
+      extraProviders: [faux.provider],
+    });
+    const proxyRouter = new ScopedProxyRouter(hatoConfig.network?.proxies ?? []);
+    const runtime = new PersonaRuntime(hatoConfig, modelRegistry, proxyRouter, repo);
+
+    repo.appendRawMessage({
+      canonicalUserId: "owner",
+      channel: "tg",
+      role: "user",
+      content: "明天早上八点提醒我开会",
+    });
+    repo.appendRawMessage({
+      canonicalUserId: "owner",
+      channel: "tg",
+      role: "assistant",
+      content: "好的，我记下来了。",
+    });
+    const hot = repo.getHotMessages("owner", 0);
+    assert.equal(hot.length, 2);
+
+    let capturedSystemPrompt = "";
+    faux.setResponses([
+      (ctx) => {
+        const sysMsg = ctx.messages.find((m) => m.role === "system") as
+          | { role: "system"; content?: string }
+          | undefined;
+        capturedSystemPrompt =
+          typeof sysMsg?.content === "string" ? sysMsg.content : ctx.systemPrompt ?? "";
+        return fauxAssistantMessage("用户要求明早八点开会提醒，助手已确认记录。");
+      },
+    ]);
+
+    const summary = await runtime.summarizeCompactionBlock({
+      canonicalUserId: "owner",
+      previousSummary: "",
+      messagesToSummarize: hot,
+    });
+
+    assert.equal(summary, "用户要求明早八点开会提醒，助手已确认记录。");
+    assert.ok(capturedSystemPrompt.includes("上下文整理助手"));
+    assert.ok(!capturedSystemPrompt.includes(personaMarker));
+
+    const trace = repo.getLatestTurnTrace("owner");
+    assert.ok(trace);
+    assert.equal(trace.slot, "curator");
+    assert.equal(trace.provider, "faux-provider");
+    assert.equal(trace.modelId, "faux-curator-1");
+  } finally {
+    dbHandle.close();
+    rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("summarizeCompactionBlock in reuse_conversation mode forks live persona prefix for cache hit without mutating session", async () => {
+  const faux = fauxProvider({
+    api: "hato-faux-api",
+    provider: "faux-provider",
+    models: [
+      { id: "faux-persona-1", name: "Faux Persona", reasoning: true },
+      { id: "faux-curator-1", name: "Faux Curator" },
+    ],
+    tokensPerSecond: 10000,
+  });
+
+  const tempDir = mkdtempSync(join(tmpdir(), "hato-fork-compaction-test-"));
+  const promptsDir = join(tempDir, "prompts");
+  mkdirSync(promptsDir, { recursive: true });
+  const personaMarker = "UNIQUE_FORK_PERSONA_SOUL_MARKER";
+  writeFileSync(join(promptsDir, "soul.md"), personaMarker, "utf8");
+
+  const hatoTomlPath = join(tempDir, "hato.toml");
+  const modelsTomlPath = join(tempDir, "models.toml");
+
+  const defaultCfg = createDefaultHatoConfig();
+  defaultCfg.paths.prompts_dir = promptsDir;
+  defaultCfg.context.compaction_mode = "reuse_conversation";
+  writeHatoConfig(hatoTomlPath, defaultCfg, { backup: false });
+  writeFileSync(
+    modelsTomlPath,
+    `
+[slots]
+persona = "faux-provider/faux-persona-1"
+router = "faux-provider/faux-curator-1"
+curator = "faux-provider/faux-curator-1"
+worker = "faux-provider/faux-persona-1"
+hindsight_llm = "faux-provider/faux-curator-1"
+
+[slot_thinking]
+persona = "high"
+curator = "minimal"
+
+[providers]
+`,
+    "utf8",
+  );
+
+  const dbHandle = openDatabase(":memory:");
+  try {
+    const hatoConfig = loadHatoConfig(hatoTomlPath);
+    const repo = new HatoRepository(dbHandle.db);
+    const modelRegistry = new ModelRegistry(modelsTomlPath, repo, {
+      extraProviders: [faux.provider],
+    });
+    const proxyRouter = new ScopedProxyRouter(hatoConfig.network?.proxies ?? []);
+    const runtime = new PersonaRuntime(hatoConfig, modelRegistry, proxyRouter, repo);
+
+    let compactionHasPersonaMarker = false;
+    let compactionToolCount = 0;
+    let compactionSawPriorToolCall = false;
+    let compactionReasoning: string | undefined;
+    let nextTurnSawCompactionInstruction = false;
+
+    faux.setResponses([
+      () =>
+        fauxAssistantMessage([fauxToolCall("calc", { expression: "12 * 12" })], {
+          stopReason: "toolUse",
+        }),
+      () => fauxAssistantMessage("12 * 12 = 144 呀"),
+      (ctx, options) => {
+        const sysMsg = ctx.messages.find((m) => m.role === "system") as
+          | { role: "system"; content?: string; toolsAdded?: Array<{ name: string }> }
+          | undefined;
+        const sysText = typeof sysMsg?.content === "string" ? sysMsg.content : ctx.systemPrompt ?? "";
+        compactionHasPersonaMarker = sysText.includes(personaMarker);
+        compactionToolCount = (sysMsg?.toolsAdded ?? ctx.tools ?? []).length;
+        compactionSawPriorToolCall = ctx.messages.some(
+          (m) =>
+            m.role === "assistant" &&
+            Array.isArray(m.content) &&
+            m.content.some((b) => b.type === "toolCall" && b.name === "calc"),
+        );
+        compactionReasoning = options?.reasoning;
+        return fauxAssistantMessage("用户让助手计算 12 * 12，助手已给出结果 144。");
+      },
+      (ctx) => {
+        nextTurnSawCompactionInstruction = JSON.stringify(ctx.messages).includes(
+          "上下文压缩（禁止调用任何工具",
+        );
+        return fauxAssistantMessage("在的呀");
+      },
+    ]);
+
+    await runtime.handleUserBatch({
+      canonicalUserId: "owner",
+      originChannel: "tg",
+      originPlatformUserId: "123456789",
+      platformMsgIds: ["m1"],
+      latestPlatformMsgId: "m1",
+      combinedText: "帮我算一下 12 * 12",
+      attachments: [],
+      firstTimestampMs: Date.now(),
+      lastTimestampMs: Date.now(),
+    });
+
+    const hot = repo.getHotMessages("owner", 0);
+    assert.equal(hot.length, 2);
+
+    const summary = await runtime.summarizeCompactionBlock({
+      canonicalUserId: "owner",
+      previousSummary: "",
+      messagesToSummarize: hot,
+    });
+
+    assert.equal(summary, "用户让助手计算 12 * 12，助手已给出结果 144。");
+    assert.equal(compactionHasPersonaMarker, true);
+    assert.ok(compactionToolCount > 0);
+    assert.equal(compactionSawPriorToolCall, true);
+    assert.equal(compactionReasoning, "high");
+
+    const trace = repo.getLatestTurnTrace("owner");
+    assert.ok(trace);
+    assert.equal(trace.slot, "persona");
+    assert.equal(trace.provider, "faux-provider");
+    assert.equal(trace.modelId, "faux-persona-1");
+    assert.ok(trace.userPreview.startsWith("[上下文压缩·复用对话]"));
+    assert.ok(trace.timeCardText.includes("compaction_mode: reuse_conversation"));
+    assert.ok(trace.timeCardText.includes("forked_live_prefix: true"));
+    assert.ok(trace.cacheReadTokens > 0);
+    assert.ok(trace.cacheHitRate > 0.7);
+
+    // Ensure the live session was NOT mutated by the read-only fork
+    await runtime.handleUserBatch({
+      canonicalUserId: "owner",
+      originChannel: "tg",
+      originPlatformUserId: "123456789",
+      platformMsgIds: ["m2"],
+      latestPlatformMsgId: "m2",
+      combinedText: "还在吗",
+      attachments: [],
+      firstTimestampMs: Date.now() + 100,
+      lastTimestampMs: Date.now() + 100,
+    });
+    assert.equal(nextTurnSawCompactionInstruction, false);
+  } finally {
+    dbHandle.close();
+    rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("summarizeCompactionBlock in reuse_conversation mode falls back to curator when model attempts tool call", async () => {
+  const faux = fauxProvider({
+    api: "hato-faux-api",
+    provider: "faux-provider",
+    models: [
+      { id: "faux-persona-1", name: "Faux Persona", reasoning: true },
+      { id: "faux-curator-1", name: "Faux Curator" },
+    ],
+    tokensPerSecond: 10000,
+  });
+
+  const tempDir = mkdtempSync(join(tmpdir(), "hato-fork-fallback-test-"));
+  const hatoTomlPath = join(tempDir, "hato.toml");
+  const modelsTomlPath = join(tempDir, "models.toml");
+
+  const defaultCfg = createDefaultHatoConfig();
+  defaultCfg.context.compaction_mode = "reuse_conversation";
+  writeHatoConfig(hatoTomlPath, defaultCfg, { backup: false });
+  writeFileSync(
+    modelsTomlPath,
+    `
+[slots]
+persona = "faux-provider/faux-persona-1"
+router = "faux-provider/faux-curator-1"
+curator = "faux-provider/faux-curator-1"
+worker = "faux-provider/faux-persona-1"
+hindsight_llm = "faux-provider/faux-curator-1"
+
+[slot_thinking]
+persona = "high"
+curator = "minimal"
+
+[providers]
+`,
+    "utf8",
+  );
+
+  const dbHandle = openDatabase(":memory:");
+  try {
+    const hatoConfig = loadHatoConfig(hatoTomlPath);
+    const repo = new HatoRepository(dbHandle.db);
+    const modelRegistry = new ModelRegistry(modelsTomlPath, repo, {
+      extraProviders: [faux.provider],
+    });
+    const proxyRouter = new ScopedProxyRouter(hatoConfig.network?.proxies ?? []);
+    const runtime = new PersonaRuntime(hatoConfig, modelRegistry, proxyRouter, repo);
+
+    repo.appendRawMessage({
+      canonicalUserId: "owner",
+      channel: "tg",
+      role: "user",
+      content: "帮我算一下 1+1",
+    });
+    repo.appendRawMessage({
+      canonicalUserId: "owner",
+      channel: "tg",
+      role: "assistant",
+      content: "等于 2。",
+    });
+    const hot = repo.getHotMessages("owner", 0);
+
+    faux.setResponses([
+      () =>
+        fauxAssistantMessage([fauxToolCall("calc", { expression: "1+1" })], {
+          stopReason: "toolUse",
+        }),
+      () => fauxAssistantMessage("回退摘要文本"),
+    ]);
+
+    const summary = await runtime.summarizeCompactionBlock({
+      canonicalUserId: "owner",
+      previousSummary: "",
+      messagesToSummarize: hot,
+    });
+
+    assert.equal(summary, "回退摘要文本");
+    const trace = repo.getLatestTurnTrace("owner");
+    assert.ok(trace);
+    assert.equal(trace.slot, "curator");
+    assert.equal(trace.modelId, "faux-curator-1");
   } finally {
     dbHandle.close();
     rmSync(tempDir, { recursive: true, force: true });

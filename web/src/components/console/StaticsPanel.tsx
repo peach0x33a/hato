@@ -264,7 +264,7 @@ export function StaticsPanel({ onToast, sessionEpoch = 0, sessionId = null }: St
         </div>
       </div>
 
-      <div className="min-h-0 flex-1 overflow-y-auto divide-y divide-border">
+      <div className="min-h-0 flex-1 overflow-y-auto [scrollbar-gutter:stable] divide-y divide-border">
         {viewState === "error" && (
           <div className="p-3 sm:p-4">
             <Alert variant="destructive" open>
@@ -472,10 +472,23 @@ export function StaticsPanel({ onToast, sessionEpoch = 0, sessionId = null }: St
             </div>
           ) : (
             <div className="overflow-x-auto">
-              <table className="w-full border-collapse text-left text-xs">
+              <table className="w-full min-w-[1140px] table-fixed border-collapse text-left text-xs">
+                <colgroup>
+                  <col className="w-8" />
+                  <col className="w-[74px]" />
+                  <col className="w-[260px]" />
+                  <col />
+                  <col className="w-[72px]" />
+                  <col className="w-[68px]" />
+                  <col className="w-[82px]" />
+                  <col className="w-[64px]" />
+                  <col className="w-[156px]" />
+                  <col className="w-[72px]" />
+                  <col className="w-[120px]" />
+                </colgroup>
                 <thead className="sticky top-0 z-10 bg-background text-[11px] text-muted-foreground">
                   <tr className="border-b border-border">
-                    <th className="w-6 py-2 pl-3" />
+                    <th className="py-2 pl-3" />
                     <th className="whitespace-nowrap py-2 pr-3 font-medium">时间</th>
                     <th className="whitespace-nowrap py-2 pr-3 font-medium">槽位与模型</th>
                     <th className="whitespace-nowrap py-2 pr-3 font-medium">输入 / 摘要</th>
@@ -516,21 +529,27 @@ export function StaticsPanel({ onToast, sessionEpoch = 0, sessionId = null }: St
                             })}
                           </td>
                           <td className="py-2 pr-2">
-                            <div className="flex flex-wrap items-center gap-1">
+                            <div className="flex min-w-0 flex-wrap items-center gap-1">
                               <SlotBadge slot={tr.slot} className="h-4 px-1 text-[10px]" />
-                              <span className="font-mono text-[11px] text-foreground">
+                              <span
+                                className="min-w-0 truncate font-mono text-[11px] text-foreground"
+                                title={`${tr.provider}/${tr.modelId}`}
+                              >
                                 {tr.provider}/{tr.modelId}
                               </span>
                               <ApiBadge api={tr.api} className="h-4 px-1 text-[10px]" />
                             </div>
                           </td>
-                          <td className="max-w-[200px] truncate py-2 pr-2 text-[11px] text-muted-foreground">
+                          <td
+                            className="truncate py-2 pr-2 text-[11px] text-muted-foreground"
+                            title={tr.userPreview || undefined}
+                          >
                             {tr.userPreview || "—"}
                           </td>
-                          <td className="py-2 pr-2 font-mono text-[11px] tabular-nums">
+                          <td className="whitespace-nowrap py-2 pr-2 font-mono text-[11px] tabular-nums">
                             {promptTotal.toLocaleString()}
                           </td>
-                          <td className="py-2 pr-2 font-mono text-[11px] tabular-nums text-emerald-600 dark:text-emerald-400">
+                          <td className="whitespace-nowrap py-2 pr-2 font-mono text-[11px] tabular-nums text-emerald-600 dark:text-emerald-400">
                             {tr.cacheReadTokens.toLocaleString()}
                           </td>
                           <td className="py-2 pr-2">
@@ -541,7 +560,7 @@ export function StaticsPanel({ onToast, sessionEpoch = 0, sessionId = null }: St
                               {(tr.cacheHitRate * 100).toFixed(1)}%
                             </AnimatedBadge>
                           </td>
-                          <td className="py-2 pr-2 font-mono text-[11px] tabular-nums">
+                          <td className="whitespace-nowrap py-2 pr-2 font-mono text-[11px] tabular-nums">
                             {tr.outputTokens.toLocaleString()}
                           </td>
                           <td
@@ -588,7 +607,7 @@ export function StaticsPanel({ onToast, sessionEpoch = 0, sessionId = null }: St
                         {expanded && (
                           <tr className="bg-muted/15">
                             <td colSpan={11} className="px-4 py-2.5">
-                              <pre className="max-h-44 overflow-y-auto whitespace-pre-wrap break-words border-l-2 border-primary/40 bg-muted/25 px-3 py-2 font-mono text-[11px] leading-relaxed text-foreground">
+                              <pre className="max-h-44 w-full max-w-full min-w-0 overflow-auto whitespace-pre-wrap [overflow-wrap:anywhere] border-l-2 border-primary/40 bg-muted/25 px-3 py-2 font-mono text-[11px] leading-relaxed text-foreground">
                                 {tr.timeCardText || "（无额外上下文快照）"}
                               </pre>
                             </td>

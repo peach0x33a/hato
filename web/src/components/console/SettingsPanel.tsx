@@ -104,6 +104,10 @@ const SETTINGS_NAV_ITEMS: SettingsNavItem[] = [
       "定时",
       "缓存",
       "clear_mode",
+      "上下文压缩",
+      "compaction_mode",
+      "curator",
+      "复用对话",
       "白名单",
       "telegram",
       "主题",
@@ -1230,9 +1234,35 @@ export function SettingsPanel({
             </SettingsCardGroup>
 
             <SettingsCardGroup
-              title="热区清空时机"
-              description="控制工作记忆热区何时归档长期记忆并清空"
+              title="上下文压缩与热区清空"
+              description="控制上下文摘要压缩方式，以及工作记忆热区何时归档长期记忆并清空"
             >
+              <SettingsRow
+                title="上下文压缩方式"
+                description="使用 curator 时以独立精简提示词低成本压缩；复用主对话时参照 CodingAgent 做法，以只读分支复用当前对话完整前缀（含系统提示词、工具声明与热区消息）命中提示词缓存，不修改当前会话且禁止执行工具"
+              >
+                <div className="w-full sm:w-64">
+                  <ConsoleSelect
+                    size="sm"
+                    value={draft.context.compaction_mode ?? "curator"}
+                    onValueChange={(v) =>
+                      setDraft((p) => ({
+                        ...p,
+                        context: {
+                          ...p.context,
+                          compaction_mode:
+                            v === "reuse_conversation" ? "reuse_conversation" : "curator",
+                        },
+                      }))
+                    }
+                    options={[
+                      { value: "curator", label: "使用 curator（独立低成本槽位）" },
+                      { value: "reuse_conversation", label: "复用主对话（只读分支命中缓存）" },
+                    ]}
+                  />
+                </div>
+              </SettingsRow>
+
               <SettingsRow
                 title="清空模式"
                 description="定时模式按每日固定时间清空（聊天时自动顺延）；缓存模式趁提示词缓存未过期时预摘要并在闲置后归档"

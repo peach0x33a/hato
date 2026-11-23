@@ -156,6 +156,9 @@ export const HatoConfigSchema = Type.Object({
     pre_compact_after_minutes: Type.Number({ minimum: 1 }),
     idle_commit_after_minutes: Type.Number({ minimum: 1 }),
     clear_mode: Type.Optional(Type.Union([Type.Literal("cache"), Type.Literal("scheduled")])),
+    compaction_mode: Type.Optional(
+      Type.Union([Type.Literal("curator"), Type.Literal("reuse_conversation")]),
+    ),
     scheduled_clear_time: Type.Optional(Type.String()),
     scheduled_defer_minutes: Type.Optional(Type.Number({ minimum: 1 })),
     gap_marker_threshold_minutes: Type.Number({ minimum: 1 }),
@@ -596,6 +599,17 @@ export function resolveContextClearConfig(config: HatoConfig): ResolvedContextCl
     scheduledClearTime: `${hh!.padStart(2, "0")}:${mm!}`,
     scheduledDeferMinutes: Math.max(1, config.context.scheduled_defer_minutes ?? 30),
   };
+}
+
+export type ContextCompactionMode = "curator" | "reuse_conversation";
+
+/**
+ * Resolve effective context compaction strategy ("curator" vs "reuse_conversation").
+ */
+export function resolveContextCompactionMode(config: HatoConfig): ContextCompactionMode {
+  return config.context.compaction_mode === "reuse_conversation"
+    ? "reuse_conversation"
+    : "curator";
 }
 
 /**

@@ -1,8 +1,14 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { Agent, type AgentMessage, type AgentTool } from "@earendil-works/pi-agent-core";
+import {
+  Agent,
+  DEFAULT_AGENT_IDENTITY,
+  type AgentMessage,
+  type AgentTool,
+} from "@earendil-works/pi-agent-core";
 import {
   createInitialSystemMessage,
+  normalizeContext,
   toToolDeclaration,
   type AssistantMessage,
   type ImageContent,
@@ -12,6 +18,7 @@ import {
 } from "@earendil-works/pi-ai";
 import type { BrowserRuntime, SendPhotoToUserFn } from "../browser/runtime.js";
 import {
+  resolveContextCompactionMode,
   resolveLlmRetryConfig,
   resolveMemoryRecallConfig,
   resolvePromptDisabled,
@@ -42,6 +49,7 @@ import {
   streamSimpleWithRetry,
   type LlmRetryNotice,
 } from "../utils/llm-retry.js";
+import { formatLocalDateTime } from "../time/clock.js";
 import { logWarn, summarizeError } from "../utils/logger.js";
 import { joinPersistedBubbles, splitIntoBubbles } from "./bubbles.js";
 import {
@@ -97,9 +105,16 @@ export interface PersonaTurnOutput {
   tps: number | null;
 }
 
+const COMPACTION_SYSTEM_PROMPT = [
+  "你是一个客观的上下文整理助手，负责将历史对话压缩为简洁的滚动过渡摘要。",
+  "- 用第三人称（“用户”“助手”）简洁记录：主要讨论的话题、用户明确提到的事实与时间点、尚未解决的事项。",
+  "- 不要延续角色扮演腔调，不要编造未发生的事情，控制在 350 字以内。",
+  "- 只输出整理后的摘要正文，不要额外寒暄或元解释。",
+].join("\n");
+
 /**
  * Manages the stateful Persona pi-agent-core runtime, prefix-layered context,
- * multi-protocol scoped streaming, and cache-warm compaction summarization.
+ * multi-protocol scoped streaming, and rolling context compaction summarization.
  */
 export class PersonaRuntime {
   private readonly agent: Agent;
@@ -118,6 +133,13 @@ export class PersonaRuntime {
   private activeTurnRecalledIds = new Set<string>();
   private activeTurn: ActivePersonaTurnState | null = null;
   private activeTurnEphemeralTail: {
+    tailText: string;
+    timeCardText: string;
+    timestamp: number;
+    anchorMessageId?: string;
+    anchorAgentIndex?: number;
+  } | null = null;
+  private lastCompletedEphemeralTail: {
     tailText: string;
     timeCardText: string;
     timestamp: number;
@@ -607,6 +629,7 @@ export class PersonaRuntime {
     this.agent.state.messages = leadingSystem ? [leadingSystem, ...history] : history;
     this.syncedCompactedUntilTs = this.repo.getWorkingMemory(canonicalUserId).compactedUntilTs;
     this.pendingTranscriptRefresh = false;
+    this.lastCompletedEphemeralTail = null;
   }
 
   private syncTranscriptIfDrifted(canonicalUserId: string): void {
@@ -663,6 +686,7 @@ export class PersonaRuntime {
 
     if (changed) {
       this.agent.state.messages = pruned;
+      this.lastCompletedEphemeralTail = null;
     }
   }
 
@@ -973,6 +997,7 @@ export class PersonaRuntime {
    */
   resetSession(): void {
     this.lastTimeCardSnapshot = "";
+    this.lastCompletedEphemeralTail = null;
     this.pendingSupersededImages.clear();
     this.sessionTools.clear();
     this.agent.clearAllQueues();
@@ -1327,6 +1352,9 @@ export class PersonaRuntime {
       telemetry.unsubscribe();
       this.activeCallStartPerf = null;
       this.activeTurnRecalledMemories = [];
+      if (!promptErr && !turnState.abortedForSupersede && this.activeTurnEphemeralTail) {
+        this.lastCompletedEphemeralTail = this.activeTurnEphemeralTail;
+      }
       this.activeTurnEphemeralTail = null;
       this.liveTraceTracker?.finish(liveTraceId);
       if (this.activeTurn === turnState) {
@@ -1635,6 +1663,9 @@ export class PersonaRuntime {
     } finally {
       telemetry.unsubscribe();
       this.activeCallStartPerf = null;
+      if (!promptErr && !this.agent.state.errorMessage && this.activeTurnEphemeralTail) {
+        this.lastCompletedEphemeralTail = this.activeTurnEphemeralTail;
+      }
       this.activeTurnEphemeralTail = null;
       this.liveTraceTracker?.finish(liveTraceId);
     }
@@ -1838,20 +1869,27 @@ export class PersonaRuntime {
   }
 
   /**
-   * Reuse the exact Persona model and static+hot prefix for cache-warm compaction summary.
+   * Summarize a block of hot messages into a rolling transition summary according to
+   * `context.compaction_mode` ("curator" vs "reuse_conversation").
    */
-  async summarizeBlockWithWarmPrefix(params: {
+  async summarizeCompactionBlock(params: {
     canonicalUserId: string;
     previousSummary: string;
     messagesToSummarize: RawMessageRecord[];
   }): Promise<string> {
-    const resolved = this.modelRegistry.resolveSlot("persona");
-    const systemPrompt = buildStaticSystemPrompt(
-      this.basePersonaPrompt,
-      this.repo,
-      this.personalSkillsIndexText,
-      this.toolIndexText,
-    );
+    if (resolveContextCompactionMode(this.hatoConfig) === "reuse_conversation") {
+      return this.summarizeCompactionByForkingConversation(params);
+    }
+    return this.summarizeCompactionWithCurator(params);
+  }
+
+  private async summarizeCompactionWithCurator(params: {
+    canonicalUserId: string;
+    previousSummary: string;
+    messagesToSummarize: RawMessageRecord[];
+  }): Promise<string> {
+    const resolved = this.modelRegistry.resolveSlot("curator");
+    const systemPrompt = COMPACTION_SYSTEM_PROMPT;
     const tz = this.getEffectiveTimezone(params.canonicalUserId);
 
     const agentMessages: AgentMessage[] = [];
@@ -1883,18 +1921,15 @@ export class PersonaRuntime {
 
     llmMessages.push({
       role: "user",
-      content: [
-        "【系统内部指令：请客观整理以上历史对话为滚动过渡摘要】",
-        "- 用第三人称（“用户”“助手”）简洁记录：主要讨论的话题、用户明确提到的事实与时间点、尚未解决的事项。",
-        "- 不要延续角色扮演腔调，不要编造未发生的事情，控制在 350 字以内。",
-      ].join("\n"),
+      content:
+        "请基于以上历史对话（含已有前情摘要，如有）生成更新后的滚动过渡摘要，严格控制在 350 字以内。",
       timestamp: Date.now(),
     });
 
     const apiKey = this.modelRegistry.resolveApiKeyForProvider(resolved.providerSlug);
     const scopedFetch = this.proxyRouter.createScopedFetch(`llm-calling.${resolved.providerSlug}`);
 
-    const compactionThinking = this.modelRegistry.resolveSlotThinkingLevel("persona");
+    const compactionThinking = this.modelRegistry.resolveSlotThinkingLevel("curator");
 
     const callStartPerf = performance.now();
     let firstDeltaPerf: number | null = null;
@@ -1906,7 +1941,7 @@ export class PersonaRuntime {
             { systemPrompt, messages: llmMessages },
             {
               apiKey,
-              sessionId: params.canonicalUserId,
+              sessionId: `${params.canonicalUserId}:compaction`,
               disableContinuation: true,
               ...(supportsCustomFetchOption(resolved.model.api) ? { fetch: scopedFetch } : {}),
               reasoning: compactionThinking === "off" ? undefined : compactionThinking,
@@ -1939,7 +1974,7 @@ export class PersonaRuntime {
 
     console.log(
       formatLlmTelemetryLog({
-        slot: "compaction-warm",
+        slot: "curator-compact",
         provider: result.provider,
         modelId: result.model,
         responseModel: result.responseModel,
@@ -1975,11 +2010,12 @@ export class PersonaRuntime {
       ttftMs,
       decodeMs,
     });
+    const prevSummaryChars = params.previousSummary.trim().length;
     this.repo.insertTurnTrace({
       canonicalUserId: params.canonicalUserId,
       slot: "curator",
       provider: resolved.providerSlug,
-      modelId: result.model,
+      modelId: result.model || resolved.model.id,
       api: String(result.api),
       inputTokens: result.usage.input,
       outputTokens: result.usage.output,
@@ -1988,15 +2024,248 @@ export class PersonaRuntime {
       cacheHitRate: curatorMetrics.cacheHitRate,
       ttftMs,
       tps: curatorMetrics.decodeTps,
-      userPreview: `[记忆整理] 压缩 ${params.messagesToSummarize.length} 条历史对话`,
+      userPreview: `[上下文压缩] 压缩 ${params.messagesToSummarize.length} 条历史对话`,
       recalledIds: [],
-      timeCardText: `compacted_messages: ${params.messagesToSummarize.length}\nwarm_prefix_slot: persona`,
+      timeCardText: [
+        "task: context_compaction",
+        "compaction_mode: curator",
+        `compacted_messages: ${params.messagesToSummarize.length}`,
+        `timezone: ${tz}`,
+        prevSummaryChars > 0 ? `previous_summary_chars: ${prevSummaryChars}` : "",
+      ]
+        .filter(Boolean)
+        .join("\n"),
       toolCalls: [],
       steps: extractTraceSteps([result]),
       latencyMs,
     });
 
     return extractAssistantText(result).trim();
+  }
+
+  /**
+   * Cache-safe read-only forked compaction (CodingAgent pattern):
+   * clones the live Persona wire prefix (system prompt, tool declarations, conversation history,
+   * and last completed ephemeral tail) without mutating `this.agent.state.messages`, appends a
+   * single no-tool compaction prompt, and falls back to `curator` if tools/empty output occur.
+   */
+  private async summarizeCompactionByForkingConversation(params: {
+    canonicalUserId: string;
+    previousSummary: string;
+    messagesToSummarize: RawMessageRecord[];
+  }): Promise<string> {
+    const resolved = this.modelRegistry.resolveSlot("persona");
+    const tz = this.getEffectiveTimezone(params.canonicalUserId);
+
+    const isOwner = params.canonicalUserId === this.hatoConfig.owner.canonical_user_id;
+    const liveMessages = isOwner ? this.agent.state.messages : [];
+    const hasLivePrefix = liveMessages.some((m) => m.role === "system");
+
+    const forkedAgentMessages: AgentMessage[] = [];
+    if (hasLivePrefix) {
+      forkedAgentMessages.push(...liveMessages);
+      const tail = this.lastCompletedEphemeralTail;
+      if (tail) {
+        const anchorMatches =
+          (tail.anchorMessageId !== undefined &&
+            forkedAgentMessages.some(
+              (m) => "id" in m && typeof m.id === "string" && m.id === tail.anchorMessageId,
+            )) ||
+          (tail.anchorAgentIndex !== undefined &&
+            tail.anchorAgentIndex >= 0 &&
+            tail.anchorAgentIndex < forkedAgentMessages.length);
+        if (anchorMatches) {
+          forkedAgentMessages.push({
+            role: "hato_ephemeral_tail",
+            text: tail.tailText,
+            timestamp: tail.timestamp,
+            anchorMessageId: tail.anchorMessageId,
+            anchorAgentIndex: tail.anchorAgentIndex,
+          });
+        }
+      }
+    } else {
+      const leadingSystem = createInitialSystemMessage(
+        buildStaticSystemPrompt(
+          this.basePersonaPrompt,
+          this.repo,
+          this.personalSkillsIndexText,
+          this.toolIndexText,
+        ),
+        this.agent.state.tools.map(toToolDeclaration),
+      );
+      if (leadingSystem) {
+        forkedAgentMessages.push(leadingSystem);
+      }
+      if (params.previousSummary.trim()) {
+        forkedAgentMessages.push({
+          role: "hato_compaction_summary",
+          text: params.previousSummary,
+          compactedUntilTs: params.messagesToSummarize[0]?.createdAt ?? Date.now(),
+          timestamp: params.messagesToSummarize[0]?.createdAt ?? Date.now(),
+        });
+      }
+      for (const row of params.messagesToSummarize) {
+        if (row.role === "assistant") {
+          const cleaned = stripErrorInterruptionNotices(row.content);
+          if (!cleaned && row.attachments.length === 0) {
+            continue;
+          }
+          forkedAgentMessages.push(rawRecordToAgentMessage({ ...row, content: cleaned }, this.repo));
+        } else {
+          forkedAgentMessages.push(rawRecordToAgentMessage(row, this.repo));
+        }
+      }
+    }
+
+    const llmMessages: Message[] = convertHatoMessagesToLlm(forkedAgentMessages, {
+      getTimezone: () => tz,
+      gapMarkerThresholdMinutes: this.hatoConfig.context.gap_marker_threshold_minutes,
+      modelApi: resolved.model.api,
+    });
+
+    const lastCompact = params.messagesToSummarize[params.messagesToSummarize.length - 1];
+    const cutoffStamp = lastCompact ? formatLocalDateTime(lastCompact.createdAt, tz).compactStamp : "";
+    const cutoffSnippet = lastCompact?.content.replace(/\s+/g, " ").trim().slice(0, 60) ?? "";
+    const scopeLine =
+      hasLivePrefix && lastCompact
+        ? `- 压缩范围：整合已有前情摘要（如有）与截至 [${cutoffStamp}]${cutoffSnippet ? `（“${cutoffSnippet}”）` : ""}为止的较早 ${params.messagesToSummarize.length} 条历史对话；该时间点之后仍保留在热区的最近消息不要重复写进摘要。`
+        : `- 压缩范围：整合以上历史对话（含已有前情摘要，如有），共 ${params.messagesToSummarize.length} 条。`;
+
+    llmMessages.push({
+      role: "user",
+      content: [
+        "【系统内部指令：上下文压缩（禁止调用任何工具，仅输出纯文本摘要）】",
+        "- 本请求是只读分支，用于生成后续对话的滚动过渡摘要，绝对不要调用任何工具，不要向用户寒暄或回复。",
+        scopeLine,
+        "- 用第三人称（“用户”“助手”）客观简洁记录：核心话题与进展、用户明确提到的事实/偏好/约定与具体时间点、尚未解决的待办事项。",
+        "- 不要延续角色扮演腔调，不要编造未发生的事情，严格控制在 350 字以内，只输出摘要正文。",
+      ].join("\n"),
+      timestamp: Date.now(),
+    });
+
+    const llmContext = normalizeContext({ messages: llmMessages });
+    const apiKey = this.modelRegistry.resolveApiKeyForProvider(resolved.providerSlug);
+    const scopedFetch = this.proxyRouter.createScopedFetch(`llm-calling.${resolved.providerSlug}`);
+
+    const compactionThinking = this.modelRegistry.resolveSlotThinkingLevel("persona");
+
+    const callStartPerf = performance.now();
+    let firstDeltaPerf: number | null = null;
+    const result = await this.proxyRouter.runWithScope(`llm-calling.${resolved.providerSlug}`, async () => {
+      const stream = streamSimpleWithRetry(
+        () =>
+          this.modelRegistry.models.streamSimple(resolved.model, llmContext, {
+            apiKey,
+            sessionId: params.canonicalUserId,
+            disableContinuation: true,
+            identity: DEFAULT_AGENT_IDENTITY,
+            ...(supportsCustomFetchOption(resolved.model.api) ? { fetch: scopedFetch } : {}),
+            reasoning: compactionThinking === "off" ? undefined : compactionThinking,
+          }),
+        {
+          policy: resolveLlmRetryConfig(this.hatoConfig),
+          model: resolved.model,
+          slot: "COMPACTION",
+        },
+      );
+      for await (const ev of stream) {
+        if (
+          firstDeltaPerf === null &&
+          (ev.type === "text_delta" || ev.type === "thinking_delta" || ev.type === "toolcall_delta") &&
+          ev.delta.length > 0
+        ) {
+          firstDeltaPerf = performance.now();
+        }
+      }
+      return stream.result();
+    });
+
+    const nowPerf = performance.now();
+    const latencyMs = Math.max(1, Math.round(nowPerf - callStartPerf));
+    const ttftMs =
+      firstDeltaPerf !== null ? Math.max(0, Math.round(firstDeltaPerf - callStartPerf)) : latencyMs;
+    const decodeMs =
+      firstDeltaPerf !== null ? Math.max(1, nowPerf - firstDeltaPerf) : undefined;
+
+    console.log(
+      formatLlmTelemetryLog({
+        slot: "persona-compact",
+        provider: result.provider,
+        modelId: result.model,
+        responseModel: result.responseModel,
+        responseId: result.responseId,
+        api: String(result.api),
+        stopReason: result.stopReason,
+        rawStopReason: result.rawStopReason,
+        thinkingLevel: result.providerThinkingLevel ?? result.thinkingLevel,
+        inputTokens: result.usage.input,
+        outputTokens: result.usage.output,
+        reasoningTokens: result.usage.reasoning,
+        cacheReadTokens: result.usage.cacheRead,
+        cacheWriteTokens: result.usage.cacheWrite,
+        cacheWrite1hTokens: result.usage.cacheWrite1h,
+        costTotal: result.usage.cost.total,
+        ttftMs,
+        decodeMs,
+        latencyMs,
+        timeZone: this.hatoConfig.owner.timezone,
+      }),
+    );
+
+    if (result.stopReason === "error" || result.stopReason === "aborted") {
+      throw new Error(result.errorMessage || "Forked compaction summary generation failed");
+    }
+
+    const metrics = computeTurnMetrics({
+      inputTokens: result.usage.input,
+      outputTokens: result.usage.output,
+      cacheReadTokens: result.usage.cacheRead,
+      cacheWriteTokens: result.usage.cacheWrite,
+      latencyMs,
+      ttftMs,
+      decodeMs,
+    });
+    const prevSummaryChars = params.previousSummary.trim().length;
+    this.repo.insertTurnTrace({
+      canonicalUserId: params.canonicalUserId,
+      slot: "persona",
+      provider: resolved.providerSlug,
+      modelId: result.model || resolved.model.id,
+      api: String(result.api),
+      inputTokens: result.usage.input,
+      outputTokens: result.usage.output,
+      cacheReadTokens: result.usage.cacheRead,
+      cacheWriteTokens: result.usage.cacheWrite,
+      cacheHitRate: metrics.cacheHitRate,
+      ttftMs,
+      tps: metrics.decodeTps,
+      userPreview: `[上下文压缩·复用对话] 压缩 ${params.messagesToSummarize.length} 条历史对话`,
+      recalledIds: [],
+      timeCardText: [
+        "task: context_compaction",
+        "compaction_mode: reuse_conversation",
+        `forked_live_prefix: ${hasLivePrefix}`,
+        `compacted_messages: ${params.messagesToSummarize.length}`,
+        `timezone: ${tz}`,
+        prevSummaryChars > 0 ? `previous_summary_chars: ${prevSummaryChars}` : "",
+      ]
+        .filter(Boolean)
+        .join("\n"),
+      toolCalls: [],
+      steps: extractTraceSteps([result]),
+      latencyMs,
+    });
+
+    const summaryText = extractAssistantText(result).trim();
+    if (!summaryText) {
+      logWarn(
+        "COMPACTION",
+        `reuse_conversation compaction returned empty text (stopReason=${result.stopReason}); falling back to curator slot`,
+      );
+      return this.summarizeCompactionWithCurator(params);
+    }
+    return summaryText;
   }
 }
 

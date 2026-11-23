@@ -651,7 +651,7 @@ async function main(): Promise<void> {
     repo,
     actorLock,
     {
-      summarizeBlock: (params) => personaRuntime.summarizeBlockWithWarmPrefix(params),
+      summarizeBlock: (params) => personaRuntime.summarizeCompactionBlock(params),
       ensureRetained: async (canonicalUserId, messages) => {
         await memoryCurator.retainBeforeCompaction(canonicalUserId, messages);
       },
