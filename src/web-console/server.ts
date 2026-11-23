@@ -23,6 +23,7 @@ import {
 } from "../config/app.js";
 import type { ModelRegistry } from "../config/models.js";
 import { ModelsDevRegistry } from "../config/models-dev.js";
+import { fetchUpstreamModels } from "../config/upstream-models.js";
 import type { ScopedProxyRouter } from "../config/proxy.js";
 import { getOptionalSecret, reloadSecretEnv } from "../config/secrets.js";
 import {
@@ -227,7 +228,10 @@ export class WebConsoleServer {
     this.staticDir = resolve(deps.staticDir ?? "web/dist");
     this.modelsDevRegistry =
       deps.modelsDevRegistry ??
-      new ModelsDevRegistry({ getProxyRouter: deps.getProxyRouter });
+      new ModelsDevRegistry({
+        cacheFilePath: resolve("data/models-dev-cache.json"),
+        getProxyRouter: deps.getProxyRouter,
+      });
   }
 
   getAddress(): { host: string; port: number } | null {
@@ -252,6 +256,7 @@ export class WebConsoleServer {
     const cfg = resolveWebConsoleConfig(this.deps.getConfig());
     if (!cfg.enabled) return null;
     if (this.server) return this.getAddress();
+    this.modelsDevRegistry.warmCache();
     if (!isLoopbackHost(cfg.host) && !getOptionalSecret(cfg.authTokenEnv)) {
       const msg = cfg.authTokenEnv
         ? `Web Console is bound to non-loopback host "${cfg.host}" without ${cfg.authTokenEnv}. Set ${cfg.authTokenEnv} in .env if exposed beyond a trusted LAN.`
@@ -425,6 +430,10 @@ export class WebConsoleServer {
         }
         if (pathname === "/api/config/models/test" && method === "POST") {
           await this.handleTestModel(req, res);
+          return;
+        }
+        if (pathname === "/api/config/models/upstream" && method === "POST") {
+          await this.handleFetchUpstreamModels(req, res);
           return;
         }
         if (pathname === "/api/models-dev/lookup" && method === "GET") {
@@ -2068,6 +2077,116 @@ export class WebConsoleServer {
     sendJson(res, 200, { ok: true, profiles });
   }
 
+  private checkApiKeyEnvOriginAllowed(
+    api: string,
+    apiKeyEnv: string,
+    apiKeyOverride: string | undefined,
+    targetBaseUrl: string,
+  ): { ok: true } | { ok: false; status: number; error: string } {
+    if (api === "hato-faux-api" || apiKeyOverride || !apiKeyEnv) {
+      return { ok: true };
+    }
+    const registry = this.deps.getModelRegistry();
+    const providers = registry.listProviders();
+    const fileConfig = registry.getFileConfig();
+    const matchingProviders = providers.filter((p) => p.apiKeyEnv === apiKeyEnv);
+    let targetOrigin: string;
+    try {
+      targetOrigin = new URL(targetBaseUrl).origin;
+    } catch {
+      return { ok: false, status: 400, error: "无效的 Base URL" };
+    }
+    for (const p of matchingProviders) {
+      const provCfg = fileConfig.providers[p.slug];
+      const candidateUrls = [
+        p.baseUrl,
+        ...(provCfg?.models.map((m) => m.base_url).filter((u): u is string => Boolean(u)) ?? []),
+      ];
+      for (const candidate of candidateUrls) {
+        try {
+          if (new URL(candidate).origin === targetOrigin) {
+            return { ok: true };
+          }
+        } catch {
+          // ignore invalid stored URL
+        }
+      }
+    }
+    return {
+      ok: false,
+      status: 403,
+      error:
+        "出于安全限制，未显式传入 API Key 时仅允许将已配置供应商的密钥变量发往其已保存的 Base URL 源站。",
+    };
+  }
+
+  private toStringMap(raw: unknown): Record<string, string> | undefined {
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) return undefined;
+    const entries = Object.entries(raw as Record<string, unknown>)
+      .filter(([k, v]) => k.trim().length > 0 && v !== undefined && v !== null)
+      .map(([k, v]) => [k, String(v)] as const);
+    return entries.length > 0 ? Object.fromEntries(entries) : undefined;
+  }
+
+  private async handleFetchUpstreamModels(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    const body = (await readJsonBody(req)) as {
+      providerSlug?: unknown;
+      api?: unknown;
+      baseUrl?: unknown;
+      apiKeyEnv?: unknown;
+      apiKeyOverride?: unknown;
+      providerHeaders?: unknown;
+    };
+
+    const providerSlug = typeof body.providerSlug === "string" ? body.providerSlug.trim() : "";
+    const api = typeof body.api === "string" ? body.api.trim() : "";
+    const baseUrl = typeof body.baseUrl === "string" ? body.baseUrl.trim() : "";
+    const apiKeyEnv = typeof body.apiKeyEnv === "string" ? body.apiKeyEnv.trim() : "";
+    const apiKeyOverride = typeof body.apiKeyOverride === "string" ? body.apiKeyOverride.trim() : undefined;
+
+    if (!providerSlug || !api || !baseUrl) {
+      sendJson(res, 400, { ok: false, error: "拉取上游模型需要提供供应商名称、协议与 Base URL" });
+      return;
+    }
+
+    const originCheck = this.checkApiKeyEnvOriginAllowed(api, apiKeyEnv, apiKeyOverride, baseUrl);
+    if (!originCheck.ok) {
+      sendJson(res, originCheck.status, { ok: false, error: originCheck.error });
+      return;
+    }
+
+    const envOverrides = readEnvMap(this.envPath);
+    const effectiveApiKey =
+      apiKeyOverride ||
+      (apiKeyEnv ? envOverrides[apiKeyEnv] || process.env[apiKeyEnv] : undefined);
+
+    try {
+      const result = await fetchUpstreamModels({
+        providerSlug,
+        api,
+        baseUrl,
+        apiKey: effectiveApiKey,
+        providerHeaders: this.toStringMap(body.providerHeaders),
+        proxyRouter: this.deps.getProxyRouter(),
+      });
+      const enriched = result.models.map((item) => {
+        const matched = this.modelsDevRegistry.matchModelFromCache(item.id, {
+          providerSlug,
+          api,
+        });
+        return matched ? { ...item, modelsDev: matched } : item;
+      });
+      sendJson(res, 200, {
+        ok: true,
+        models: enriched,
+        fetchedFrom: result.fetchedFrom,
+        latencyMs: result.latencyMs,
+      });
+    } catch (err) {
+      sendJson(res, 502, { ok: false, error: summarizeError(err) });
+    }
+  }
+
   private async handleTestModel(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const body = (await readJsonBody(req)) as {
       providerSlug?: unknown;
@@ -2104,53 +2223,16 @@ export class WebConsoleServer {
     // Guard against exfiltrating arbitrary env secrets to attacker-controlled baseUrls.
     const effectiveTestBaseUrl =
       (typeof body.model?.base_url === "string" && body.model.base_url.trim()) || baseUrl;
-    if (api !== "hato-faux-api" && !apiKeyOverride && apiKeyEnv) {
-      const registry = this.deps.getModelRegistry();
-      const providers = registry.listProviders();
-      const fileConfig = registry.getFileConfig();
-      const matchingProviders = providers.filter((p) => p.apiKeyEnv === apiKeyEnv);
-      let allowedOrigin = false;
-      try {
-        const targetOrigin = new URL(effectiveTestBaseUrl).origin;
-        for (const p of matchingProviders) {
-          const provCfg = fileConfig.providers[p.slug];
-          const candidateUrls = [
-            p.baseUrl,
-            ...(provCfg?.models.map((m) => m.base_url).filter((u): u is string => Boolean(u)) ?? []),
-          ];
-          for (const candidate of candidateUrls) {
-            try {
-              if (new URL(candidate).origin === targetOrigin) {
-                allowedOrigin = true;
-                break;
-              }
-            } catch {
-              // ignore invalid stored URL
-            }
-          }
-          if (allowedOrigin) break;
-        }
-      } catch {
-        sendJson(res, 400, { ok: false, error: "无效的 Base URL" });
-        return;
-      }
-      if (!allowedOrigin) {
-        sendJson(res, 403, {
-          ok: false,
-          error:
-            "出于安全限制，未显式传入 API Key 时仅允许将已配置供应商的密钥变量发往其已保存的 Base URL 源站。",
-        });
-        return;
-      }
+    const originCheck = this.checkApiKeyEnvOriginAllowed(
+      api,
+      apiKeyEnv,
+      apiKeyOverride,
+      effectiveTestBaseUrl,
+    );
+    if (!originCheck.ok) {
+      sendJson(res, originCheck.status, { ok: false, error: originCheck.error });
+      return;
     }
-
-    const toStringMap = (raw: unknown): Record<string, string> | undefined => {
-      if (!raw || typeof raw !== "object" || Array.isArray(raw)) return undefined;
-      const entries = Object.entries(raw as Record<string, unknown>)
-        .filter(([k, v]) => k.trim().length > 0 && v !== undefined && v !== null)
-        .map(([k, v]) => [k, String(v)] as const);
-      return entries.length > 0 ? Object.fromEntries(entries) : undefined;
-    };
 
     const result = await probeAdHocModel({
       providerSlug,
@@ -2158,13 +2240,13 @@ export class WebConsoleServer {
       baseUrl,
       apiKeyEnv,
       apiKeyOverride,
-      providerHeaders: toStringMap(body.providerHeaders),
+      providerHeaders: this.toStringMap(body.providerHeaders),
       model: {
         id: modelId,
         name: typeof body.model?.name === "string" ? body.model.name.trim() : undefined,
         api: typeof body.model?.api === "string" ? body.model.api.trim() : undefined,
         base_url: typeof body.model?.base_url === "string" ? body.model.base_url.trim() : undefined,
-        headers: toStringMap(body.model?.headers),
+        headers: this.toStringMap(body.model?.headers),
         reasoning: typeof body.model?.reasoning === "boolean" ? body.model.reasoning : undefined,
         input: Array.isArray(body.model?.input)
           ? (body.model.input.filter((x) => x === "text" || x === "image") as Array<"text" | "image">)

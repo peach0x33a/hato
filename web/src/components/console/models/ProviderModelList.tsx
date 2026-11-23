@@ -68,7 +68,7 @@ interface ProviderModelListProps {
   onAddProvider: () => void;
   onConfigureProvider: (providerUid: string) => void;
   onRequestDeleteProvider: (providerUid: string) => void;
-  onAddModel: (providerUid: string) => void;
+  onOpenAddModelModal: (providerUid: string, initialTab?: "upstream" | "manual") => void;
   onTestProviderAll: (providerUid: string) => void;
 }
 
@@ -91,7 +91,7 @@ export function ProviderModelList({
   onAddProvider,
   onConfigureProvider,
   onRequestDeleteProvider,
-  onAddModel,
+  onOpenAddModelModal,
   onTestProviderAll,
 }: ProviderModelListProps) {
   const searchInputRef = useRef<HTMLInputElement | null>(null);
@@ -360,6 +360,21 @@ export function ProviderModelList({
                         </button>
                       ) : null}
 
+                      <button
+                        type="button"
+                        onClick={() =>
+                          onOpenAddModelModal(
+                            provider.uid,
+                            provider.protocol === "hato-faux-api" ? "manual" : "upstream",
+                          )
+                        }
+                        title="添加或从上游管理模型"
+                        className="inline-flex h-6 items-center gap-1 rounded-md px-1.5 text-[11px] font-medium text-emerald-600 transition-colors hover:bg-emerald-500/10 dark:text-emerald-400"
+                      >
+                        <Plus className="h-3 w-3" />
+                        <span>管理</span>
+                      </button>
+
                       <div
                         className="relative"
                         onMouseDown={(e) => e.stopPropagation()}
@@ -376,17 +391,28 @@ export function ProviderModelList({
                         </button>
 
                         {menuOpen ? (
-                          <div className="absolute right-0 z-30 mt-1 w-40 rounded-lg border border-zinc-200 bg-white py-1 shadow-lg dark:border-zinc-800 dark:bg-[#131a1f]">
+                          <div className="absolute right-0 z-30 mt-1 w-44 rounded-lg border border-zinc-200 bg-white py-1 shadow-lg dark:border-zinc-800 dark:bg-[#131a1f]">
                             <button
                               type="button"
                               onClick={() => {
                                 setOpenMenuProviderUid(null);
-                                onAddModel(provider.uid);
+                                onOpenAddModelModal(provider.uid, "upstream");
                               }}
                               className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs text-zinc-700 hover:bg-zinc-100 dark:text-zinc-200 dark:hover:bg-zinc-800"
                             >
                               <Plus className="h-3.5 w-3.5" />
-                              <span>添加模型</span>
+                              <span>从上游管理模型</span>
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setOpenMenuProviderUid(null);
+                                onOpenAddModelModal(provider.uid, "manual");
+                              }}
+                              className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs text-zinc-700 hover:bg-zinc-100 dark:text-zinc-200 dark:hover:bg-zinc-800"
+                            >
+                              <Plus className="h-3.5 w-3.5" />
+                              <span>手动添加模型</span>
                             </button>
                             <button
                               type="button"
@@ -434,14 +460,25 @@ export function ProviderModelList({
                     {visibleModels.length === 0 ? (
                       <div className="flex items-center justify-between gap-2 rounded-lg border border-dashed border-zinc-200 px-3 py-2.5 text-xs text-zinc-500 dark:border-zinc-800 dark:text-zinc-400">
                         <span>暂无模型</span>
-                        <button
-                          type="button"
-                          onClick={() => onAddModel(provider.uid)}
-                          className="inline-flex items-center gap-1 font-medium text-emerald-600 hover:underline dark:text-emerald-400"
-                        >
-                          <Plus className="h-3 w-3" />
-                          <span>添加模型</span>
-                        </button>
+                        <div className="flex items-center gap-2">
+                          {provider.protocol !== "hato-faux-api" ? (
+                            <button
+                              type="button"
+                              onClick={() => onOpenAddModelModal(provider.uid, "upstream")}
+                              className="inline-flex items-center gap-1 font-medium text-emerald-600 hover:underline dark:text-emerald-400"
+                            >
+                              <Plus className="h-3 w-3" />
+                              <span>从上游拉取</span>
+                            </button>
+                          ) : null}
+                          <button
+                            type="button"
+                            onClick={() => onOpenAddModelModal(provider.uid, "manual")}
+                            className="inline-flex items-center gap-1 font-medium text-zinc-600 hover:underline dark:text-zinc-300"
+                          >
+                            <span>手动添加</span>
+                          </button>
+                        </div>
                       </div>
                     ) : (
                       visibleModels.map((model) => {
@@ -612,6 +649,21 @@ export function ProviderModelList({
                         );
                       })
                     )}
+                    {visibleModels.length > 0 ? (
+                      <button
+                        type="button"
+                        onClick={() =>
+                          onOpenAddModelModal(
+                            provider.uid,
+                            provider.protocol === "hato-faux-api" ? "manual" : "upstream",
+                          )
+                        }
+                        className="mt-0.5 flex w-full items-center justify-center gap-1.5 rounded-lg border border-dashed border-zinc-200/90 py-1.5 text-[11px] font-medium text-zinc-500 transition-colors hover:border-emerald-500/40 hover:bg-emerald-500/5 hover:text-emerald-600 dark:border-zinc-800 dark:text-zinc-400 dark:hover:text-emerald-400"
+                      >
+                        <Plus className="h-3 w-3" />
+                        <span>添加 / 管理模型</span>
+                      </button>
+                    ) : null}
                   </div>
                 ) : null}
               </div>

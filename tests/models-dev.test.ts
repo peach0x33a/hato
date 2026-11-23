@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -146,6 +146,102 @@ test("models.toml schema validates and persists models_dev mapping", () => {
     const loaded = loadModelsFileConfig(modelsToml);
     assert.equal(loaded.providers.relay?.models[0]?.models_dev?.enabled, true);
     assert.equal(loaded.providers.relay?.models[0]?.models_dev?.model_ref, "openai/gpt-4o");
+  } finally {
+    rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("ModelsDevRegistry persists catalog to disk, supports SWR, and matches cached models", async () => {
+  const tempDir = mkdtempSync(join(tmpdir(), "hato-md-cache-"));
+  const cacheFilePath = join(tempDir, "models-dev-cache.json");
+  try {
+    let firstFetchCount = 0;
+    const writer = new ModelsDevRegistry({
+      cacheFilePath,
+      cacheTtlMs: 60_000,
+      fetcher: async () => {
+        firstFetchCount += 1;
+        return new Response(JSON.stringify(SAMPLE_CATALOG), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      },
+    });
+
+    const initial = await writer.lookup("openai/gpt-4o");
+    assert.ok(initial);
+    assert.equal(firstFetchCount, 1);
+    assert.equal(existsSync(cacheFilePath), true);
+
+    // Second instance reads from disk with 0 network calls
+    let secondFetchCount = 0;
+    const reader = new ModelsDevRegistry({
+      cacheFilePath,
+      cacheTtlMs: 60_000,
+      fetcher: async () => {
+        secondFetchCount += 1;
+        return new Response("should not be called", { status: 500 });
+      },
+    });
+    const matched = reader.matchModelFromCache("gpt-4o", { api: "openai-responses" });
+    assert.ok(matched);
+    assert.equal(matched.ref, "openai/gpt-4o");
+    const searchItems = await reader.search("deepseek");
+    assert.equal(searchItems.length, 1);
+    assert.equal(secondFetchCount, 0);
+
+    // Stale disk cache returns immediately while refreshing in background
+    const stalePayload = {
+      version: 1,
+      fetchedAtMs: Date.now() - 120_000,
+      catalog: SAMPLE_CATALOG,
+    };
+    writeFileSync(cacheFilePath, JSON.stringify(stalePayload), "utf8");
+
+    const updatedCatalog: ModelsDevCatalog = {
+      ...SAMPLE_CATALOG,
+      openai: {
+        id: "openai",
+        name: "OpenAI",
+        models: {
+          ...SAMPLE_CATALOG.openai?.models,
+          "gpt-4.1": {
+            id: "gpt-4.1",
+            name: "GPT-4.1",
+            reasoning: false,
+            modalities: { input: ["text", "image"], output: ["text"] },
+            limit: { context: 1_000_000, output: 32768 },
+          },
+        },
+      },
+    };
+
+    let bgFetchCount = 0;
+    const swrRegistry = new ModelsDevRegistry({
+      cacheFilePath,
+      cacheTtlMs: 60_000,
+      fetcher: async () => {
+        bgFetchCount += 1;
+        return new Response(JSON.stringify(updatedCatalog), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      },
+    });
+
+    const staleSearch = await swrRegistry.search("gpt-4o");
+    assert.equal(staleSearch.length, 1);
+    assert.equal(bgFetchCount, 1);
+
+    // Wait briefly for background refresh to complete and persist
+    await new Promise((r) => setTimeout(r, 30));
+    const refreshedMatch = swrRegistry.matchModelFromCache("gpt-4.1");
+    assert.ok(refreshedMatch);
+    assert.equal(refreshedMatch.context_window, 1_000_000);
+    const persisted = JSON.parse(readFileSync(cacheFilePath, "utf8")) as {
+      catalog: ModelsDevCatalog;
+    };
+    assert.ok(persisted.catalog.openai?.models?.["gpt-4.1"]);
   } finally {
     rmSync(tempDir, { recursive: true, force: true });
   }

@@ -1,8 +1,17 @@
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { dirname } from "node:path";
 import type { ScopedProxyRouter } from "./proxy.js";
 
 export const MODELS_DEV_API_URL = "https://models.dev/api.json";
-const DEFAULT_CACHE_TTL_MS = 60 * 60 * 1000; // 1 hour
+const DEFAULT_CACHE_TTL_MS = 12 * 60 * 60 * 1000; // 12 hours
 const FETCH_TIMEOUT_MS = 15_000;
+const DISK_CACHE_VERSION = 1;
+
+interface ModelsDevDiskCachePayload {
+  version: number;
+  fetchedAtMs: number;
+  catalog: ModelsDevCatalog;
+}
 
 export interface ModelsDevRawModel {
   id?: string;
@@ -73,6 +82,7 @@ export interface ModelsDevProbeResult {
 export interface ModelsDevRegistryOptions {
   apiUrl?: string;
   cacheTtlMs?: number;
+  cacheFilePath?: string | null;
   getProxyRouter?: () => ScopedProxyRouter;
   fetcher?: (url: string, init?: RequestInit) => Promise<Response>;
 }
@@ -157,31 +167,124 @@ function mapRawModelToMetadata(
   };
 }
 
+const CANONICAL_MATCH_PROVIDERS = [
+  "openai",
+  "anthropic",
+  "google",
+  "deepseek",
+  "xai",
+  "mistral",
+  "alibaba",
+  "moonshotai",
+  "zhipuai",
+  "minimax",
+  "openrouter",
+] as const;
+
+function derivePreferredProviders(hints?: { providerSlug?: string; api?: string }): string[] {
+  const candidates: string[] = [];
+  const push = (id: string) => {
+    const normalized = id.trim().toLowerCase();
+    if (normalized && !candidates.includes(normalized)) {
+      candidates.push(normalized);
+    }
+  };
+
+  if (hints?.providerSlug) {
+    push(hints.providerSlug);
+    const base = hints.providerSlug.trim().toLowerCase().split(/[-_]/)[0];
+    if (base) push(base);
+  }
+
+  switch (hints?.api) {
+    case "google-generative-ai":
+    case "google-vertex":
+      push("google");
+      break;
+    case "anthropic-messages":
+      push("anthropic");
+      break;
+    case "openai-completions":
+    case "openai-responses":
+    case "openai-codex-responses":
+    case "azure-openai-responses":
+      push("openai");
+      break;
+    case "mistral-conversations":
+      push("mistral");
+      break;
+  }
+
+  return candidates;
+}
+
 /**
  * Cached client for fetching, searching, and resolving model metadata from models.dev.
  */
 export class ModelsDevRegistry {
   private readonly apiUrl: string;
   private readonly cacheTtlMs: number;
+  private readonly cacheFilePath: string | null;
   private readonly getProxyRouter?: () => ScopedProxyRouter;
   private readonly fetcher: (url: string, init?: RequestInit) => Promise<Response>;
 
   private cachedCatalog: ModelsDevCatalog | null = null;
   private cachedAtMs = 0;
+  private diskHydrated = false;
   private inflightFetch: Promise<ModelsDevCatalog> | null = null;
 
   constructor(options: ModelsDevRegistryOptions = {}) {
     this.apiUrl = options.apiUrl ?? MODELS_DEV_API_URL;
     this.cacheTtlMs = options.cacheTtlMs ?? DEFAULT_CACHE_TTL_MS;
+    this.cacheFilePath = options.cacheFilePath ?? null;
     this.getProxyRouter = options.getProxyRouter;
     this.fetcher = options.fetcher ?? ((url, init) => fetch(url, init));
   }
 
-  async getCatalog(forceRefresh = false): Promise<ModelsDevCatalog> {
-    const now = Date.now();
-    if (!forceRefresh && this.cachedCatalog && now - this.cachedAtMs < this.cacheTtlMs) {
-      return this.cachedCatalog;
+  private hydrateFromDisk(): void {
+    if (this.diskHydrated) return;
+    this.diskHydrated = true;
+    if (!this.cacheFilePath || this.cachedCatalog) return;
+
+    try {
+      if (!existsSync(this.cacheFilePath)) return;
+      const raw = readFileSync(this.cacheFilePath, "utf8");
+      const parsed = JSON.parse(raw) as Partial<ModelsDevDiskCachePayload>;
+      if (
+        parsed &&
+        parsed.version === DISK_CACHE_VERSION &&
+        typeof parsed.fetchedAtMs === "number" &&
+        Number.isFinite(parsed.fetchedAtMs) &&
+        parsed.catalog &&
+        typeof parsed.catalog === "object" &&
+        !Array.isArray(parsed.catalog)
+      ) {
+        this.cachedCatalog = parsed.catalog;
+        this.cachedAtMs = parsed.fetchedAtMs;
+      }
+    } catch {
+      // Ignore corrupt or unreadable cache files
     }
+  }
+
+  private persistToDisk(catalog: ModelsDevCatalog, fetchedAtMs: number): void {
+    if (!this.cacheFilePath) return;
+    try {
+      mkdirSync(dirname(this.cacheFilePath), { recursive: true });
+      const tmpPath = `${this.cacheFilePath}.tmp`;
+      const payload: ModelsDevDiskCachePayload = {
+        version: DISK_CACHE_VERSION,
+        fetchedAtMs,
+        catalog,
+      };
+      writeFileSync(tmpPath, JSON.stringify(payload), "utf8");
+      renameSync(tmpPath, this.cacheFilePath);
+    } catch {
+      // Ignore disk write errors so lookups never fail
+    }
+  }
+
+  private async fetchAndPersist(): Promise<ModelsDevCatalog> {
     if (this.inflightFetch) {
       return this.inflightFetch;
     }
@@ -206,9 +309,13 @@ export class ModelsDevRegistry {
         if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
           throw new Error("models.dev 返回了无效的 JSON 结构");
         }
-        this.cachedCatalog = parsed as ModelsDevCatalog;
-        this.cachedAtMs = Date.now();
-        return this.cachedCatalog;
+        const catalog = parsed as ModelsDevCatalog;
+        const now = Date.now();
+        this.cachedCatalog = catalog;
+        this.cachedAtMs = now;
+        this.diskHydrated = true;
+        this.persistToDisk(catalog, now);
+        return catalog;
       } finally {
         clearTimeout(timer);
         this.inflightFetch = null;
@@ -217,6 +324,101 @@ export class ModelsDevRegistry {
 
     this.inflightFetch = doFetch();
     return this.inflightFetch;
+  }
+
+  warmCache(): void {
+    this.hydrateFromDisk();
+    const isFresh =
+      this.cachedCatalog !== null && Date.now() - this.cachedAtMs < this.cacheTtlMs;
+    if (!isFresh && !this.inflightFetch) {
+      void this.fetchAndPersist().catch(() => {});
+    }
+  }
+
+  async getCatalog(forceRefresh = false): Promise<ModelsDevCatalog> {
+    this.hydrateFromDisk();
+    const now = Date.now();
+    if (!forceRefresh && this.cachedCatalog) {
+      if (now - this.cachedAtMs >= this.cacheTtlMs && !this.inflightFetch) {
+        void this.fetchAndPersist().catch(() => {});
+      }
+      return this.cachedCatalog;
+    }
+    return this.fetchAndPersist();
+  }
+
+  matchModelFromCache(
+    modelId: string,
+    hints?: { providerSlug?: string; api?: string },
+  ): ModelsDevMappedMetadata | null {
+    this.hydrateFromDisk();
+    if (!this.cachedCatalog) return null;
+
+    const trimmed = modelId.trim();
+    if (!trimmed) return null;
+
+    const matchWithinProvider = (
+      providerId: string,
+      targetModelId: string,
+    ): ModelsDevMappedMetadata | null => {
+      const provider = this.cachedCatalog?.[providerId];
+      if (!provider?.models) return null;
+      const direct = provider.models[targetModelId];
+      if (direct) {
+        return mapRawModelToMetadata(
+          providerId,
+          provider.name?.trim() || providerId,
+          targetModelId,
+          direct,
+        );
+      }
+      const lowerTarget = targetModelId.toLowerCase();
+      for (const [key, candidate] of Object.entries(provider.models)) {
+        if (key.toLowerCase() === lowerTarget || candidate.id?.toLowerCase() === lowerTarget) {
+          return mapRawModelToMetadata(
+            providerId,
+            provider.name?.trim() || providerId,
+            key,
+            candidate,
+          );
+        }
+      }
+      return null;
+    };
+
+    // 1. Direct provider/model lookup when modelId contains "/"
+    const parsedRef = parseModelsDevRef(trimmed);
+    if (parsedRef) {
+      const directMatch = matchWithinProvider(parsedRef.providerId, parsedRef.modelId);
+      if (directMatch) return directMatch;
+    }
+
+    const searchId = parsedRef ? parsedRef.modelId : trimmed;
+
+    // 2. Preferred providers derived from providerSlug / api hints
+    const preferred = derivePreferredProviders(hints);
+    for (const providerId of preferred) {
+      const match = matchWithinProvider(providerId, searchId);
+      if (match) return match;
+    }
+
+    // 3. Canonical providers
+    const checked = new Set(preferred);
+    for (const providerId of CANONICAL_MATCH_PROVIDERS) {
+      if (checked.has(providerId)) continue;
+      checked.add(providerId);
+      const match = matchWithinProvider(providerId, searchId);
+      if (match) return match;
+    }
+
+    // 4. Remaining providers
+    for (const providerId of Object.keys(this.cachedCatalog)) {
+      if (checked.has(providerId)) continue;
+      const match = matchWithinProvider(providerId, searchId);
+      if (match) return match;
+    }
+
+    return null;
   }
 
   async lookup(rawRef: string, forceRefresh = false): Promise<ModelsDevMappedMetadata | null> {

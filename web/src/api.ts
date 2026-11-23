@@ -429,6 +429,15 @@ export interface ModelsDevSearchItem {
   maxTokens?: number;
 }
 
+export interface UpstreamModelEntry {
+  id: string;
+  name?: string;
+  ownedBy?: string;
+  created?: number;
+  group: string;
+  modelsDev?: ModelsDevMappedMetadata;
+}
+
 export interface ProviderConfig {
   name?: string;
   slug?: string;
@@ -1108,6 +1117,24 @@ export const api = {
       `/api/models-dev/search?${params.toString()}`,
     );
   },
+  fetchUpstreamModels: (input: {
+    providerSlug: string;
+    api: string;
+    baseUrl: string;
+    apiKeyEnv?: string;
+    apiKeyOverride?: string;
+    providerHeaders?: Record<string, string>;
+  }) =>
+    requestJson<{
+      ok: boolean;
+      models: UpstreamModelEntry[];
+      fetchedFrom: string;
+      latencyMs: number;
+    }>("/api/config/models/upstream", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(input),
+    }),
   getStatics: (params: { limit?: number; slot?: string; since?: string; sessionId?: string | null }) => {
     const q = new URLSearchParams();
     if (params.limit) q.set("limit", String(params.limit));

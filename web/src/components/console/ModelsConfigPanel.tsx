@@ -30,6 +30,11 @@ import {
 } from "./models/ModelDetailPanel";
 import { ProviderDrawer } from "./models/ProviderDrawer";
 import {
+  AddModelModal,
+  type AddModelDraftInput,
+  type UpstreamCacheEntry,
+} from "./models/AddModelModal";
+import {
   type ListFilterMode,
   ProviderModelList,
 } from "./models/ProviderModelList";
@@ -222,6 +227,11 @@ export function ModelsConfigPanel({
   const [testDetailModal, setTestDetailModal] = useState<TestDetailState | null>(null);
   const [copiedDetail, setCopiedDetail] = useState(false);
   const [deleteConfirm, setDeleteConfirm] = useState<DeleteConfirmState>(null);
+  const [addModelModal, setAddModelModal] = useState<{
+    providerUid: string;
+    initialTab: "upstream" | "manual";
+  } | null>(null);
+  const [upstreamCache, setUpstreamCache] = useState<Record<string, UpstreamCacheEntry>>({});
   const [changeListOpen, setChangeListOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
   const [filterMode, setFilterMode] = useState<ListFilterMode>("all");
@@ -673,30 +683,54 @@ export function ModelsConfigPanel({
     setDeleteConfirm(null);
   };
 
-  const handleAddModel = (providerUid: string) => {
-    const modUid = createUid("mod");
-    const targetProv = providers.find((p) => p.uid === providerUid);
-    const uniqueId = generateUniqueModelId(targetProv?.models ?? []);
-    const newModel: UiModelEntry = {
-      uid: modUid,
-      id: uniqueId,
-      displayName: uniqueId === "new-model" ? "New Model" : uniqueId,
-      supportsVision: false,
-      supportsThinking: false,
-      modelsDev: { enabled: false, modelRef: "" },
-      advanced: {
-        contextWindow: "128000",
-        maxOutputTokens: "8192",
-        apiOverride: "__inherit__",
-        baseUrlOverride: "",
-        customHeaders: "",
-      },
-    };
+  const handleOpenAddModelModal = (
+    providerUid: string,
+    initialTab: "upstream" | "manual" = "upstream",
+  ) => {
+    setAddModelModal({ providerUid, initialTab });
+  };
 
+  const handleAddModels = (
+    providerUid: string,
+    entries: AddModelDraftInput[],
+    options?: { selectLast?: boolean },
+  ) => {
+    if (entries.length === 0) return;
+    let lastUid: string | null = null;
     setProviders((prev) =>
-      prev.map((p) =>
-        p.uid === providerUid ? { ...p, models: [...p.models, newModel] } : p,
-      ),
+      prev.map((p) => {
+        if (p.uid !== providerUid) return p;
+        const existingIds = new Set(p.models.map((m) => m.id.trim()));
+        const additions: UiModelEntry[] = [];
+        for (const entry of entries) {
+          const id = entry.id.trim();
+          if (!id || existingIds.has(id)) continue;
+          existingIds.add(id);
+          const modUid = createUid("mod");
+          lastUid = modUid;
+          additions.push({
+            uid: modUid,
+            id,
+            displayName: entry.displayName.trim() || id,
+            supportsVision: entry.supportsVision,
+            supportsThinking: entry.supportsThinking,
+            modelsDev: entry.modelsDev
+              ? { enabled: true, modelRef: entry.modelsDev.ref }
+              : { enabled: false, modelRef: "" },
+            advanced: {
+              contextWindow: String(entry.contextWindow ?? 128000),
+              maxOutputTokens: String(entry.maxOutputTokens ?? 8192),
+              apiOverride: "__inherit__",
+              baseUrlOverride: "",
+              customHeaders: "",
+            },
+            ...(entry.modelsDev?.cost
+              ? { preserved: { cost: entry.modelsDev.cost } }
+              : {}),
+          });
+        }
+        return additions.length > 0 ? { ...p, models: [...p.models, ...additions] } : p;
+      }),
     );
     setCollapsedProviderIds((prev) => {
       if (!prev.has(providerUid)) return prev;
@@ -704,8 +738,37 @@ export function ModelsConfigPanel({
       next.delete(providerUid);
       return next;
     });
-    setSelectedModelRef({ providerUid, modelUid: modUid });
-    setMobileDetailOpen(true);
+    if (options?.selectLast && lastUid) {
+      setSelectedModelRef({ providerUid, modelUid: lastUid });
+      setMobileDetailOpen(true);
+    }
+  };
+
+  const handleRemoveModelById = (providerUid: string, modelId: string) => {
+    const targetProv = providers.find((p) => p.uid === providerUid);
+    const targetModel = targetProv?.models.find((m) => m.id.trim() === modelId.trim());
+    if (!targetProv || !targetModel) return;
+    const targetKey = `${targetProv.name.trim()}/${modelId.trim()}`;
+    const bound = slotIndex.byTarget.get(targetKey) ?? [];
+    if (bound.length > 0) {
+      onToast({
+        title: `模型 ${modelId} 正在被槽位使用，无法移除`,
+        status: "error",
+      });
+      return;
+    }
+    setProviders((prev) => {
+      const next = prev.map((p) =>
+        p.uid === providerUid
+          ? { ...p, models: p.models.filter((m) => m.uid !== targetModel.uid) }
+          : p,
+      );
+      if (selectedModelRef.modelUid === targetModel.uid) {
+        setSelectedModelRef(resolveInitialSelection(next));
+        setMobileDetailOpen(false);
+      }
+      return next;
+    });
   };
 
   const handleDuplicateModel = (providerUid: string, modelUid: string) => {
@@ -1018,17 +1081,18 @@ export function ModelsConfigPanel({
 
   // Close modals on Escape
   useEffect(() => {
-    if (!testDetailModal && !deleteConfirm) return;
+    if (!testDetailModal && !deleteConfirm && !addModelModal) return;
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
         e.preventDefault();
         setTestDetailModal(null);
         setDeleteConfirm(null);
+        setAddModelModal(null);
       }
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [testDetailModal, deleteConfirm]);
+  }, [testDetailModal, deleteConfirm, addModelModal]);
 
   // Cmd/Ctrl + S shortcut when drawer is closed
   useEffect(() => {
@@ -1118,7 +1182,7 @@ export function ModelsConfigPanel({
                 setDrawerState({ open: true, mode: "edit", providerUid })
               }
               onRequestDeleteProvider={requestDeleteProvider}
-              onAddModel={handleAddModel}
+              onOpenAddModelModal={handleOpenAddModelModal}
               onTestProviderAll={handleTestProviderAll}
             />
           </div>
@@ -1309,6 +1373,58 @@ export function ModelsConfigPanel({
         </motion.div>
       ) : null}
       </AnimatePresence>
+
+      {/* Add / Manage Models Modal (Cherry Studio–style) */}
+      {(() => {
+        const modalProv = addModelModal
+          ? providers.find((p) => p.uid === addModelModal.providerUid) ?? null
+          : null;
+        const modalCacheKey = modalProv
+          ? `${modalProv.uid}:${modalProv.baseUrl.trim()}:${modalProv.protocol}`
+          : "";
+        const boundSlotsByModelId = new Map<string, (typeof SLOT_DEFINITIONS)[number][]>();
+        if (modalProv) {
+          const slug = modalProv.name.trim();
+          for (const m of modalProv.models) {
+            const mid = m.id.trim();
+            if (!mid || !slug) continue;
+            const slotKeys = slotIndex.byTarget.get(`${slug}/${mid}`) ?? [];
+            if (slotKeys.length > 0) {
+              boundSlotsByModelId.set(
+                mid,
+                SLOT_DEFINITIONS.filter((d) => slotKeys.includes(d.key)),
+              );
+            }
+          }
+        }
+        return (
+          <AddModelModal
+            open={Boolean(addModelModal && modalProv)}
+            provider={modalProv}
+            initialTab={addModelModal?.initialTab ?? "upstream"}
+            pendingSecrets={pendingSecrets}
+            boundSlotsByModelId={boundSlotsByModelId}
+            cachedUpstream={modalCacheKey ? upstreamCache[modalCacheKey] ?? null : null}
+            onCacheUpstream={(entry) => {
+              if (!modalCacheKey) return;
+              setUpstreamCache((prev) => ({ ...prev, [modalCacheKey]: entry }));
+            }}
+            onClose={() => setAddModelModal(null)}
+            onAddModels={(entries, options) => {
+              if (!modalProv) return;
+              handleAddModels(modalProv.uid, entries, options);
+            }}
+            onRemoveModelById={(modelId) => {
+              if (!modalProv) return;
+              handleRemoveModelById(modalProv.uid, modelId);
+            }}
+            onConfigureProvider={() => {
+              if (!modalProv) return;
+              setDrawerState({ open: true, mode: "edit", providerUid: modalProv.uid });
+            }}
+          />
+        );
+      })()}
 
       {/* Add / Configure Provider Slide-Over Drawer */}
       <ProviderDrawer
