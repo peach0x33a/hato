@@ -359,6 +359,15 @@ reasoning = false
 
     assert.throws(() => reloadedRegistry.setSlotThinkingOverride("unknown_slot", "high"), /Unknown slot/);
     assert.throws(() => reloadedRegistry.setSlotThinkingOverride("persona", "invalid_level"), /Invalid thinking level/);
+
+    // Runtime slot target override: getEffectiveSlots reflects it, and clearSlotOverrides resets it
+    reloadedRegistry.setSlotOverride("worker", "relay/plain-model");
+    assert.equal(reloadedRegistry.getEffectiveSlots().worker, "relay/plain-model");
+    const persistedRegistry = new ModelRegistry(modelsToml, repo);
+    assert.equal(persistedRegistry.getEffectiveSlots().worker, "relay/plain-model");
+    persistedRegistry.clearSlotOverrides();
+    assert.equal(persistedRegistry.getEffectiveSlots().worker, "relay/reasoning-model");
+    assert.equal(new ModelRegistry(modelsToml, repo).getEffectiveSlots().worker, "relay/reasoning-model");
   } finally {
     dbHandle.close();
     rmSync(tempDir, { recursive: true, force: true });

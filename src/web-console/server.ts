@@ -1535,6 +1535,7 @@ export class WebConsoleServer {
     const hatoConfig = this.deps.getConfig();
     const modelsRegistry = this.deps.getModelRegistry();
     const modelsConfig = modelsRegistry.getFileConfig();
+    modelsConfig.slots = modelsRegistry.getEffectiveSlots();
     const effectiveThinking = modelsRegistry.getEffectiveSlotThinkingMap();
     if (Object.keys(effectiveThinking).length > 0) {
       modelsConfig.slot_thinking = effectiveThinking;
@@ -1587,6 +1588,7 @@ export class WebConsoleServer {
       payload.config as ReturnType<ModelRegistry["getFileConfig"]>,
       { backup: true },
     );
+    this.deps.getModelRegistry().clearSlotOverrides();
     this.deps.getModelRegistry().clearSlotThinkingOverrides();
     const reloadRes = await this.deps.reloadAll();
     sendJson(res, 200, {

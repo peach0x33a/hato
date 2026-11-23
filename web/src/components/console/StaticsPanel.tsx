@@ -406,13 +406,15 @@ export function StaticsPanel({ onToast, sessionEpoch = 0, sessionId = null }: St
                       </div>
                       <div className="flex flex-wrap items-center justify-between gap-2 pl-0.5">
                         <ApiBadge api={item.api} className="h-4 shrink-0 px-1 text-[10px]" />
-                        <div className="flex shrink-0 items-center gap-2.5 font-mono text-[11px] tabular-nums text-muted-foreground">
-                          <span>命中 {hit.toFixed(1)}%</span>
-                          <span>出 {item.outputTokens.toLocaleString()}</span>
-                          <span title={`${avgLat}ms`}>均 {formatDurationMs(avgLat)}</span>
+                        <div className="grid shrink-0 grid-cols-[78px_82px_72px_64px] items-center gap-x-2 text-right font-mono text-[11px] tabular-nums text-muted-foreground">
+                          <span className="whitespace-nowrap">命中 {hit.toFixed(1)}%</span>
+                          <span className="whitespace-nowrap">出 {item.outputTokens.toLocaleString()}</span>
+                          <span className="whitespace-nowrap" title={`${avgLat}ms`}>均 {formatDurationMs(avgLat)}</span>
                           {item.costUsd !== undefined ? (
-                            <span className="text-foreground">{formatUsd(item.costUsd)}</span>
-                          ) : null}
+                            <span className="whitespace-nowrap text-foreground">{formatUsd(item.costUsd)}</span>
+                          ) : (
+                            <span className="whitespace-nowrap text-muted-foreground/45">--</span>
+                          )}
                         </div>
                       </div>
                     </div>

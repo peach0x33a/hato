@@ -707,6 +707,24 @@ export class ModelRegistry {
     this.repo?.setRuntimeSetting(SLOT_THINKING_OVERRIDES_SETTING_KEY, {});
   }
 
+  getEffectiveSlots(): ModelsFileConfig["slots"] {
+    const fileSlots = this.fileConfig.slots;
+    const vision = this.slotOverrides.vision ?? fileSlots.vision;
+    return {
+      persona: this.slotOverrides.persona ?? fileSlots.persona,
+      router: this.slotOverrides.router ?? fileSlots.router,
+      curator: this.slotOverrides.curator ?? fileSlots.curator,
+      worker: this.slotOverrides.worker ?? fileSlots.worker,
+      hindsight_llm: this.slotOverrides.hindsight_llm ?? fileSlots.hindsight_llm,
+      ...(vision ? { vision } : {}),
+    };
+  }
+
+  clearSlotOverrides(): void {
+    this.slotOverrides = {};
+    this.repo?.setRuntimeSetting(SLOT_OVERRIDES_SETTING_KEY, {});
+  }
+
   listProviders(): ResolvedProviderMeta[] {
     return [...this.providersBySlug.values()].map(({ isExtra: _isExtra, ...meta }) => meta);
   }

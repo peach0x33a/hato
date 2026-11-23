@@ -672,11 +672,16 @@ export function buildApiModelsConfig(
   }
 
   const normalizedThinking = normalizeSlotThinkingMap(slotThinking);
+  const { vision, ...requiredSlots } = slots;
+  const normalizedSlots: ModelsFileConfig["slots"] = {
+    ...requiredSlots,
+    ...(vision?.trim() ? { vision: vision.trim() } : {}),
+  };
 
   return {
     ok: true,
     config: {
-      slots: { ...slots },
+      slots: normalizedSlots,
       ...(Object.keys(normalizedThinking).length > 0 ? { slot_thinking: normalizedThinking } : {}),
       providers: apiProviders,
     },

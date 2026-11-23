@@ -466,7 +466,13 @@ export function ModelsConfigPanel({
   };
 
   const handleChangeSlot = (slotKey: SlotKey, value: string) => {
-    setSlots((prev) => ({ ...prev, [slotKey]: value }));
+    setSlots((prev) => {
+      if (slotKey === "vision" && !value.trim()) {
+        const { vision: _removed, ...rest } = prev;
+        return rest;
+      }
+      return { ...prev, [slotKey]: value };
+    });
   };
 
   const handleChangeSlotThinking = (slotKey: SlotKey, value: ThinkingLevel | undefined) => {
