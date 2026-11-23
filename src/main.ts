@@ -1030,8 +1030,10 @@ async function main(): Promise<void> {
         canAutoSend: Boolean(outbound?.adapter.sendFile),
         deliverFiles,
       });
-      const artifactNames = formatTicketArtifactPromptHint(artifactPartition);
       const artifactImages = await loadArtifactImagesForModel(result.artifacts);
+      const artifactNames = formatTicketArtifactPromptHint(artifactPartition, {
+        hasAttachedImages: artifactImages.length > 0,
+      });
       const summary = `[工单 ${result.ticket_id} · ${briefTitle}] (${result.status}): ${result.narration_hint}${caveatText}${secretsNote}`;
 
       const narrationKey = outbound ? `${outbound.channel}:${outbound.targetId}` : null;

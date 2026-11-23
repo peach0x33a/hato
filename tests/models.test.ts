@@ -373,3 +373,47 @@ reasoning = false
     rmSync(tempDir, { recursive: true, force: true });
   }
 });
+
+test("ModelRegistry supports explicit_cache setting at provider and model levels", () => {
+  const tempDir = mkdtempSync(join(tmpdir(), "hato-models-explicit-cache-"));
+  const modelsToml = join(tempDir, "models.toml");
+  try {
+    writeFileSync(
+      modelsToml,
+      `
+[slots]
+persona = "google/gemini-3.5-flash-lite"
+router = "google/gemini-4-hydrogen"
+curator = "google/gemini-default"
+worker = "google/gemini-default"
+hindsight_llm = "google/gemini-default"
+
+[providers.google]
+api = "google-generative-ai"
+base_url = "https://generativelanguage.googleapis.com/v1beta"
+explicit_cache = false
+
+[[providers.google.models]]
+id = "gemini-3.5-flash-lite"
+name = "Gemini 3.5 FL"
+
+[[providers.google.models]]
+id = "gemini-4-hydrogen"
+name = "Gemini 4 Hydrogen"
+explicit_cache = true
+
+[[providers.google.models]]
+id = "gemini-default"
+name = "Gemini Default"
+`,
+      "utf8",
+    );
+
+    const registry = new ModelRegistry(modelsToml);
+    assert.equal(registry.resolveSlot("persona").explicitCache, false);
+    assert.equal(registry.resolveSlot("router").explicitCache, true);
+    assert.equal(registry.resolveSlot("curator").explicitCache, false);
+  } finally {
+    rmSync(tempDir, { recursive: true, force: true });
+  }
+});

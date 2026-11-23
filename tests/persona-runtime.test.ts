@@ -1100,3 +1100,101 @@ curator = "minimal"
     rmSync(tempDir, { recursive: true, force: true });
   }
 });
+
+test("PersonaRuntime persists successful send_file into raw_messages and exposes it to subsequent turns", async () => {
+  const faux = fauxProvider({
+    api: "hato-faux-api",
+    provider: "faux-provider",
+    models: [{ id: "faux-persona-1", name: "Faux Persona" }],
+    tokensPerSecond: 10000,
+  });
+
+  const tempDir = mkdtempSync(join(tmpdir(), "hato-sendfile-history-test-"));
+  const hatoTomlPath = join(tempDir, "hato.toml");
+  const modelsTomlPath = join(tempDir, "models.toml");
+  const sampleFilePath = join(tempDir, "avatar.png");
+
+  writeHatoConfig(hatoTomlPath, createDefaultHatoConfig(), { backup: false });
+  writeFileSync(sampleFilePath, Buffer.from([0x89, 0x50, 0x4e, 0x47]));
+  writeFileSync(
+    modelsTomlPath,
+    `
+[slots]
+persona = "faux-provider/faux-persona-1"
+router = "faux-provider/faux-persona-1"
+curator = "faux-provider/faux-persona-1"
+worker = "faux-provider/faux-persona-1"
+hindsight_llm = "faux-provider/faux-persona-1"
+
+[providers]
+`,
+    "utf8",
+  );
+
+  const dbHandle = openDatabase(":memory:");
+  try {
+    const hatoConfig = loadHatoConfig(hatoTomlPath);
+    const repo = new HatoRepository(dbHandle.db);
+    const modelRegistry = new ModelRegistry(modelsTomlPath, repo, {
+      extraProviders: [faux.provider],
+    });
+    const proxyRouter = new ScopedProxyRouter([]);
+    const runtime = new PersonaRuntime(hatoConfig, modelRegistry, proxyRouter, repo);
+
+    runtime.setSendFileHandler(async ({ channel, path }) => ({
+      ok: true,
+      message: `已发送文件到 ${channel.toUpperCase()}: ${path}`,
+    }));
+
+    let nextTurnSawSentFileEvent = false;
+    faux.setResponses([
+      () =>
+        fauxAssistantMessage(
+          [fauxToolCall("send_file", { path: sampleFilePath, caption: "你的头像" })],
+          { stopReason: "toolUse" },
+        ),
+      () => fauxAssistantMessage("头像发给你啦！"),
+      (ctx) => {
+        nextTurnSawSentFileEvent = JSON.stringify(ctx.messages).includes(
+          "已通过 send_file 发送文件到 QQ: avatar.png",
+        );
+        return fauxAssistantMessage("刚才已经发过啦");
+      },
+    ]);
+
+    await runtime.handleUserBatch({
+      canonicalUserId: "owner",
+      originChannel: "qq",
+      originPlatformUserId: "u1",
+      platformMsgIds: ["m1"],
+      latestPlatformMsgId: "m1",
+      combinedText: "把头像发给我",
+      attachments: [],
+      firstTimestampMs: Date.now(),
+      lastTimestampMs: Date.now(),
+    });
+
+    const recent = repo.listRecentMessages("owner", 10);
+    const sentEvent = recent.find(
+      (m) => m.role === "executed_event" && m.content.includes("已通过 send_file 发送文件到 QQ: avatar.png"),
+    );
+    assert.ok(sentEvent);
+
+    await runtime.handleUserBatch({
+      canonicalUserId: "owner",
+      originChannel: "qq",
+      originPlatformUserId: "u1",
+      platformMsgIds: ["m2"],
+      latestPlatformMsgId: "m2",
+      combinedText: "你发了吗？",
+      attachments: [],
+      firstTimestampMs: Date.now() + 100,
+      lastTimestampMs: Date.now() + 100,
+    });
+
+    assert.equal(nextTurnSawSentFileEvent, true);
+  } finally {
+    dbHandle.close();
+    rmSync(tempDir, { recursive: true, force: true });
+  }
+});

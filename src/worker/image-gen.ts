@@ -139,6 +139,7 @@ export async function generateOpenAiImage(
       if (params.quality?.trim()) form.append("quality", params.quality.trim());
       if (includeResponseFormat) form.append("response_format", "b64_json");
 
+      const imageField = refPaths.length > 1 ? "image[]" : "image";
       for (const ref of refPaths) {
         const absRef = resolve(params.workspaceDir, ref);
         const targetPath = existsSync(absRef) ? absRef : resolve(ref);
@@ -147,7 +148,7 @@ export async function generateOpenAiImage(
         }
         const bytes = readFileSync(targetPath);
         const mime = inferImageMimeFromPath(targetPath);
-        form.append("image", new Blob([bytes], { type: mime }), basename(targetPath));
+        form.append(imageField, new Blob([bytes], { type: mime }), basename(targetPath));
       }
       const tempReq = new Request("http://localhost", { method: "POST", body: form });
       headers["Content-Type"] = tempReq.headers.get("content-type") || "multipart/form-data";

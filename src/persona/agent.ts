@@ -1,5 +1,5 @@
 import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { basename, resolve } from "node:path";
 import {
   Agent,
   DEFAULT_AGENT_IDENTITY,
@@ -148,6 +148,7 @@ export class PersonaRuntime {
   private reloadHandler: (() => Promise<void>) | null = null;
   private syncedCompactedUntilTs = 0;
   private pendingTranscriptRefresh = false;
+  private turnPendingExecutedEvents: RawMessageRecord[] = [];
   private delegateHandler:
     | ((input: {
         canonicalUserId: string;
@@ -311,10 +312,14 @@ export class PersonaRuntime {
                     if (targetModel.api !== "google-generative-ai") {
                       return userModified;
                     }
+                    const resolvedPersona = this.modelRegistry.resolveSlot("persona");
+                    if (!resolvedPersona.explicitCache) {
+                      return userModified;
+                    }
                     const apiKey =
                       options?.apiKey ??
                       this.modelRegistry.resolveApiKeyForProvider(targetModel.provider);
-                    const ttlMinutes = this.modelRegistry.resolveSlot("persona").cacheTtlMinutes;
+                    const ttlMinutes = resolvedPersona.cacheTtlMinutes;
                     const cachedPayload = await this.googleExplicitCache.preparePayload({
                       model: targetModel,
                       apiKey,
@@ -759,36 +764,58 @@ export class PersonaRuntime {
         : {}),
       ...(this.sendFileHandler
         ? {
-            onSendFile: (input: {
+            onSendFile: async (input: {
               path: string;
               caption?: string;
               channel?: "current" | "tg" | "qq";
             }) => {
               const explicit = input.channel && input.channel !== "current" ? input.channel : undefined;
-              return this.sendFileHandler!({
-                channel: explicit ?? this.activeTurnOriginChannel,
+              const targetChannel = explicit ?? this.activeTurnOriginChannel;
+              const res = await this.sendFileHandler!({
+                channel: targetChannel,
                 strictChannel: Boolean(explicit),
                 path: input.path,
                 caption: input.caption,
               });
+              if (res.ok) {
+                this.recordSentFileEvent({
+                  canonicalUserId,
+                  channel: targetChannel,
+                  toolName: "send_file",
+                  filePath: input.path,
+                  caption: input.caption,
+                });
+              }
+              return res;
             },
           }
         : {}),
       ...(this.sendMessageHandler
         ? {
-            onSendMessage: (input: {
+            onSendMessage: async (input: {
               channel: InboundBatch["originChannel"];
               text?: string;
               filePath?: string;
               caption?: string;
-            }) =>
-              this.sendMessageHandler!({
+            }) => {
+              const res = await this.sendMessageHandler!({
                 canonicalUserId,
                 channel: input.channel,
                 text: input.text,
                 filePath: input.filePath,
                 caption: input.caption,
-              }),
+              });
+              if (res.ok && input.filePath && input.channel !== "web") {
+                this.recordSentFileEvent({
+                  canonicalUserId,
+                  channel: input.channel,
+                  toolName: "send_message",
+                  filePath: input.filePath,
+                  caption: input.caption,
+                });
+              }
+              return res;
+            },
           }
         : {}),
       ...(this.sensitiveFileConfirmHandler
@@ -1089,6 +1116,7 @@ export class PersonaRuntime {
     this.agent.state.model = resolved.model;
     this.agent.state.thinkingLevel = this.modelRegistry.resolveSlotThinkingLevel("persona");
     this.syncTranscriptIfDrifted(canonicalUserId);
+    this.turnPendingExecutedEvents = [];
 
     const wmState = this.repo.getWorkingMemory(canonicalUserId);
     const userCreatedAt = Math.max(
@@ -1365,6 +1393,7 @@ export class PersonaRuntime {
         this.pendingSupersededImages.set(canonicalUserId, effectiveImages);
       }
       this.activeTurnRecalledIds.clear();
+      this.turnPendingExecutedEvents = [];
       this.refreshTranscriptFromDb();
       return {
         rawText: "",
@@ -1402,6 +1431,7 @@ export class PersonaRuntime {
         err: turnFailure,
       });
       this.activeTurnRecalledIds.clear();
+      this.turnPendingExecutedEvents = [];
       this.refreshTranscriptFromDb();
       throw turnFailure;
     }
@@ -1452,9 +1482,11 @@ export class PersonaRuntime {
     }
 
     if (this.pendingTranscriptRefresh) {
+      this.turnPendingExecutedEvents = [];
       this.refreshTranscriptFromDb();
     } else {
       this.pruneTurnPayloadBloat();
+      this.flushTurnPendingExecutedEvents();
     }
 
     const recalledIds = [...this.activeTurnRecalledIds];
@@ -1571,6 +1603,7 @@ export class PersonaRuntime {
     this.agent.state.model = resolved.model;
     this.agent.state.thinkingLevel = this.modelRegistry.resolveSlotThinkingLevel("persona");
     this.syncTranscriptIfDrifted(params.canonicalUserId);
+    this.turnPendingExecutedEvents = [];
     this.agent.state.tools = this.allTools;
 
     if (params.persistEvent !== false) {
@@ -1650,6 +1683,7 @@ export class PersonaRuntime {
       promptErr ?? (this.agent.state.errorMessage ? new Error(this.agent.state.errorMessage) : null);
     if (turnFailure) {
       logWarn("PERSONA", `narrateBackgroundEvent failed: ${summarizeError(turnFailure)}`);
+      this.turnPendingExecutedEvents = [];
       this.refreshTranscriptFromDb();
       return params.fallbackToSummary === false ? [] : [params.eventSummary];
     }
@@ -1663,10 +1697,12 @@ export class PersonaRuntime {
     const { finalText, totalUsage, toolCalls } = extractTurnMetrics(newMessages);
     const trimmed = finalText.trim();
     if (!trimmed && params.fallbackToSummary === false) {
+      this.turnPendingExecutedEvents = [];
       this.refreshTranscriptFromDb();
       return [];
     }
     if (trimmed === "[NO_REPLY]" && params.fallbackToSummary === false) {
+      this.turnPendingExecutedEvents = [];
       this.refreshTranscriptFromDb();
       return ["[NO_REPLY]"];
     }
@@ -1722,11 +1758,45 @@ export class PersonaRuntime {
     });
 
     if (this.pendingTranscriptRefresh) {
+      this.turnPendingExecutedEvents = [];
       this.refreshTranscriptFromDb();
     } else {
       this.pruneTurnPayloadBloat();
+      this.flushTurnPendingExecutedEvents();
     }
     return bubbles.length > 0 ? bubbles : [reply];
+  }
+
+  private recordSentFileEvent(params: {
+    canonicalUserId: string;
+    channel: InboundBatch["originChannel"];
+    toolName: "send_file" | "send_message";
+    filePath: string;
+    caption?: string;
+  }): void {
+    const resolvedPath = resolve(params.filePath.trim());
+    const name = basename(resolvedPath);
+    const captionNote = params.caption?.trim()
+      ? `（附言：${params.caption.trim().slice(0, 60)}）`
+      : "";
+    const rec = this.repo.appendRawMessage({
+      canonicalUserId: params.canonicalUserId,
+      channel: params.channel,
+      role: "executed_event",
+      content: `已通过 ${params.toolName} 发送文件到 ${params.channel.toUpperCase()}: ${name} (${resolvedPath})${captionNote}`,
+      createdAt: Date.now(),
+    });
+    this.turnPendingExecutedEvents.push(rec);
+  }
+
+  private flushTurnPendingExecutedEvents(): void {
+    if (this.turnPendingExecutedEvents.length === 0) return;
+    const pending = this.turnPendingExecutedEvents;
+    this.turnPendingExecutedEvents = [];
+    this.agent.state.messages = [
+      ...this.agent.state.messages,
+      ...pending.map((rec) => rawRecordToAgentMessage(rec, this.repo)),
+    ];
   }
 
   private subscribeTurnTelemetry(params: {

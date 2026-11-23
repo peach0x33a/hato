@@ -216,9 +216,14 @@ export class GoogleExplicitCacheManager {
         } else {
           this.keyCooldownUntil.set(params.cacheKey, Date.now() + KEY_FAILURE_COOLDOWN_MS);
         }
+        const freeTierHint =
+          response.status === 429 &&
+          (/limit=0\b/i.test(text) || /TotalCachedContentStorageTokensPerModelFreeTier/i.test(text))
+            ? "（可在 models.toml 对应 provider 或 model 下设置 explicit_cache = false 关闭显式缓存）"
+            : "";
         logWarn(
           "CACHE",
-          `Google explicit cache create failed (${params.model.provider}/${params.model.id}, HTTP ${response.status}): ${text || "unknown error"}`,
+          `Google explicit cache create failed (${params.model.provider}/${params.model.id}, HTTP ${response.status}): ${text || "unknown error"}${freeTierHint}`,
         );
         return null;
       }

@@ -1165,7 +1165,7 @@ export function createPersonaReadOnlyTools(params: {
       name: "image_gen",
       label: "Generate Image (Async)",
       description:
-        "Generate or edit image(s) asynchronously in the background via OpenAI-compatible Images API. Returns immediately without blocking chat; once finished, you will receive the generated image(s) to inspect and deliver.",
+        "Generate or edit image(s) asynchronously in the background via OpenAI-compatible Images API. When generating images involving recurring subjects, established visual styles, or archived references, check notebook_search / notebook_read first to reuse stored appearance details and reference_image_paths. Returns immediately without blocking chat; once finished, you will receive the generated image(s) for internal inspection and must call send_file if you decide to send them to the user.",
       parameters: ImageGenParams,
       async execute(_toolCallId, input) {
         const accepted = imageGenFn({

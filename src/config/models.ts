@@ -176,6 +176,7 @@ const ModelEntrySchema = Type.Object({
   base_url: Type.Optional(Type.String({ minLength: 1 })),
   headers: Type.Optional(Type.Record(Type.String(), Type.String())),
   cache_ttl_minutes: Type.Optional(Type.Number({ minimum: 1 })),
+  explicit_cache: Type.Optional(Type.Boolean()),
   reasoning: Type.Optional(Type.Boolean()),
   input: Type.Optional(Type.Array(Type.Union([Type.Literal("text"), Type.Literal("image")]))),
   context_window: Type.Optional(Type.Number({ minimum: 1 })),
@@ -204,6 +205,7 @@ const ProviderConfigSchema = Type.Object({
   base_url: Type.String({ minLength: 1 }),
   api_key_env: Type.Optional(Type.String({ minLength: 1 })),
   cache_ttl_minutes: Type.Optional(Type.Number({ minimum: 1 })),
+  explicit_cache: Type.Optional(Type.Boolean()),
   headers: Type.Optional(Type.Record(Type.String(), Type.String())),
   compat: Type.Optional(Type.Record(Type.String(), Type.Unknown())),
   models: Type.Array(ModelEntrySchema),
@@ -240,6 +242,7 @@ export interface ResolvedProviderMeta {
   baseUrl: string;
   apiKeyEnv: string;
   cacheTtlMinutes: number;
+  explicitCache: boolean;
   models: Model<Api>[];
 }
 
@@ -251,6 +254,7 @@ export interface ResolvedTargetModel {
   providerDisplayName: string;
   apiKeyEnv: string;
   cacheTtlMinutes: number;
+  explicitCache: boolean;
   model: Model<Api>;
 }
 
@@ -332,6 +336,7 @@ function buildValidatedModelsCatalog(
       baseUrl: extra.baseUrl ?? "",
       apiKeyEnv: "",
       cacheTtlMinutes: inferDefaultCacheTtl(firstModelApi),
+      explicitCache: true,
       models: extraModels,
       isExtra: true,
     });
@@ -344,6 +349,7 @@ function buildValidatedModelsCatalog(
         providerDisplayName: extra.name || extra.id,
         apiKeyEnv: "",
         cacheTtlMinutes: inferDefaultCacheTtl(m.api),
+        explicitCache: true,
         model: m,
       });
     }
@@ -368,6 +374,7 @@ function buildValidatedModelsCatalog(
     }
 
     const defaultTtl = providerCfg.cache_ttl_minutes ?? inferDefaultCacheTtl(defaultApi);
+    const defaultExplicitCache = providerCfg.explicit_cache ?? true;
     const builtModels: Model<Api>[] = [];
     const seenModelIdsInProvider = new Set<string>();
     const apiStreamsMap: Partial<Record<Api, ProviderStreams>> = {
@@ -430,6 +437,7 @@ function buildValidatedModelsCatalog(
         providerDisplayName,
         apiKeyEnv,
         cacheTtlMinutes: entry.cache_ttl_minutes ?? providerCfg.cache_ttl_minutes ?? inferDefaultCacheTtl(modelApi),
+        explicitCache: entry.explicit_cache ?? defaultExplicitCache,
         model,
       });
     }
@@ -441,6 +449,7 @@ function buildValidatedModelsCatalog(
       baseUrl: providerCfg.base_url,
       apiKeyEnv,
       cacheTtlMinutes: defaultTtl,
+      explicitCache: defaultExplicitCache,
       models: builtModels,
       isExtra: false,
     });

@@ -73,7 +73,10 @@ export function partitionTicketArtifacts(params: {
  * Persona knows whether the system will auto-deliver the files or whether
  * Persona should control sending them via `send_file` / `send_message`.
  */
-export function formatTicketArtifactPromptHint(partition: ArtifactDeliveryPartition): string {
+export function formatTicketArtifactPromptHint(
+  partition: ArtifactDeliveryPartition,
+  opts?: { hasAttachedImages?: boolean },
+): string {
   const parts: string[] = [];
 
   if (partition.autoDelivered.length > 0) {
@@ -85,9 +88,15 @@ export function formatTicketArtifactPromptHint(partition: ArtifactDeliveryPartit
 
   if (partition.onDemand.length > 0) {
     const list = partition.onDemand.map((a) => `${a.filename} (${a.path})`).join(", ");
-    parts.push(
-      `\n生成文件（如需发给用户，请自行调用 send_file 或 send_message 控制发送时机与顺序）：${list}`,
-    );
+    if (opts?.hasAttachedImages) {
+      parts.push(
+        `\n生成文件（本轮附带的图片仅供你内部审图，用户尚未收到；确认需要发给用户时，必须自行调用 send_file 或 send_message 发送，控制发送时机与顺序）：${list}`,
+      );
+    } else {
+      parts.push(
+        `\n生成文件（如需发给用户，请自行调用 send_file 或 send_message 控制发送时机与顺序）：${list}`,
+      );
+    }
   }
 
   return parts.join("");

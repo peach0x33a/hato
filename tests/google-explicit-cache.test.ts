@@ -157,3 +157,44 @@ test("GoogleExplicitCacheManager falls back gracefully on unsupported endpoint o
   assert.equal(second, undefined);
   assert.equal(postCount, 1);
 });
+
+test("GoogleExplicitCacheManager logs WARN with explicit_cache hint on 429 limit=0 and falls back", async () => {
+  const origWarn = console.warn;
+  const warned: string[] = [];
+  console.warn = (...args: unknown[]) => {
+    warned.push(args.map((a) => String(a)).join(" "));
+  };
+
+  try {
+    const manager = new GoogleExplicitCacheManager({
+      minEstimatedChars: 100,
+      fetcher: async () =>
+        new Response(
+          JSON.stringify({
+            error: {
+              code: 429,
+              message:
+                "TotalCachedContentStorageTokensPerModelFreeTier limit exceeded for model gemini-3.5-flash-lite: limit=0, requested=7930",
+              status: "RESOURCE_EXHAUSTED",
+            },
+          }),
+          { status: 429 },
+        ),
+    });
+
+    const model = makeGoogleModel();
+    const out = await manager.preparePayload({
+      model,
+      apiKey: "k-free",
+      payload: makePayload("z".repeat(500)),
+    });
+    assert.equal(out, undefined);
+    assert.equal(warned.length, 1);
+    const plainWarn = warned[0]!.replace(/\x1b\[[0-9;]*m/g, "");
+    assert.match(plainWarn, /\[WARN\] \[CACHE\]/);
+    assert.match(plainWarn, /HTTP 429/);
+    assert.match(plainWarn, /explicit_cache = false/);
+  } finally {
+    console.warn = origWarn;
+  }
+});

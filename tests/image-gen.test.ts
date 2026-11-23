@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
@@ -112,6 +112,70 @@ describe("OpenAI-compatible image_gen", () => {
       assert.equal(res2.files[0]?.relativePath, "bird_2.png");
       assert.deepEqual(readFileSync(res2.files[0]!.path), pngBytes);
       assert.equal(calls, 3);
+    } finally {
+      server.close();
+      rmSync(workspaceDir, { recursive: true, force: true });
+    }
+  });
+
+  it("uses 'image' for single reference image and 'image[]' for multiple reference images", async () => {
+    const pngBytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+    const capturedBodies: string[] = [];
+
+    const server = createServer((req, res) => {
+      const chunks: Buffer[] = [];
+      req.on("data", (c) => chunks.push(c));
+      req.on("end", () => {
+        if (req.url === "/v1/images/edits") {
+          capturedBodies.push(Buffer.concat(chunks).toString("utf8"));
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ data: [{ b64_json: pngBytes.toString("base64") }] }));
+          return;
+        }
+        res.writeHead(404);
+        res.end();
+      });
+    });
+
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", () => resolve()));
+    const port = (server.address() as AddressInfo).port;
+    const workspaceDir = mkdtempSync(join(tmpdir(), "hato-imggen-edit-"));
+
+    try {
+      const ref1 = join(workspaceDir, "ref1.png");
+      const ref2 = join(workspaceDir, "ref2.png");
+      writeFileSync(ref1, pngBytes);
+      writeFileSync(ref2, pngBytes);
+
+      const proxyRouter = new ScopedProxyRouter([]);
+
+      const single = await generateOpenAiImage({
+        prompt: "edit single",
+        model: "gpt-image-2.5",
+        referenceImagePaths: [ref1],
+        workspaceDir,
+        providerSlug: "claudeflare",
+        baseUrl: `http://127.0.0.1:${port}/v1`,
+        apiKey: "test-key",
+        proxyRouter,
+      });
+      assert.equal(single.ok, true);
+      assert.match(capturedBodies[0]!, /name="image"; filename="ref1\.png"/);
+      assert.doesNotMatch(capturedBodies[0]!, /name="image\[\]"/);
+
+      const multi = await generateOpenAiImage({
+        prompt: "edit multi",
+        model: "gpt-image-2.5",
+        referenceImagePaths: [ref1, ref2],
+        workspaceDir,
+        providerSlug: "claudeflare",
+        baseUrl: `http://127.0.0.1:${port}/v1`,
+        apiKey: "test-key",
+        proxyRouter,
+      });
+      assert.equal(multi.ok, true);
+      assert.match(capturedBodies[1]!, /name="image\[\]"; filename="ref1\.png"/);
+      assert.match(capturedBodies[1]!, /name="image\[\]"; filename="ref2\.png"/);
     } finally {
       server.close();
       rmSync(workspaceDir, { recursive: true, force: true });

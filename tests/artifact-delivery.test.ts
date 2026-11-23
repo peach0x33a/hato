@@ -38,6 +38,11 @@ describe("artifact-delivery", () => {
     expect(hint).toContain("skirt.png (/tmp/hato/work/skirt.png)");
     expect(hint).toContain("report.pdf (/tmp/hato/work/report.pdf)");
     expect(hint).not.toContain("系统将在本轮回复后自动发送");
+
+    const attachedHint = formatTicketArtifactPromptHint(partition, { hasAttachedImages: true });
+    expect(attachedHint).toContain("本轮附带的图片仅供你内部审图，用户尚未收到");
+    expect(attachedHint).toContain("必须自行调用 send_file 或 send_message 发送");
+    expect(attachedHint).toContain("skirt.png (/tmp/hato/work/skirt.png)");
   });
 
   test("deliverFiles=true (auto-deliver mode) marks all artifacts for system delivery and warns Persona not to duplicate", () => {
