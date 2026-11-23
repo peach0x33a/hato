@@ -215,109 +215,108 @@ export class MemoryCurator {
   async forgetByQuery(canonicalUserId: string, query: string): Promise<ForgetRunSummary> {
     const trimmed = query.trim();
     if (!trimmed) {
-      return {
-        matchedCount: 0,
-        erasedLocalCount: 0,
-        erasedRemoteCount: 0,
-        alreadyErasedCount: 0,
-        missingRemoteCount: 0,
-        unmappedCount: 0,
-        failedCount: 0,
-        errors: [],
-        matchedContents: [],
-      };
+      return emptyForgetSummary();
     }
 
     return this.runWithUserLock(canonicalUserId, async () => {
       const matches = this.repo.searchMemorySyncRecords(canonicalUserId, trimmed, 50);
-      if (matches.length === 0) {
-        return {
-          matchedCount: 0,
-          erasedLocalCount: 0,
-          erasedRemoteCount: 0,
-          alreadyErasedCount: 0,
-          missingRemoteCount: 0,
-          unmappedCount: 0,
-          failedCount: 0,
-          errors: [],
-          matchedContents: [],
-        };
-      }
-
-      const byBank: Record<"persona" | "tech", MemorySyncRecordView[]> = {
-        persona: [],
-        tech: [],
-      };
-      for (const rec of matches) {
-        if (rec.bank === "persona" || rec.bank === "tech") {
-          byBank[rec.bank].push(rec);
-        }
-      }
-
-      const summary: ForgetRunSummary = {
-        matchedCount: matches.length,
-        erasedLocalCount: 0,
-        erasedRemoteCount: 0,
-        alreadyErasedCount: 0,
-        missingRemoteCount: 0,
-        unmappedCount: 0,
-        failedCount: 0,
-        errors: [],
-        matchedContents: matches.map((m) => m.content),
-      };
-
-      const localIdsToErase: string[] = [];
-
-      for (const bank of ["persona", "tech"] as const) {
-        const records = byBank[bank];
-        if (records.length === 0) continue;
-
-        const withoutRemoteId = records.filter((r) => !r.externalMemoryId);
-        for (const r of withoutRemoteId) {
-          localIdsToErase.push(r.id);
-        }
-
-        const withRemote = records.filter((r) => Boolean(r.externalMemoryId));
-        if (withRemote.length === 0) continue;
-
-        if (!this.memoryStore || !this.memoryStore.isConfigured()) {
-          summary.failedCount += withRemote.length;
-          summary.errors.push(`记忆提供商当前未启用，无法从远程 ${bank} 库删除 ${withRemote.length} 条记录`);
-          continue;
-        }
-
-        const remoteIds = withRemote.map((r) => r.externalMemoryId!);
-        const eraseRes = await this.memoryStore.erase(canonicalUserId, {
-          bank,
-          memoryIds: remoteIds,
-        });
-
-        if (!eraseRes.ok) {
-          summary.failedCount += withRemote.length;
-          summary.errors.push(eraseRes.errorMessage ?? `远程 ${bank} 库删除失败`);
-          continue;
-        }
-
-        summary.erasedRemoteCount += eraseRes.erased.length;
-        summary.alreadyErasedCount += eraseRes.alreadyErased.length;
-        summary.missingRemoteCount += eraseRes.missing.length;
-        summary.unmappedCount += eraseRes.unmapped.length;
-
-        const unmappedSet = new Set(eraseRes.unmapped);
-        for (const rec of withRemote) {
-          if (!unmappedSet.has(rec.externalMemoryId!)) {
-            localIdsToErase.push(rec.id);
-          }
-        }
-      }
-
-      if (localIdsToErase.length > 0) {
-        this.repo.markMemoryRecordsErased(localIdsToErase);
-        summary.erasedLocalCount = localIdsToErase.length;
-      }
-
-      return summary;
+      return this.eraseMatchedRecords(canonicalUserId, matches);
     });
+  }
+
+  async forgetByRecordIds(canonicalUserId: string, recordIds: string[]): Promise<ForgetRunSummary> {
+    const cleanIds = [...new Set(recordIds.map((id) => id.trim()).filter(Boolean))];
+    if (cleanIds.length === 0) {
+      return emptyForgetSummary();
+    }
+
+    return this.runWithUserLock(canonicalUserId, async () => {
+      const matches = this.repo.getMemorySyncRecordsByIds(canonicalUserId, cleanIds);
+      return this.eraseMatchedRecords(canonicalUserId, matches);
+    });
+  }
+
+  private async eraseMatchedRecords(
+    canonicalUserId: string,
+    matches: MemorySyncRecordView[],
+  ): Promise<ForgetRunSummary> {
+    if (matches.length === 0) {
+      return emptyForgetSummary();
+    }
+
+    const byBank: Record<"persona" | "tech", MemorySyncRecordView[]> = {
+      persona: [],
+      tech: [],
+    };
+    for (const rec of matches) {
+      if (rec.bank === "persona" || rec.bank === "tech") {
+        byBank[rec.bank].push(rec);
+      }
+    }
+
+    const summary: ForgetRunSummary = {
+      matchedCount: matches.length,
+      erasedLocalCount: 0,
+      erasedRemoteCount: 0,
+      alreadyErasedCount: 0,
+      missingRemoteCount: 0,
+      unmappedCount: 0,
+      failedCount: 0,
+      errors: [],
+      matchedContents: matches.map((m) => m.content),
+    };
+
+    const localIdsToErase: string[] = [];
+
+    for (const bank of ["persona", "tech"] as const) {
+      const records = byBank[bank];
+      if (records.length === 0) continue;
+
+      const withoutRemoteId = records.filter((r) => !r.externalMemoryId);
+      for (const r of withoutRemoteId) {
+        localIdsToErase.push(r.id);
+      }
+
+      const withRemote = records.filter((r) => Boolean(r.externalMemoryId));
+      if (withRemote.length === 0) continue;
+
+      if (!this.memoryStore || !this.memoryStore.isConfigured()) {
+        summary.failedCount += withRemote.length;
+        summary.errors.push(`记忆提供商当前未启用，无法从远程 ${bank} 库删除 ${withRemote.length} 条记录`);
+        continue;
+      }
+
+      const remoteIds = withRemote.map((r) => r.externalMemoryId!);
+      const eraseRes = await this.memoryStore.erase(canonicalUserId, {
+        bank,
+        memoryIds: remoteIds,
+      });
+
+      if (!eraseRes.ok) {
+        summary.failedCount += withRemote.length;
+        summary.errors.push(eraseRes.errorMessage ?? `远程 ${bank} 库删除失败`);
+        continue;
+      }
+
+      summary.erasedRemoteCount += eraseRes.erased.length;
+      summary.alreadyErasedCount += eraseRes.alreadyErased.length;
+      summary.missingRemoteCount += eraseRes.missing.length;
+      summary.unmappedCount += eraseRes.unmapped.length;
+
+      const unmappedSet = new Set(eraseRes.unmapped);
+      for (const rec of withRemote) {
+        if (!unmappedSet.has(rec.externalMemoryId!)) {
+          localIdsToErase.push(rec.id);
+        }
+      }
+    }
+
+    if (localIdsToErase.length > 0) {
+      this.repo.markMemoryRecordsErased(localIdsToErase);
+      summary.erasedLocalCount = localIdsToErase.length;
+    }
+
+    return summary;
   }
 
   dispose(): void {
@@ -822,5 +821,19 @@ function emptySummary(): RetainRunSummary {
     deniedCount: 0,
     errorCount: 0,
     retriedCount: 0,
+  };
+}
+
+function emptyForgetSummary(): ForgetRunSummary {
+  return {
+    matchedCount: 0,
+    erasedLocalCount: 0,
+    erasedRemoteCount: 0,
+    alreadyErasedCount: 0,
+    missingRemoteCount: 0,
+    unmappedCount: 0,
+    failedCount: 0,
+    errors: [],
+    matchedContents: [],
   };
 }

@@ -201,6 +201,49 @@ function getKindBadge(kind: LedgerKind, slot: string): { text: string; cls: stri
   };
 }
 
+interface ParsedRecalledMemory {
+  key: string;
+  bank: string;
+  id: string;
+  date?: string;
+  content: string;
+}
+
+function parseRecalledMemoriesFromSnapshot(
+  snapshotText: string | null | undefined,
+): ParsedRecalledMemory[] {
+  if (!snapshotText) return [];
+  const blockMatch = snapshotText.match(/<recalled_memories>\s*([\s\S]*?)\s*<\/recalled_memories>/);
+  if (!blockMatch) return [];
+  const lines = blockMatch[1].split(/\r?\n/);
+  const entries: ParsedRecalledMemory[] = [];
+  let current: ParsedRecalledMemory | null = null;
+
+  for (const line of lines) {
+    const headerMatch = line.match(
+      /^- \[([^:\]\s]+):([^\s\]]+)(?:\s+\((\d{4}-\d{2}-\d{2})\))?\]\s*(.*)$/,
+    );
+    if (headerMatch) {
+      if (current) entries.push(current);
+      const bank = headerMatch[1];
+      const id = headerMatch[2];
+      const date = headerMatch[3];
+      const firstLine = headerMatch[4]?.trim() ?? "";
+      current = {
+        key: `${bank}:${id}`,
+        bank,
+        id,
+        ...(date ? { date } : {}),
+        content: firstLine,
+      };
+    } else if (current && line.trim()) {
+      current.content = current.content ? `${current.content}\n${line.trim()}` : line.trim();
+    }
+  }
+  if (current) entries.push(current);
+  return entries;
+}
+
 export interface TrajectoryPanelProps {
   onToast: (input: { title: string; description?: string; status?: "info" | "success" | "error" }) => void;
   sessionEpoch?: number;
@@ -569,6 +612,10 @@ export function TrajectoryPanel({
   const selectedRecalled = useMemo(
     () => (selectedTrace ? parseJsonArray(selectedTrace.recalledIdsJson) : []),
     [selectedTrace],
+  );
+  const selectedRecalledEntries = useMemo(
+    () => parseRecalledMemoriesFromSnapshot(selectedTrace?.timeCardText),
+    [selectedTrace?.timeCardText],
   );
 
   const assistantOutputBlocks = useMemo(() => {
@@ -1140,18 +1187,46 @@ export function TrajectoryPanel({
 
                     <div className="flex flex-col gap-2 pt-3">
                       <span className="text-[11px] font-medium text-muted-foreground">
-                        本次召回记忆 ({selectedRecalled.length} 条)
+                        本次召回记忆 ({Math.max(selectedRecalled.length, selectedRecalledEntries.length)} 条)
                       </span>
-                      {selectedRecalled.length > 0 ? (
-                        <div className="flex flex-wrap gap-1.5">
-                          {selectedRecalled.map((rid) => (
-                            <span
-                              key={rid}
-                              className="rounded border border-emerald-500/25 bg-emerald-500/10 px-2 py-0.5 font-mono text-[11px] text-emerald-700 dark:text-emerald-300"
+                      {selectedRecalledEntries.length > 0 ? (
+                        <div className="flex flex-col gap-2">
+                          {selectedRecalledEntries.map((entry, idx) => (
+                            <div
+                              key={`${entry.key}-${idx}`}
+                              className="rounded-lg border border-emerald-500/20 bg-emerald-500/[0.05] p-2.5"
                             >
-                              {rid}
-                            </span>
+                              <div className="mb-1 flex flex-wrap items-center gap-1.5">
+                                <span className="rounded border border-emerald-500/25 bg-emerald-500/10 px-1.5 py-0.5 font-mono text-[10px] text-emerald-700 dark:text-emerald-300">
+                                  {entry.key}
+                                </span>
+                                {entry.date ? (
+                                  <span className="font-mono text-[10px] text-muted-foreground">
+                                    {entry.date}
+                                  </span>
+                                ) : null}
+                              </div>
+                              <p className="whitespace-pre-wrap break-words text-xs leading-relaxed text-foreground">
+                                {entry.content || "（空内容）"}
+                              </p>
+                            </div>
                           ))}
+                        </div>
+                      ) : selectedRecalled.length > 0 ? (
+                        <div className="flex flex-col gap-1.5">
+                          <div className="flex flex-wrap gap-1.5">
+                            {selectedRecalled.map((rid) => (
+                              <span
+                                key={rid}
+                                className="rounded border border-emerald-500/25 bg-emerald-500/10 px-2 py-0.5 font-mono text-[11px] text-emerald-700 dark:text-emerald-300"
+                              >
+                                {rid}
+                              </span>
+                            ))}
+                          </div>
+                          <p className="text-[11px] text-muted-foreground">
+                            （历史轮次仅记录了记忆 ID，新对话轮次将展示完整召回内容）
+                          </p>
                         </div>
                       ) : (
                         <p className="text-xs text-muted-foreground">（本次未召回记忆条目）</p>

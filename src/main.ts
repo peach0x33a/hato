@@ -1426,6 +1426,7 @@ async function main(): Promise<void> {
     getBrowserRuntime: () => browserRuntime,
     getCompactionManager: () => compactionManager,
     getMemoryCurator: () => memoryCurator,
+    getMemoryStore: () => memoryStore,
     getTicketCoordinator: () => ticketCoordinator,
     getLiveTraceTracker: () => liveTraceTracker,
     getActorLock: () => actorLock,

@@ -1728,6 +1728,25 @@ export class HatoRepository {
     return rows.map(toMemorySyncRecordView);
   }
 
+  getMemorySyncRecordsByIds(canonicalUserId: string, ids: string[]): MemorySyncRecordView[] {
+    const cleanIds = [...new Set(ids.map((id) => id.trim()).filter(Boolean))];
+    if (cleanIds.length === 0) return [];
+    const rows = this.db
+      .select()
+      .from(memorySyncRecords)
+      .where(
+        and(
+          eq(memorySyncRecords.canonicalUserId, canonicalUserId),
+          inArray(memorySyncRecords.id, cleanIds),
+          ne(memorySyncRecords.status, "erased"),
+        ),
+      )
+      .orderBy(desc(memorySyncRecords.createdAt))
+      .all();
+
+    return rows.map(toMemorySyncRecordView);
+  }
+
   searchMemorySyncRecords(
     canonicalUserId: string,
     query: string,

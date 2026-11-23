@@ -3,6 +3,7 @@ import {
   ArrowLeft,
   BookMarked,
   Bot,
+  Brain,
   Compass,
   Cpu,
   FileText,
@@ -32,6 +33,7 @@ import {
 import { ChatPanel } from "@/components/console/ChatPanel";
 import { ConsoleInput } from "@/components/console/ConsolePrimitives";
 import { LogsPanel } from "@/components/console/LogsPanel";
+import { MemoryPanel } from "@/components/console/MemoryPanel";
 import { ModelsConfigPanel } from "@/components/console/ModelsConfigPanel";
 import { NotebookPanel } from "@/components/console/NotebookPanel";
 import { OverviewPanel } from "@/components/console/OverviewPanel";
@@ -65,6 +67,7 @@ type ConsoleTab =
   | "chat"
   | "stickers"
   | "notebook"
+  | "memory"
   | "browser"
   | "logs"
   | "models"
@@ -80,6 +83,7 @@ const NAV_ITEMS: Array<{
   { id: "chat", label: "对话", icon: MessageSquare },
   { id: "stickers", label: "表情包库", icon: Smile },
   { id: "notebook", label: "小本本", icon: BookMarked },
+  { id: "memory", label: "记忆库", icon: Brain },
   { id: "browser", label: "远程浏览器", icon: Compass },
   { id: "logs", label: "服务日志", icon: Terminal },
   { id: "models", label: "模型与供应商", icon: Cpu },
@@ -91,6 +95,7 @@ const VALID_TABS = new Set<ConsoleTab>([
   "chat",
   "stickers",
   "notebook",
+  "memory",
   "browser",
   "logs",
   "models",
@@ -794,6 +799,8 @@ function ConsoleShell() {
                 {workspaceTab === "stickers" && <StickersPanel onToast={notify} />}
 
                 {workspaceTab === "notebook" && <NotebookPanel onToast={notify} />}
+
+                {workspaceTab === "memory" && <MemoryPanel onToast={notify} />}
 
                 {workspaceTab === "logs" && <LogsPanel onToast={notify} />}
 

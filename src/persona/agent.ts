@@ -336,7 +336,7 @@ export class PersonaRuntime {
           ];
         }
         const nowMs = Date.now();
-        const { tailText, timeCardText } = buildEphemeralContextBlock({
+        const { tailText } = buildEphemeralContextBlock({
           nowMs,
           repo: this.repo,
           canonicalUserId,
@@ -344,7 +344,7 @@ export class PersonaRuntime {
           quietHours: this.hatoConfig.owner.quiet_hours,
           recalledMemories: this.activeTurnRecalledMemories,
         });
-        this.lastTimeCardSnapshot = timeCardText;
+        this.lastTimeCardSnapshot = tailText;
         return [
           ...messages,
           {
@@ -1323,10 +1323,10 @@ export class PersonaRuntime {
       quietHours: this.hatoConfig.owner.quiet_hours,
       recalledMemories: this.activeTurnRecalledMemories,
     });
-    this.lastTimeCardSnapshot = frozenEphemeral.timeCardText;
+    this.lastTimeCardSnapshot = frozenEphemeral.tailText;
     this.activeTurnEphemeralTail = {
       tailText: frozenEphemeral.tailText,
-      timeCardText: frozenEphemeral.timeCardText,
+      timeCardText: frozenEphemeral.tailText,
       timestamp: frozenNowMs,
       anchorMessageId: userAgentMsg.role === "hato_user_batch" ? userAgentMsg.id : undefined,
     };
@@ -1642,10 +1642,10 @@ export class PersonaRuntime {
       baseTimezone: this.hatoConfig.owner.timezone,
       quietHours: this.hatoConfig.owner.quiet_hours,
     });
-    this.lastTimeCardSnapshot = frozenEphemeral.timeCardText;
+    this.lastTimeCardSnapshot = frozenEphemeral.tailText;
     this.activeTurnEphemeralTail = {
       tailText: frozenEphemeral.tailText,
-      timeCardText: frozenEphemeral.timeCardText,
+      timeCardText: frozenEphemeral.tailText,
       timestamp: frozenNowMs,
       anchorAgentIndex: startIndex,
     };

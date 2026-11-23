@@ -438,6 +438,119 @@ export interface UpstreamModelEntry {
   modelsDev?: ModelsDevMappedMetadata;
 }
 
+export type MemorySyncBank = "persona" | "tech" | "notebook";
+export type MemorySyncStatus = "synced" | "degraded" | "denied" | "error" | "erased";
+
+export interface MemorySyncRecord {
+  id: string;
+  canonicalUserId: string;
+  provider: string;
+  bank: MemorySyncBank;
+  vaultId: string | null;
+  sourceMsgIds: string[];
+  content: string;
+  externalMemoryId: string | null;
+  status: MemorySyncStatus;
+  errorCode: string | null;
+  errorMessage: string | null;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface MemorySyncStats {
+  total: number;
+  synced: number;
+  degraded: number;
+  denied: number;
+  error: number;
+  erased: number;
+  pendingRawMessages: number;
+}
+
+export interface MemoryVaultInfo {
+  id: string;
+  name: string;
+  description: string | null;
+  vaultType: string;
+  memoryCount: number;
+  storageBytes: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface MemoryUsageSummary {
+  vaultCount: number;
+  periodKind: string;
+  periodStart: string;
+  periodEnd: string;
+  unitsPerCredit: number;
+  createCredits: number;
+  createCount: number;
+  queryCredits: number;
+  queryCount: number;
+  userPaidCredits: number;
+}
+
+export interface WorkingMemoryState {
+  canonicalUserId: string;
+  userProfile: string;
+  summary: string;
+  openLoops: string[];
+  updatedAt: number;
+}
+
+export interface MemoryRecallItem {
+  id: string;
+  bank: MemorySyncBank;
+  content: string;
+  role?: string;
+  score?: number;
+  createdAt?: string;
+  metadata?: Record<string, unknown> | null;
+}
+
+export interface MemoryRecallResult {
+  ok: boolean;
+  bank: MemorySyncBank;
+  items: MemoryRecallItem[];
+  degraded: boolean;
+  fallbackMessages?: MemoryRecallItem[];
+  errorCode?: string;
+  errorMessage?: string;
+}
+
+export interface MemoryOverviewResponse {
+  ok: boolean;
+  provider: "memoryecho" | "hindsight" | "none";
+  configured: boolean;
+  stats: MemorySyncStats;
+  vaults: MemoryVaultInfo[];
+  usage: MemoryUsageSummary | null;
+  workingMemory: WorkingMemoryState;
+}
+
+export interface MemoryRetainSummary {
+  processedMessages: number;
+  extractedCount: number;
+  syncedCount: number;
+  degradedCount: number;
+  deniedCount: number;
+  errorCount: number;
+  retriedCount: number;
+}
+
+export interface MemoryForgetSummary {
+  matchedCount: number;
+  erasedLocalCount: number;
+  erasedRemoteCount: number;
+  alreadyErasedCount: number;
+  missingRemoteCount: number;
+  unmappedCount: number;
+  failedCount: number;
+  errors: string[];
+  matchedContents: string[];
+}
+
 export interface ProviderConfig {
   name?: string;
   slug?: string;
@@ -1360,6 +1473,43 @@ export const api = {
       controller?.abort();
     };
   },
+  getMemoryOverview: () => requestJson<MemoryOverviewResponse>("/api/memory/overview"),
+  listMemoryRecords: (params?: {
+    bank?: MemorySyncBank;
+    status?: MemorySyncStatus;
+    includeErased?: boolean;
+    q?: string;
+    limit?: number;
+  }) => {
+    const q = new URLSearchParams();
+    if (params?.bank) q.set("bank", params.bank);
+    if (params?.status) q.set("status", params.status);
+    if (params?.includeErased) q.set("includeErased", "1");
+    if (params?.q?.trim()) q.set("q", params.q.trim());
+    if (params?.limit) q.set("limit", String(params.limit));
+    const qs = q.toString();
+    return requestJson<{ ok: boolean; records: MemorySyncRecord[] }>(
+      `/api/memory/records${qs ? `?${qs}` : ""}`,
+    );
+  },
+  recallMemory: (input: { query: string; bank?: MemorySyncBank; limit?: number }) =>
+    requestJson<{ ok: boolean; result: MemoryRecallResult }>("/api/memory/recall", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(input),
+    }),
+  syncMemory: (input?: { includeDenied?: boolean }) =>
+    requestJson<{ ok: boolean; summary: MemoryRetainSummary }>("/api/memory/sync", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(input ?? {}),
+    }),
+  forgetMemory: (input: { recordIds?: string[]; query?: string }) =>
+    requestJson<{ ok: boolean; summary: MemoryForgetSummary }>("/api/memory/forget", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(input),
+    }),
 };
 
 async function consumeSseStream<T>(
