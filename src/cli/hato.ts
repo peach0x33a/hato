@@ -23,7 +23,7 @@ function printHelp(): string {
     "",
     "用法:",
     "  hato [start]           启动 Hato 服务（Telegram 网关 + Web Console）",
-    "  hato setup [选项]      运行交互式配置向导",
+    "  hato setup [子命令]    运行交互式配置向导（quick 简易模式 / full 全量模式 / provider / slots / proxy / check）",
     "  hato statics [选项]    查看运行与 Token 用量统计（别名: stats）",
     "  hato check-update      检查 GitHub Release 新版本（可选: --channel stable|nightly）",
     "  hato -v, --version     显示版本号",
