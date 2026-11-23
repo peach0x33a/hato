@@ -27,6 +27,7 @@ import {
   type HatoConfig,
 } from "../config/app.js";
 import { supportsCustomFetchOption, type ModelRegistry } from "../config/models.js";
+import { GoogleExplicitCacheManager } from "../config/google-explicit-cache.js";
 import type { ScopedProxyRouter } from "../config/proxy.js";
 import type { HatoRepository, RawMessageRecord } from "../db/repo.js";
 import type { InboundBatch, InboundMessage } from "../gateway/types.js";
@@ -67,11 +68,7 @@ import {
 } from "./interruption.js";
 import { loadLayeredPrompts, type LoadedLayeredPrompts } from "./prompts.js";
 import { createPersonaReadOnlyTools } from "./tools.js";
-import {
-  buildToolIndexBlock,
-  createActivateToolsTool,
-  selectToolsForTurn,
-} from "./tool-disclosure.js";
+import { sortToolsCanonically } from "./tool-disclosure.js";
 
 export const NO_REPLY_SENTINEL = "[NO_REPLY]";
 
@@ -124,7 +121,7 @@ export class PersonaRuntime {
   private personalSkillsIndexText = "";
   private allTools: AgentTool<any>[] = [];
   private toolIndexText = "";
-  private readonly sessionTools = new Set<string>();
+  private readonly googleExplicitCache: GoogleExplicitCacheManager;
   private lastTimeCardSnapshot = "";
   private activeCallStartPerf: number | null = null;
   private activeBeforeToolHook: ((toolName: string, input: unknown) => Promise<void>) | null = null;
@@ -266,16 +263,15 @@ export class PersonaRuntime {
     private readonly hatoConfigPath = "config/hato.toml",
     private readonly mcpPool: McpClientPool | null = null,
   ) {
+    this.googleExplicitCache = new GoogleExplicitCacheManager({
+      proxyRouter: this.proxyRouter,
+    });
     this.reloadPrompt();
     const resolved = this.modelRegistry.resolveSlot("persona");
     const canonicalUserId = this.hatoConfig.owner.canonical_user_id;
-    this.allTools = this.buildPersonaTools();
-    this.toolIndexText = buildToolIndexBlock(this.allTools);
-    const tools = selectToolsForTurn({
-      allTools: this.allTools,
-      userText: "",
-      hasPersonalSkills: this.personalSkills.length > 0,
-    });
+    this.allTools = sortToolsCanonically(this.buildPersonaTools());
+    this.toolIndexText = "";
+    const tools = this.allTools;
 
     const initialHistory = hydrateTranscriptFromDb(this.repo, canonicalUserId);
     this.syncedCompactedUntilTs = this.repo.getWorkingMemory(canonicalUserId).compactedUntilTs;
@@ -298,6 +294,7 @@ export class PersonaRuntime {
       getApiKey: (provider) => this.modelRegistry.resolveApiKeyForProvider(provider),
       streamFn: (model, context, options) => {
         const scopedFetch = this.proxyRouter.createScopedFetch(`llm-calling.${model.provider}`);
+        const baseOnPayload = options?.onPayload;
         return streamSimpleWithRetry(
           () => {
             this.activeCallStartPerf = performance.now();
@@ -306,6 +303,26 @@ export class PersonaRuntime {
                 this.modelRegistry.models.streamSimple(model, context, {
                   ...options,
                   ...(supportsCustomFetchOption(model.api) ? { fetch: scopedFetch } : {}),
+                  onPayload: async (payload, targetModel) => {
+                    const userModified = baseOnPayload
+                      ? await baseOnPayload(payload, targetModel)
+                      : undefined;
+                    const effectivePayload = userModified !== undefined ? userModified : payload;
+                    if (targetModel.api !== "google-generative-ai") {
+                      return userModified;
+                    }
+                    const apiKey =
+                      options?.apiKey ??
+                      this.modelRegistry.resolveApiKeyForProvider(targetModel.provider);
+                    const ttlMinutes = this.modelRegistry.resolveSlot("persona").cacheTtlMinutes;
+                    const cachedPayload = await this.googleExplicitCache.preparePayload({
+                      model: targetModel,
+                      apiKey,
+                      payload: effectivePayload,
+                      ttlMinutes,
+                    });
+                    return cachedPayload !== undefined ? cachedPayload : userModified;
+                  },
                 }),
               ),
             );
@@ -316,6 +333,9 @@ export class PersonaRuntime {
             model,
             slot: "PERSONA",
             onRetryNotice: async (notice) => {
+              if (/cachedContent/i.test(notice.errorSummary ?? "")) {
+                this.googleExplicitCache.invalidateForModel(model.provider, model.id);
+              }
               await this.activeRetryNoticeHook?.(notice);
             },
           },
@@ -587,14 +607,9 @@ export class PersonaRuntime {
   }
 
   syncTools(): void {
-    this.allTools = this.buildPersonaTools();
-    this.toolIndexText = buildToolIndexBlock(this.allTools);
-    this.agent.state.tools = selectToolsForTurn({
-      allTools: this.allTools,
-      userText: "",
-      hasPersonalSkills: this.personalSkills.length > 0,
-      previouslyActivated: this.sessionTools,
-    });
+    this.allTools = sortToolsCanonically(this.buildPersonaTools());
+    this.toolIndexText = "";
+    this.agent.state.tools = this.allTools;
   }
 
   getToolIndexText(): string {
@@ -692,16 +707,6 @@ export class PersonaRuntime {
 
   private buildPersonaTools(): AgentTool<any>[] {
     const canonicalUserId = this.hatoConfig.owner.canonical_user_id;
-    const activateToolsTool = createActivateToolsTool({
-      getAllTools: () => this.allTools,
-      getActiveTools: () => this.agent.state.tools,
-      setActiveTools: (nextTools) => {
-        this.agent.state.tools = nextTools;
-      },
-      onActivated: (names) => {
-        for (const n of names) this.sessionTools.add(n);
-      },
-    });
     return createPersonaReadOnlyTools({
       repo: this.repo,
       canonicalUserId,
@@ -712,7 +717,6 @@ export class PersonaRuntime {
       getMemoryStore: () => this.memoryStore,
       enableReadSkillTool: this.personalSkills.length > 0,
       extraTools: [
-        activateToolsTool,
         ...(this.mcpPool?.getToolsForZone("personal") ?? []),
       ],
       ...(this.delegateHandler
@@ -999,13 +1003,8 @@ export class PersonaRuntime {
     this.lastTimeCardSnapshot = "";
     this.lastCompletedEphemeralTail = null;
     this.pendingSupersededImages.clear();
-    this.sessionTools.clear();
     this.agent.clearAllQueues();
-    this.agent.state.tools = selectToolsForTurn({
-      allTools: this.allTools,
-      userText: "",
-      hasPersonalSkills: this.personalSkills.length > 0,
-    });
+    this.agent.state.tools = this.allTools;
     this.refreshTranscriptFromDb();
   }
 
@@ -1284,18 +1283,7 @@ export class PersonaRuntime {
 
     this.activePhotoSender = trackedSendPhoto ?? null;
     this.browserRuntime?.setPhotoSender(trackedSendPhoto ?? null);
-    const turnTools = selectToolsForTurn({
-      allTools: this.allTools,
-      userText: batch.combinedText,
-      hasImages: effectiveImages.length > 0,
-      hasAttachments: batch.attachments.length > 0,
-      hasPersonalSkills: this.personalSkills.length > 0,
-      previouslyActivated: this.sessionTools,
-    });
-    for (const t of turnTools) {
-      this.sessionTools.add(t.name);
-    }
-    this.agent.state.tools = turnTools;
+    this.agent.state.tools = this.allTools;
     if (
       this.agent.state.messages.length === 1 &&
       this.agent.state.messages[0]?.role === "system"
@@ -1308,7 +1296,7 @@ export class PersonaRuntime {
       );
       const refreshedLeading = createInitialSystemMessage(
         systemPromptText,
-        turnTools.map(toToolDeclaration),
+        this.allTools.map(toToolDeclaration),
       );
       if (refreshedLeading) {
         this.agent.state.messages = [refreshedLeading];
@@ -1583,19 +1571,7 @@ export class PersonaRuntime {
     this.agent.state.model = resolved.model;
     this.agent.state.thinkingLevel = this.modelRegistry.resolveSlotThinkingLevel("persona");
     this.syncTranscriptIfDrifted(params.canonicalUserId);
-
-    const turnTools = selectToolsForTurn({
-      allTools: this.allTools,
-      userText: `${params.eventSummary}\n${params.promptInstruction}`,
-      hasImages: (params.images?.length ?? 0) > 0,
-      hasAttachments: true,
-      hasPersonalSkills: this.personalSkills.length > 0,
-      previouslyActivated: this.sessionTools,
-    });
-    for (const t of turnTools) {
-      this.sessionTools.add(t.name);
-    }
-    this.agent.state.tools = turnTools;
+    this.agent.state.tools = this.allTools;
 
     if (params.persistEvent !== false) {
       const savedEvent = this.repo.appendRawMessage({

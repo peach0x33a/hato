@@ -459,19 +459,14 @@ hindsight_llm = "faux-provider/faux-persona-thinking"
     const proxyRouter = new ScopedProxyRouter(config.network?.proxies ?? []);
     const runtime = new PersonaRuntime(config, registry, proxyRouter, repo);
 
-    // 1) Mid-turn activate_tools exposes newly activated tool on Step 2 of the SAME turn
+    // 1) Fixed full toolset: calc is immediately available on Step 1 without activate_tools
     let step1HasCalc = false;
-    let step2HasCalc = false;
+    let step1ToolNames: string[] = [];
     faux.setResponses([
       (ctx) => {
-        step1HasCalc = getCurrentTools(ctx.messages).some((t) => t.name === "calc");
-        return fauxAssistantMessage(
-          [fauxToolCall("activate_tools", { tools: ["calc"] })],
-          { stopReason: "toolUse" },
-        );
-      },
-      (ctx) => {
-        step2HasCalc = getCurrentTools(ctx.messages).some((t) => t.name === "calc");
+        const tools = getCurrentTools(ctx.messages);
+        step1ToolNames = tools.map((t) => t.name);
+        step1HasCalc = tools.some((t) => t.name === "calc");
         return fauxAssistantMessage(
           [fauxToolCall("calc", { expression: "21 + 21" })],
           { stopReason: "toolUse" },
@@ -491,16 +486,18 @@ hindsight_llm = "faux-provider/faux-persona-thinking"
       firstTimestampMs: Date.now(),
       lastTimestampMs: Date.now(),
     });
-    assert.equal(step1HasCalc, false);
-    assert.equal(step2HasCalc, true);
-    assert.deepEqual(t1.toolCalls, ["activate_tools", "calc"]);
+    assert.equal(step1HasCalc, true);
+    assert.equal(step1ToolNames.includes("activate_tools"), false);
+    assert.deepEqual(t1.toolCalls, ["calc"]);
     assert.deepEqual(t1.bubbles, ["算出来是 42"]);
 
-    // 2) Turn 2 preserves Turn 1 toolCall + toolResult blocks and handles inline image without crashing on Turn 3
+    // 2) Turn 2 keeps exact same fixed tools, preserves Turn 1 toolCall + toolResult blocks, and handles inline image
+    let turn2ToolNames: string[] = [];
     let turn2SawPriorToolCalls = false;
     let turn2SawPriorToolResult = false;
     faux.setResponses([
       (ctx) => {
+        turn2ToolNames = getCurrentTools(ctx.messages).map((t) => t.name);
         turn2SawPriorToolCalls = ctx.messages.some(
           (m) =>
             m.role === "assistant" &&

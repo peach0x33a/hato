@@ -725,4 +725,11 @@ Hato/
 
 ### Phase 6：QQ 官方 Bot 通道、Web Console 与 Persona 能力演进（已实现）
 * 已实现 `src/gateway/qq.ts`（QQ 官方 Bot C2C 收发、富媒体上传、`msg_seq` 裁剪与跨端兜底）与 `src/web-console/server.ts`（Web 控制台与调试面板）。
-* Persona 层已升级为**渐进式工具披露**（`src/persona/tool-disclosure.ts` + `activate_tools`），并补齐异步 `image_gen`（创作生图归 Persona、异步走 `ticket_result` 结算）、`read_artifact`（文本/图片产物验收）、`deliver_files` 多模态回流、`render_markdown_image`、`self_config` / `bot_profile` 及完整表情包系统（`src/stickers/`）。
+* Persona 层已补齐异步 `image_gen`（创作生图归 Persona、异步走 `ticket_result` 结算）、`read_artifact`（文本/图片产物验收）、`deliver_files` 多模态回流、`render_markdown_image`、`self_config` / `bot_profile` 及完整表情包系统（`src/stickers/`）。
+* **工具列表固定化（缓存优先）**：Persona 全量工具在会话启动时按规范顺序固定注入顶层 `tools`，不在对话中途按关键词增删 `tools`，避免破坏 Gemini / Anthropic / OpenAI 的前缀 KV Cache；同时针对 `google-generative-ai` 接入官方 Explicit Context Caching（`cachedContents`）。
+
+### Phase 7（路线图）：Cache-Safe 渐进式工具披露（Meta-Tool / Append-Only Proxy）
+* 当 Persona + Personal MCP 工具总数扩张至 30–50+、固定全量注入 schema 成本过高时，演进为**不修改顶层 `tools` 前缀的元工具代理模式**：
+  1. 顶层 `tools` 永远固定为高频核心工具 + 两个固定元工具：`describe_tool(names)` 与 `invoke_tool(name, arguments)`；
+  2. `describe_tool` 将目标工具的完整参数 Schema 作为普通 `tool_result` 文本追加到对话末尾（严格 append-only），`invoke_tool` 负责统一校验与路由执行；
+  3. 保证 `systemInstruction` 与顶层 `tools` 前缀字节级零变动，在工具规模扩张的同时 100% 保留跨厂商前缀缓存命中率。
