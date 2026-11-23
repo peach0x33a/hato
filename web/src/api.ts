@@ -45,6 +45,7 @@ export interface SlotView {
   api: string;
   baseUrl: string;
   thinkingLevel?: ThinkingLevel;
+  supportedThinkingLevels?: ThinkingLevel[];
   reasoning?: boolean;
 }
 

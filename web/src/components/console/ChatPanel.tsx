@@ -640,16 +640,28 @@ export function ChatPanel({
                     disabled={savingThinking}
                     value={personaSlot.thinkingLevel ?? "medium"}
                     onValueChange={(next) => void handleChangePersonaThinking(next)}
-                    options={[
-                      { value: "off", label: "off (关闭)" },
-                      { value: "minimal", label: "minimal" },
-                      { value: "low", label: "low" },
-                      { value: "medium", label: "medium" },
-                      { value: "high", label: "high" },
-                      { value: "xhigh", label: "xhigh" },
-                      { value: "max", label: "max" },
-                      { value: "auto", label: "恢复默认" },
-                    ]}
+                    options={(() => {
+                      const allOptions = [
+                        { value: "off", label: "off (关闭)" },
+                        { value: "minimal", label: "minimal" },
+                        { value: "low", label: "low" },
+                        { value: "medium", label: "medium" },
+                        { value: "high", label: "high" },
+                        { value: "xhigh", label: "xhigh" },
+                        { value: "max", label: "max" },
+                        { value: "auto", label: "恢复默认" },
+                      ];
+                      const supported = personaSlot.supportedThinkingLevels;
+                      if (!supported || supported.length === 0) {
+                        return allOptions.filter(
+                          (opt) => opt.value !== "xhigh" && opt.value !== "max",
+                        );
+                      }
+                      const allowed = new Set<string>(supported);
+                      return allOptions.filter(
+                        (opt) => opt.value === "auto" || allowed.has(opt.value),
+                      );
+                    })()}
                     triggerClassName="h-6 min-w-[92px] border-border/70 bg-muted/40 px-2 py-0 text-[11px]"
                   />
                 </div>

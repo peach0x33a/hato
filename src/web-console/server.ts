@@ -2,7 +2,7 @@ import { timingSafeEqual } from "node:crypto";
 import { copyFileSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import http, { type IncomingMessage, type ServerResponse } from "node:http";
 import { dirname, extname, resolve, sep } from "node:path";
-import type { ImageContent } from "@earendil-works/pi-ai";
+import { getSupportedThinkingLevels, type ImageContent } from "@earendil-works/pi-ai";
 import type { BrowserRuntime } from "../browser/runtime.js";
 import type { ActorLock } from "../bus/actor-bus.js";
 import { tryExecuteSlashCommand, type SlashCommandDeps } from "../commands/slash.js";
@@ -1307,6 +1307,7 @@ export class WebConsoleServer {
       api: String(s.model.api),
       baseUrl: s.model.baseUrl,
       thinkingLevel: registry.resolveSlotThinkingLevel(s.slot),
+      supportedThinkingLevels: getSupportedThinkingLevels(s.model),
       reasoning: Boolean(s.model.reasoning),
     }));
   }

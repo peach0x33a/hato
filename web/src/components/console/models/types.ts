@@ -22,6 +22,39 @@ export const THINKING_LEVEL_SELECT_OPTIONS: Array<{
   { value: "max", label: "max", hint: "最大预算" },
 ];
 
+const ALL_THINKING_LEVELS: ThinkingLevel[] = [
+  "off",
+  "minimal",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "max",
+];
+
+/** Mirrors `@earendil-works/pi-ai`'s `getSupportedThinkingLevels` for UI model entries. */
+export function getSupportedThinkingLevelsForModel(
+  supportsThinking: boolean,
+  thinkingLevelMap?: Record<string, string | null>,
+): ThinkingLevel[] {
+  if (!supportsThinking) return ["off"];
+  return ALL_THINKING_LEVELS.filter((level) => {
+    const mapped = thinkingLevelMap?.[level];
+    if (mapped === null) return false;
+    if (level === "xhigh" || level === "max") return mapped !== undefined;
+    return true;
+  });
+}
+
+export function filterThinkingLevelOptions<T extends { value: string }>(
+  options: readonly T[],
+  supportedLevels?: readonly ThinkingLevel[],
+): T[] {
+  if (!supportedLevels || supportedLevels.length === 0) return [...options];
+  const allowed = new Set<string>(supportedLevels);
+  return options.filter((opt) => opt.value === "__auto__" || opt.value === "auto" || allowed.has(opt.value));
+}
+
 export const API_OPTIONS: Array<{ value: string; label: string }> = [
   { value: "openai-completions", label: "OpenAI Completions" },
   { value: "openai-responses", label: "OpenAI Responses" },

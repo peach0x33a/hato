@@ -5,6 +5,8 @@ import type { ModelsFileConfig, SecretState, SlotThinkingMap, ThinkingLevel } fr
 import { ConsoleSelect } from "@/components/console/ConsolePrimitives";
 import { EASE_OUT } from "@/lib/ease";
 import {
+  filterThinkingLevelOptions,
+  getSupportedThinkingLevelsForModel,
   resolveProviderKeyStatus,
   SLOT_DEFINITIONS,
   THINKING_LEVEL_SELECT_OPTIONS,
@@ -294,7 +296,15 @@ export function FunctionSlotsPanel({
                             next === "__auto__" ? undefined : (next as ThinkingLevel),
                           )
                         }
-                        options={THINKING_LEVEL_SELECT_OPTIONS}
+                        options={filterThinkingLevelOptions(
+                          THINKING_LEVEL_SELECT_OPTIONS,
+                          matched
+                            ? getSupportedThinkingLevelsForModel(
+                                matched.model.supportsThinking,
+                                matched.model.preserved?.thinking_level_map,
+                              )
+                            : undefined,
+                        )}
                         size="sm"
                         triggerClassName="bg-zinc-50 dark:bg-[#0b1014]"
                       />
@@ -437,7 +447,15 @@ export function FunctionSlotsPanel({
                         next === "__auto__" ? undefined : (next as ThinkingLevel),
                       )
                     }
-                    options={THINKING_LEVEL_SELECT_OPTIONS}
+                    options={filterThinkingLevelOptions(
+                      THINKING_LEVEL_SELECT_OPTIONS,
+                      matched
+                        ? getSupportedThinkingLevelsForModel(
+                            matched.model.supportsThinking,
+                            matched.model.preserved?.thinking_level_map,
+                          )
+                        : undefined,
+                    )}
                     size="sm"
                   />
                 </div>
