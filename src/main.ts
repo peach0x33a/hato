@@ -1546,7 +1546,12 @@ async function main(): Promise<void> {
         channel: outbound.channel,
         eventSummary: `[主动关怀 ${loopId}] ${content}`,
         promptInstruction: `[系统事件：现在到了主动关怀/跟进时间：${content}。请结合你们的聊天记忆，用自然、温暖、不生硬的日常口吻主动发消息关心或提醒用户（不要提“工单”“open_loop”“系统提醒”等词汇）。如果觉得此刻不适合打扰，输出 [NO_REPLY]。]`,
+        fallbackToSummary: false,
+        persistEvent: false,
       });
+      if (bubbles.length === 0) {
+        return "failed";
+      }
       const nonEmpty = bubbles.filter((b) => b.trim() && b.trim() !== "[NO_REPLY]");
       if (nonEmpty.length === 0) {
         return "no_reply";

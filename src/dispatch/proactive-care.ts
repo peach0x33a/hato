@@ -4,7 +4,7 @@ import type { HatoRepository } from "../db/repo.js";
 import { isWithinQuietHours } from "../time/clock.js";
 import { logWarn, summarizeError } from "../utils/logger.js";
 
-export type ProactiveDeliveryOutcome = "sent" | "no_reply" | "no_outbound";
+export type ProactiveDeliveryOutcome = "sent" | "no_reply" | "no_outbound" | "failed";
 
 export interface ProactiveCareSchedulerDeps {
   getHatoConfig: () => HatoConfig;
@@ -100,7 +100,7 @@ export class ProactiveCareScheduler {
               return;
             }
 
-            if (outcome === "no_reply") {
+            if (outcome === "no_reply" || outcome === "failed") {
               this.deps.repo.updateOpenLoop(latest.id, {
                 dueAt: nowMs + snoozeDelayMs,
               });

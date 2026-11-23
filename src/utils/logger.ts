@@ -5,6 +5,88 @@ export interface LogFormatOptions {
   timeZone?: string;
   timestampMs?: number;
   color?: boolean;
+  record?: boolean;
+}
+
+export interface RuntimeLogEntry {
+  id: number;
+  timestampMs: number;
+  timeText: string;
+  category: string;
+  scope: string;
+  message: string;
+}
+
+const MAX_RUNTIME_LOGS = 1000;
+const runtimeLogBuffer: RuntimeLogEntry[] = [];
+const runtimeLogSubscribers = new Set<(entry: RuntimeLogEntry) => void>();
+let nextRuntimeLogId = 1;
+
+function stripAnsi(text: string): string {
+  return text.replace(/\x1b\[[0-9;]*m/g, "");
+}
+
+function recordRuntimeLog(entry: Omit<RuntimeLogEntry, "id">): void {
+  const stored: RuntimeLogEntry = {
+    id: nextRuntimeLogId++,
+    ...entry,
+  };
+  runtimeLogBuffer.push(stored);
+  if (runtimeLogBuffer.length > MAX_RUNTIME_LOGS) {
+    runtimeLogBuffer.splice(0, runtimeLogBuffer.length - MAX_RUNTIME_LOGS);
+  }
+  for (const listener of runtimeLogSubscribers) {
+    try {
+      listener(stored);
+    } catch {
+      // Never allow log subscribers to break logging.
+    }
+  }
+}
+
+export function getRuntimeLogs(opts?: {
+  limit?: number;
+  category?: string;
+  scope?: string;
+  q?: string;
+}): RuntimeLogEntry[] {
+  const categoryFilter = opts?.category?.trim().toUpperCase();
+  const scopeFilter = opts?.scope?.trim().toUpperCase();
+  const queryFilter = opts?.q?.trim().toLowerCase();
+  const limit =
+    typeof opts?.limit === "number" && Number.isFinite(opts.limit) && opts.limit > 0
+      ? Math.min(MAX_RUNTIME_LOGS, Math.floor(opts.limit))
+      : MAX_RUNTIME_LOGS;
+
+  const filtered = runtimeLogBuffer.filter((entry) => {
+    if (categoryFilter && categoryFilter !== "ALL" && entry.category !== categoryFilter) {
+      return false;
+    }
+    if (scopeFilter && !entry.scope.includes(scopeFilter)) {
+      return false;
+    }
+    if (queryFilter) {
+      const hay = `${entry.category} ${entry.scope} ${entry.message}`.toLowerCase();
+      if (!hay.includes(queryFilter)) return false;
+    }
+    return true;
+  });
+
+  if (filtered.length <= limit) {
+    return [...filtered];
+  }
+  return filtered.slice(filtered.length - limit);
+}
+
+export function subscribeRuntimeLogs(listener: (entry: RuntimeLogEntry) => void): () => void {
+  runtimeLogSubscribers.add(listener);
+  return () => {
+    runtimeLogSubscribers.delete(listener);
+  };
+}
+
+export function clearRuntimeLogs(): void {
+  runtimeLogBuffer.length = 0;
 }
 
 interface CategoryStyle {
@@ -85,8 +167,19 @@ export function formatLogLine(
 ): string {
   const normalizedCategory = category.toUpperCase();
   const normalizedScope = scope.toUpperCase();
-  const ts = formatLogTimestamp(opts?.timestampMs, opts?.timeZone);
+  const timestampMs = opts?.timestampMs ?? Date.now();
+  const ts = formatLogTimestamp(timestampMs, opts?.timeZone);
   const useColor = opts?.color ?? shouldUseColor(process.stdout);
+
+  if (opts?.record !== false) {
+    recordRuntimeLog({
+      timestampMs,
+      timeText: ts,
+      category: normalizedCategory,
+      scope: normalizedScope,
+      message: redactSensitiveTokens(stripAnsi(message)),
+    });
+  }
 
   const style = CATEGORY_STYLES[normalizedCategory] ?? { category: "1", scope: "1" };
   const categoryTag = colorize(`[${normalizedCategory}]`, style.category, useColor);

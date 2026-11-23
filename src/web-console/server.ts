@@ -77,7 +77,7 @@ import type { LiveTraceTracker } from "../stats/live-trace.js";
 import type { NotebookService } from "../notebook/service.js";
 import type { NotebookEntryKind } from "../notebook/store.js";
 import type { StickerService } from "../stickers/service.js";
-import { logInfo, logWarn, summarizeError } from "../utils/logger.js";
+import { getRuntimeLogs, logInfo, logWarn, subscribeRuntimeLogs, summarizeError } from "../utils/logger.js";
 import {
   EXTERNAL_CLI_BACKENDS,
   probeAllExternalClis,
@@ -242,10 +242,10 @@ export class WebConsoleServer {
     if (!cfg.enabled) return null;
     if (this.server) return this.getAddress();
     if (!isLoopbackHost(cfg.host) && !getOptionalSecret(cfg.authTokenEnv)) {
-      logWarn(
-        "WEB",
-        `Web Console is bound to non-loopback host "${cfg.host}" without ${cfg.authTokenEnv}. Set ${cfg.authTokenEnv} in .env if exposed beyond a trusted LAN.`,
-      );
+      const msg = cfg.authTokenEnv
+        ? `Web Console is bound to non-loopback host "${cfg.host}" without ${cfg.authTokenEnv}. Set ${cfg.authTokenEnv} in .env if exposed beyond a trusted LAN.`
+        : `Web Console is bound to non-loopback host "${cfg.host}" without auth_token_env configured. Set [web.console].auth_token_env in hato.toml and the corresponding token in .env if exposed beyond a trusted LAN.`;
+      logWarn("WEB", msg);
     }
 
     const server = http.createServer((req, res) => {
@@ -488,6 +488,19 @@ export class WebConsoleServer {
         }
         if (pathname === "/api/traces/stream" && method === "GET") {
           this.handleTracesStream(req, res);
+          return;
+        }
+        if (pathname === "/api/logs" && method === "GET") {
+          const rawLimit = Number(parsedUrl.searchParams.get("limit") ?? "300");
+          const limit = Number.isFinite(rawLimit) ? Math.max(1, Math.min(1000, Math.floor(rawLimit))) : 300;
+          const category = parsedUrl.searchParams.get("category") ?? undefined;
+          const scope = parsedUrl.searchParams.get("scope") ?? undefined;
+          const q = parsedUrl.searchParams.get("q") ?? undefined;
+          sendJson(res, 200, { ok: true, logs: getRuntimeLogs({ limit, category, scope, q }) });
+          return;
+        }
+        if (pathname === "/api/logs/stream" && method === "GET") {
+          this.handleLogsStream(req, res);
           return;
         }
         if (pathname === "/api/stickers" && method === "GET") {
@@ -2260,6 +2273,45 @@ export class WebConsoleServer {
       clearInterval(keepAlive);
       unsubTracker?.();
       unsubRepo();
+      if (!res.writableEnded) res.end();
+    };
+    req.once("close", cleanup);
+    res.once("close", cleanup);
+  }
+
+  private handleLogsStream(req: IncomingMessage, res: ServerResponse): void {
+    res.writeHead(200, {
+      "Content-Type": "text/event-stream; charset=utf-8",
+      "Cache-Control": "no-cache, no-transform",
+      Connection: "keep-alive",
+    });
+    res.write(": connected\n\n");
+
+    const writeEvent = (payload: Record<string, unknown>) => {
+      if (!res.writableEnded) {
+        res.write(`data: ${JSON.stringify(payload)}\n\n`);
+      }
+    };
+
+    writeEvent({
+      type: "snapshot",
+      logs: getRuntimeLogs({ limit: 300 }),
+    });
+
+    const unsubLogs = subscribeRuntimeLogs((entry) => {
+      writeEvent({ type: "log", entry });
+    });
+
+    const keepAlive = setInterval(() => {
+      if (!res.writableEnded) {
+        res.write(": ping\n\n");
+      }
+    }, 15_000);
+    keepAlive.unref();
+
+    const cleanup = () => {
+      clearInterval(keepAlive);
+      unsubLogs();
       if (!res.writableEnded) res.end();
     };
     req.once("close", cleanup);

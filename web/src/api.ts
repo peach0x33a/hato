@@ -1,3 +1,16 @@
+export interface RuntimeLogEntry {
+  id: number;
+  timestampMs: number;
+  timeText: string;
+  category: string;
+  scope: string;
+  message: string;
+}
+
+export type LogStreamEvent =
+  | { type: "snapshot"; logs: RuntimeLogEntry[] }
+  | { type: "log"; entry: RuntimeLogEntry };
+
 export interface HealthResponse {
   ok: boolean;
   version?: string;
@@ -1193,6 +1206,69 @@ export const api = {
       try {
         await consumeSseStream<TraceStreamEvent>(
           "/api/traces/stream",
+          {
+            method: "GET",
+            headers: authHeaders(),
+            signal: controller.signal,
+          },
+          (ev) => {
+            attempt = 0;
+            onEvent(ev);
+          },
+        );
+        if (!closed) {
+          const delay = Math.min(10_000, 1500 * Math.pow(1.5, attempt));
+          reconnectTimer = window.setTimeout(() => void connect(attempt + 1), delay);
+        }
+      } catch (err) {
+        if (closed || controller.signal.aborted) return;
+        onError?.(err instanceof Error ? err : new Error(String(err)));
+        if (err instanceof ApiError && (err.status === 401 || err.status === 403)) {
+          return;
+        }
+        const delay = Math.min(15_000, 2000 * Math.pow(1.5, attempt));
+        reconnectTimer = window.setTimeout(() => void connect(attempt + 1), delay);
+      }
+    };
+
+    void connect(0);
+
+    return () => {
+      closed = true;
+      if (reconnectTimer !== null) {
+        window.clearTimeout(reconnectTimer);
+      }
+      controller?.abort();
+    };
+  },
+  async getLogs(params?: {
+    limit?: number;
+    category?: string;
+    scope?: string;
+    q?: string;
+  }): Promise<{ ok: boolean; logs: RuntimeLogEntry[] }> {
+    const search = new URLSearchParams();
+    if (params?.limit) search.set("limit", String(params.limit));
+    if (params?.category && params.category !== "ALL") search.set("category", params.category);
+    if (params?.scope) search.set("scope", params.scope);
+    if (params?.q) search.set("q", params.q);
+    const qs = search.toString();
+    return requestJson<{ ok: boolean; logs: RuntimeLogEntry[] }>(`/api/logs${qs ? `?${qs}` : ""}`);
+  },
+  subscribeLogStream(
+    onEvent: (event: LogStreamEvent) => void,
+    onError?: (err: Error) => void,
+  ): () => void {
+    let closed = false;
+    let controller: AbortController | null = null;
+    let reconnectTimer: number | null = null;
+
+    const connect = async (attempt = 0) => {
+      if (closed) return;
+      controller = new AbortController();
+      try {
+        await consumeSseStream<LogStreamEvent>(
+          "/api/logs/stream",
           {
             method: "GET",
             headers: authHeaders(),

@@ -2,7 +2,6 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { Agent, type AgentMessage, type AgentTool } from "@earendil-works/pi-agent-core";
 import {
-  clampThinkingLevel,
   createInitialSystemMessage,
   toToolDeclaration,
   type AssistantMessage,
@@ -1548,6 +1547,8 @@ export class PersonaRuntime {
     eventSummary: string;
     promptInstruction: string;
     images?: ImageContent[];
+    fallbackToSummary?: boolean;
+    persistEvent?: boolean;
   }): Promise<string[]> {
     this.activeTurnOriginChannel = params.channel;
     const resolved = this.modelRegistry.resolveSlot("persona");
@@ -1568,17 +1569,19 @@ export class PersonaRuntime {
     }
     this.agent.state.tools = turnTools;
 
-    const savedEvent = this.repo.appendRawMessage({
-      canonicalUserId: params.canonicalUserId,
-      channel: params.channel,
-      role: "executed_event",
-      content: params.eventSummary,
-      createdAt: Date.now(),
-    });
-    this.agent.state.messages = [
-      ...this.agent.state.messages,
-      rawRecordToAgentMessage(savedEvent, this.repo),
-    ];
+    if (params.persistEvent !== false) {
+      const savedEvent = this.repo.appendRawMessage({
+        canonicalUserId: params.canonicalUserId,
+        channel: params.channel,
+        role: "executed_event",
+        content: params.eventSummary,
+        createdAt: Date.now(),
+      });
+      this.agent.state.messages = [
+        ...this.agent.state.messages,
+        rawRecordToAgentMessage(savedEvent, this.repo),
+      ];
+    }
 
     const startIndex = this.agent.state.messages.length;
     const startPerf = performance.now();
@@ -1641,7 +1644,7 @@ export class PersonaRuntime {
     if (turnFailure) {
       logWarn("PERSONA", `narrateBackgroundEvent failed: ${summarizeError(turnFailure)}`);
       this.refreshTranscriptFromDb();
-      return [params.eventSummary];
+      return params.fallbackToSummary === false ? [] : [params.eventSummary];
     }
 
     const { turnFirstDeltaPerf, totalDecodeMs } = telemetry.getTiming();
@@ -1651,7 +1654,16 @@ export class PersonaRuntime {
 
     const newMessages = this.agent.state.messages.slice(startIndex);
     const { finalText, totalUsage, toolCalls } = extractTurnMetrics(newMessages);
-    const reply = finalText.trim() || params.eventSummary;
+    const trimmed = finalText.trim();
+    if (!trimmed && params.fallbackToSummary === false) {
+      this.refreshTranscriptFromDb();
+      return [];
+    }
+    if (trimmed === "[NO_REPLY]" && params.fallbackToSummary === false) {
+      this.refreshTranscriptFromDb();
+      return ["[NO_REPLY]"];
+    }
+    const reply = trimmed || params.eventSummary;
     const bubbles = splitIntoBubbles(reply, {
       enabled: this.hatoConfig.gateway.bubbles.enabled,
       maxPerTurn: this.hatoConfig.gateway.bubbles.max_per_turn,
@@ -1882,10 +1894,7 @@ export class PersonaRuntime {
     const apiKey = this.modelRegistry.resolveApiKeyForProvider(resolved.providerSlug);
     const scopedFetch = this.proxyRouter.createScopedFetch(`llm-calling.${resolved.providerSlug}`);
 
-    const compactionThinking = clampThinkingLevel(
-      resolved.model,
-      this.modelRegistry.resolveSlotThinkingLevel("curator"),
-    );
+    const compactionThinking = this.modelRegistry.resolveSlotThinkingLevel("persona");
 
     const callStartPerf = performance.now();
     let firstDeltaPerf: number | null = null;

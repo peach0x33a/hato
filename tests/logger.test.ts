@@ -1,11 +1,14 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  clearRuntimeLogs,
   formatLogLine,
   formatLogTimestamp,
   getLogTimezone,
+  getRuntimeLogs,
   setLogTimezone,
   shouldUseColor,
+  subscribeRuntimeLogs,
   summarizeError,
 } from "../src/utils/logger.js";
 
@@ -82,4 +85,43 @@ test("summarizeError condenses Cloudflare 502 HTML pages into a readable summary
   assert.equal(summary.includes("<!DOCTYPE html>"), false);
   assert.ok(summary.includes("Cloudflare 上游网关返回错误"));
   assert.ok(summary.includes("misakacloud.dev | 502: Bad gateway"));
+});
+
+test("runtime log ring buffer records, strips ANSI, redacts tokens, filters, and notifies subscribers", () => {
+  clearRuntimeLogs();
+  const received: string[] = [];
+  const unsub = subscribeRuntimeLogs((entry) => {
+    received.push(`${entry.category}:${entry.scope}:${entry.message}`);
+  });
+
+  try {
+    formatLogLine("sys", "tg", "\x1b[32mfetch https://api.telegram.org/bot12345:secret_abc/getMe\x1b[0m", {
+      color: true,
+    });
+    formatLogLine("warn", "qq", "Authorization: Bearer tok_secret_123 failed", { color: false });
+    formatLogLine("err", "persona", "turn failed", { color: false });
+    formatLogLine("sys", "hidden", "should not record", { color: false, record: false });
+
+    const all = getRuntimeLogs();
+    assert.equal(all.length, 3);
+    assert.equal(all[0]!.message, "fetch https://api.telegram.org/bot***/getMe");
+    assert.equal(all[1]!.message, "Authorization: Bearer *** failed");
+    assert.equal(received.length, 3);
+
+    const onlyWarn = getRuntimeLogs({ category: "warn" });
+    assert.equal(onlyWarn.length, 1);
+    assert.equal(onlyWarn[0]!.scope, "QQ");
+
+    const byQuery = getRuntimeLogs({ q: "turn failed" });
+    assert.equal(byQuery.length, 1);
+    assert.equal(byQuery[0]!.category, "ERR");
+
+    const limited = getRuntimeLogs({ limit: 2 });
+    assert.equal(limited.length, 2);
+    assert.equal(limited[0]!.scope, "QQ");
+    assert.equal(limited[1]!.scope, "PERSONA");
+  } finally {
+    unsub();
+    clearRuntimeLogs();
+  }
 });

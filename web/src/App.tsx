@@ -15,6 +15,7 @@ import {
   RefreshCw,
   Settings,
   Smile,
+  Terminal,
   X,
 } from "lucide-react";
 import { AnimatePresence, LayoutGroup, MotionConfig, motion, useReducedMotion } from "motion/react";
@@ -30,6 +31,7 @@ import {
 } from "@/api";
 import { ChatPanel } from "@/components/console/ChatPanel";
 import { ConsoleInput } from "@/components/console/ConsolePrimitives";
+import { LogsPanel } from "@/components/console/LogsPanel";
 import { ModelsConfigPanel } from "@/components/console/ModelsConfigPanel";
 import { NotebookPanel } from "@/components/console/NotebookPanel";
 import { OverviewPanel } from "@/components/console/OverviewPanel";
@@ -64,6 +66,7 @@ type ConsoleTab =
   | "stickers"
   | "notebook"
   | "browser"
+  | "logs"
   | "models"
   | "prompt"
   | "settings";
@@ -78,6 +81,7 @@ const NAV_ITEMS: Array<{
   { id: "stickers", label: "表情包库", icon: Smile },
   { id: "notebook", label: "小本本", icon: BookMarked },
   { id: "browser", label: "远程浏览器", icon: Compass },
+  { id: "logs", label: "服务日志", icon: Terminal },
   { id: "models", label: "模型与供应商", icon: Cpu },
   { id: "prompt", label: "提示词", icon: FileText },
 ];
@@ -88,6 +92,7 @@ const VALID_TABS = new Set<ConsoleTab>([
   "stickers",
   "notebook",
   "browser",
+  "logs",
   "models",
   "prompt",
   "settings",
@@ -789,6 +794,8 @@ function ConsoleShell() {
                 {workspaceTab === "stickers" && <StickersPanel onToast={notify} />}
 
                 {workspaceTab === "notebook" && <NotebookPanel onToast={notify} />}
+
+                {workspaceTab === "logs" && <LogsPanel onToast={notify} />}
 
                 {workspaceTab === "browser" && (
                   <div className="flex h-full min-h-0 w-full flex-col p-3 sm:p-5">

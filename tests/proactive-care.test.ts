@@ -155,4 +155,50 @@ describe("proactive-care", () => {
       rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  test("ProactiveCareScheduler snoozes failed deliveries without incrementing unansweredStreak", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "hato-proactive-fail-"));
+    try {
+      const dbHandle = openDatabase(join(dir, "test.db"));
+      const repo = new HatoRepository(dbHandle.db);
+      repo.ensureOwner({
+        canonicalUserId: "u1",
+        timezone: "Asia/Singapore",
+        proactiveChannel: "tg",
+      });
+
+      const cfg = createDefaultHatoConfig();
+      cfg.owner.timezone = "Asia/Singapore";
+      cfg.owner.quiet_hours = { start: "23:30", end: "08:00" };
+      cfg.memory.open_loops = {
+        defer_after_chat_minutes: 5,
+        max_unanswered_streak: 2,
+      };
+
+      const scheduler = new ProactiveCareScheduler({
+        getHatoConfig: () => cfg,
+        repo,
+        actorLock: new ActorLock(),
+        deliverOpenLoop: async () => "failed",
+      });
+
+      const now = parseLocalDateTimeToEpochMs("2026-11-21 10:00", "Asia/Singapore")!;
+      const loop = repo.createOpenLoop({
+        canonicalUserId: "u1",
+        content: "喝水提醒",
+        dueAt: now - 1000,
+        notifyChannel: "tg",
+      });
+
+      await scheduler.tick(now);
+      const afterFail = repo.getOpenLoop(loop.id)!;
+      expect(afterFail.status).toBe("pending");
+      expect(afterFail.unansweredStreak).toBe(0);
+      expect(afterFail.dueAt).toBeGreaterThan(now);
+
+      dbHandle.close();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });
