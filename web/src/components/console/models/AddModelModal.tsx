@@ -2,16 +2,18 @@ import { useEffect, useMemo, useState } from "react";
 import {
   AlertTriangle,
   Brain,
-  Check,
   ChevronDown,
   ChevronRight,
   Eye,
+  ListPlus,
   Loader2,
+  Minus,
   Plus,
   RefreshCw,
   Search,
   Settings2,
   Sparkles,
+  Trash2,
   X,
 } from "lucide-react";
 import {
@@ -22,9 +24,9 @@ import {
 } from "@/api";
 import {
   formatTokenCount,
+  inferUiModelGroup,
   parseHeadersJson,
   type SlotDefinition,
-  type UiModelEntry,
   type UiProviderConfig,
 } from "./types";
 
@@ -58,6 +60,15 @@ interface AddModelModalProps {
   onConfigureProvider: () => void;
 }
 
+interface DrawerRowItem {
+  id: string;
+  name?: string;
+  group: string;
+  modelsDev?: ModelsDevMappedMetadata;
+  isStale: boolean;
+  isAdded: boolean;
+}
+
 export function AddModelModal({
   open,
   provider,
@@ -80,7 +91,7 @@ export function AddModelModal({
   const [upstreamLoading, setUpstreamLoading] = useState(false);
   const [upstreamError, setUpstreamError] = useState<string | null>(null);
   const [upstreamQuery, setUpstreamQuery] = useState("");
-  const [statusFilter, setStatusFilter] = useState<"all" | "unadded" | "added">("all");
+  const [statusFilter, setStatusFilter] = useState<"all" | "stale" | "unadded" | "added">("all");
   const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set());
 
   // Manual tab state
@@ -207,18 +218,53 @@ export function AddModelModal({
   }, [provider?.models]);
 
   const upstreamModels = cachedUpstream?.models ?? [];
-  const addedCountInUpstream = useMemo(
-    () => upstreamModels.filter((m) => existingModelIds.has(m.id)).length,
+  const upstreamIdSet = useMemo(
+    () => new Set(upstreamModels.map((m) => m.id)),
+    [upstreamModels],
+  );
+
+  const staleLocalModels = useMemo(() => {
+    if (!cachedUpstream) return [];
+    return (provider?.models ?? []).filter((m) => {
+      const id = m.id.trim();
+      return Boolean(id && !upstreamIdSet.has(id));
+    });
+  }, [cachedUpstream, provider?.models, upstreamIdSet]);
+
+  const unaddedUpstreamModels = useMemo(
+    () => upstreamModels.filter((m) => !existingModelIds.has(m.id)),
     [upstreamModels, existingModelIds],
   );
 
+  const allMergedRows = useMemo<DrawerRowItem[]>(() => {
+    const rows: DrawerRowItem[] = upstreamModels.map((m) => ({
+      id: m.id,
+      name: m.name,
+      group: m.group,
+      modelsDev: m.modelsDev,
+      isStale: false,
+      isAdded: existingModelIds.has(m.id),
+    }));
+    for (const local of staleLocalModels) {
+      const id = local.id.trim();
+      rows.push({
+        id,
+        name: local.displayName.trim() || id,
+        group: inferUiModelGroup(id),
+        isStale: true,
+        isAdded: true,
+      });
+    }
+    return rows;
+  }, [upstreamModels, staleLocalModels, existingModelIds]);
+
   const groupedModels = useMemo(() => {
     const q = upstreamQuery.trim().toLowerCase();
-    const groups = new Map<string, UpstreamModelEntry[]>();
-    for (const item of upstreamModels) {
-      const isAdded = existingModelIds.has(item.id);
-      if (statusFilter === "added" && !isAdded) continue;
-      if (statusFilter === "unadded" && isAdded) continue;
+    const groups = new Map<string, DrawerRowItem[]>();
+    for (const item of allMergedRows) {
+      if (statusFilter === "stale" && !item.isStale) continue;
+      if (statusFilter === "added" && !item.isAdded) continue;
+      if (statusFilter === "unadded" && item.isAdded) continue;
       if (
         q &&
         !item.id.toLowerCase().includes(q) &&
@@ -232,12 +278,11 @@ export function AddModelModal({
       groups.set(item.group, list);
     }
     return Array.from(groups.entries()).sort(([a], [b]) => a.localeCompare(b));
-  }, [upstreamModels, existingModelIds, upstreamQuery, statusFilter]);
+  }, [allMergedRows, upstreamQuery, statusFilter]);
 
-  // Collapse groups by default if there are > 6 groups when unfiltered
   useEffect(() => {
-    if (groupedModels.length > 6 && !upstreamQuery.trim()) {
-      setCollapsedGroups(new Set(groupedModels.slice(3).map(([g]) => g)));
+    if (groupedModels.length > 8 && !upstreamQuery.trim()) {
+      setCollapsedGroups(new Set(groupedModels.slice(4).map(([g]) => g)));
     } else {
       setCollapsedGroups(new Set());
     }
@@ -250,7 +295,7 @@ export function AddModelModal({
   const isManualDuplicate = Boolean(trimmedManualId && existingModelIds.has(trimmedManualId));
   const canSubmitManual = Boolean(trimmedManualId && !isManualDuplicate && !/\s/.test(trimmedManualId));
 
-  const toDraftFromUpstream = (item: UpstreamModelEntry): AddModelDraftInput => {
+  const toDraftFromRow = (item: Pick<DrawerRowItem, "id" | "name" | "modelsDev">): AddModelDraftInput => {
     const md = item.modelsDev;
     return {
       id: item.id,
@@ -261,6 +306,15 @@ export function AddModelModal({
       maxOutputTokens: md?.max_tokens,
       modelsDev: md,
     };
+  };
+
+  const handleCleanStaleModels = () => {
+    for (const m of staleLocalModels) {
+      const id = m.id.trim();
+      if (!id) continue;
+      if ((boundSlotsByModelId.get(id)?.length ?? 0) > 0) continue;
+      onRemoveModelById(id);
+    }
   };
 
   const handleSelectModelsDevItem = async (item: ModelsDevSearchItem) => {
@@ -282,7 +336,6 @@ export function AddModelModal({
       setMdQuery("");
       setMdResults([]);
     } catch {
-      // Fallback to search item metadata
       if (!manualId.trim()) {
         const slashIdx = item.ref.indexOf("/");
         setManualId(slashIdx >= 0 ? item.ref.slice(slashIdx + 1) : item.ref);
@@ -332,50 +385,72 @@ export function AddModelModal({
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 backdrop-blur-[2px]"
+      className="fixed inset-0 z-50 flex justify-end bg-black/50 backdrop-blur-[2px]"
       onMouseDown={onClose}
     >
       <div
         role="dialog"
         aria-modal="true"
-        aria-label={`管理 ${providerLabel} 模型`}
+        aria-label={`${providerLabel} 模型`}
         onMouseDown={(e) => e.stopPropagation()}
-        className="flex max-h-[85vh] w-full max-w-2xl flex-col overflow-hidden rounded-2xl border border-zinc-200 bg-white shadow-2xl dark:border-zinc-800 dark:bg-[#11171c]"
+        className="relative z-10 flex h-full w-full max-w-[560px] flex-col border-l border-zinc-200 bg-white shadow-2xl dark:border-zinc-800 dark:bg-[#10161b]"
       >
         {/* Header */}
-        <div className="flex items-center justify-between gap-3 border-b border-zinc-200 px-5 py-4 dark:border-zinc-800">
-          <div className="min-w-0">
-            <div className="flex items-center gap-2">
-              <h3 className="truncate text-base font-semibold text-zinc-900 dark:text-zinc-100">
-                添加 / 管理模型
-              </h3>
-              <span className="rounded-md border border-zinc-200 bg-zinc-50 px-2 py-0.5 font-mono text-[11px] text-zinc-600 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-300">
-                {providerLabel}
-              </span>
-              <span className="rounded-md bg-emerald-500/10 px-2 py-0.5 font-mono text-[11px] text-emerald-700 dark:text-emerald-300">
-                {provider.protocol}
-              </span>
-            </div>
+        <div className="flex items-center justify-between gap-2 border-b border-zinc-200 px-5 py-3.5 dark:border-zinc-800">
+          <div className="flex min-w-0 items-center gap-2">
+            <h3 className="truncate text-sm font-semibold text-zinc-900 dark:text-zinc-100">
+              {providerLabel} 模型
+            </h3>
+            <span className="rounded-full bg-zinc-100 px-2 py-0.5 font-mono text-[11px] tabular-nums text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300">
+              {activeTab === "upstream" && cachedUpstream
+                ? allMergedRows.length
+                : provider.models.length}
+            </span>
           </div>
 
-          <button
-            type="button"
-            onClick={onClose}
-            aria-label="关闭"
-            className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-zinc-500 hover:bg-zinc-100 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-100"
-          >
-            <X className="h-4 w-4" />
-          </button>
+          <div className="flex shrink-0 items-center gap-1.5">
+            {activeTab === "upstream" && staleLocalModels.length > 0 ? (
+              <button
+                type="button"
+                onClick={handleCleanStaleModels}
+                title="移除所有未在槽位使用中的失效模型"
+                className="inline-flex h-7 items-center gap-1 rounded-lg border border-rose-500/30 bg-rose-500/10 px-2 text-[11px] font-medium text-rose-600 transition-colors hover:bg-rose-500/20 dark:text-rose-300"
+              >
+                <Trash2 className="h-3 w-3" />
+                <span>清理失效模型 ({staleLocalModels.length})</span>
+              </button>
+            ) : null}
+
+            {activeTab === "upstream" && unaddedUpstreamModels.length > 0 ? (
+              <button
+                type="button"
+                onClick={() => onAddModels(unaddedUpstreamModels.map(toDraftFromRow))}
+                className="inline-flex h-7 items-center gap-1 rounded-lg border border-emerald-500/30 bg-emerald-500/10 px-2 text-[11px] font-medium text-emerald-700 transition-colors hover:bg-emerald-500/20 dark:text-emerald-300"
+              >
+                <ListPlus className="h-3.5 w-3.5" />
+                <span>添加全部模型</span>
+              </button>
+            ) : null}
+
+            <button
+              type="button"
+              onClick={onClose}
+              aria-label="关闭"
+              className="inline-flex h-7 w-7 items-center justify-center rounded-lg text-zinc-500 hover:bg-zinc-100 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-100"
+            >
+              <X className="h-4 w-4" />
+            </button>
+          </div>
         </div>
 
-        {/* Tabs */}
-        <div className="flex items-center justify-between gap-3 border-b border-zinc-200 bg-zinc-50/70 px-5 py-2.5 dark:border-zinc-800 dark:bg-[#0d1216]">
+        {/* Mode Switcher */}
+        <div className="flex items-center justify-between gap-3 border-b border-zinc-200 bg-zinc-50/70 px-5 py-2 dark:border-zinc-800 dark:bg-[#0d1216]">
           <div className="inline-flex rounded-lg border border-zinc-200 bg-white p-0.5 dark:border-zinc-800 dark:bg-[#131a1f]">
             <button
               type="button"
               disabled={isFaux}
               onClick={() => setActiveTab("upstream")}
-              className={`rounded-md px-3 py-1.5 text-xs font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-45 ${
+              className={`rounded-md px-3 py-1 text-xs font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-45 ${
                 activeTab === "upstream"
                   ? "bg-emerald-600 text-white shadow-sm"
                   : "text-zinc-600 hover:text-zinc-900 dark:text-zinc-300 dark:hover:text-zinc-100"
@@ -386,7 +461,7 @@ export function AddModelModal({
             <button
               type="button"
               onClick={() => setActiveTab("manual")}
-              className={`rounded-md px-3 py-1.5 text-xs font-medium transition-colors ${
+              className={`rounded-md px-3 py-1 text-xs font-medium transition-colors ${
                 activeTab === "manual"
                   ? "bg-emerald-600 text-white shadow-sm"
                   : "text-zinc-600 hover:text-zinc-900 dark:text-zinc-300 dark:hover:text-zinc-100"
@@ -396,36 +471,31 @@ export function AddModelModal({
             </button>
           </div>
 
-          {activeTab === "upstream" && cachedUpstream ? (
-            <div className="flex items-center gap-2 text-xs text-zinc-500 dark:text-zinc-400">
-              <span className="tabular-nums">
-                共 {upstreamModels.length} 个 · 已添加 {addedCountInUpstream} 个
-              </span>
-              <button
-                type="button"
-                disabled={upstreamLoading}
-                onClick={() => void loadUpstream()}
-                className="inline-flex items-center gap-1 rounded-md border border-zinc-200 bg-white px-2 py-1 text-xs font-medium text-zinc-700 hover:bg-zinc-50 disabled:opacity-50 dark:border-zinc-700 dark:bg-[#131a1f] dark:text-zinc-200 dark:hover:bg-zinc-800"
-              >
-                <RefreshCw className={`h-3 w-3 ${upstreamLoading ? "animate-spin" : ""}`} />
-                <span>刷新</span>
-              </button>
-            </div>
+          {activeTab === "upstream" ? (
+            <button
+              type="button"
+              disabled={upstreamLoading}
+              onClick={() => void loadUpstream()}
+              className="inline-flex h-7 items-center gap-1 rounded-lg border border-zinc-200 bg-white px-2.5 text-xs font-medium text-zinc-700 hover:bg-zinc-50 disabled:opacity-50 dark:border-zinc-700 dark:bg-[#131a1f] dark:text-zinc-200 dark:hover:bg-zinc-800"
+            >
+              <RefreshCw className={`h-3 w-3 ${upstreamLoading ? "animate-spin" : ""}`} />
+              <span>刷新</span>
+            </button>
           ) : null}
         </div>
 
         {/* Body */}
         {activeTab === "upstream" ? (
           <div className="flex min-h-0 flex-1 flex-col">
-            {/* Search + Filter bar */}
-            <div className="flex flex-wrap items-center gap-2 border-b border-zinc-200 px-5 py-3 dark:border-zinc-800">
-              <div className="relative min-w-[200px] flex-1">
+            {/* Search + Filter pills */}
+            <div className="space-y-2.5 border-b border-zinc-200 px-5 py-3 dark:border-zinc-800">
+              <div className="relative">
                 <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-zinc-400" />
                 <input
                   type="text"
                   value={upstreamQuery}
                   onChange={(e) => setUpstreamQuery(e.target.value)}
-                  placeholder="搜索上游模型 ID、名称或分组..."
+                  placeholder="搜索模型..."
                   className="h-8 w-full rounded-lg border border-zinc-200 bg-zinc-50 pl-8 pr-7 text-xs text-zinc-900 placeholder:text-zinc-400 focus:border-emerald-500/60 focus:bg-white focus:outline-none dark:border-zinc-800 dark:bg-[#0b1014] dark:text-zinc-100 dark:focus:bg-[#0d1216]"
                 />
                 {upstreamQuery ? (
@@ -439,22 +509,27 @@ export function AddModelModal({
                 ) : null}
               </div>
 
-              <div className="inline-flex rounded-lg border border-zinc-200 bg-zinc-50 p-0.5 text-[11px] dark:border-zinc-800 dark:bg-[#0b1014]">
+              <div className="flex flex-wrap items-center gap-1.5 text-[11px]">
                 {(
                   [
-                    ["all", "全部"],
-                    ["unadded", "未添加"],
-                    ["added", "已添加"],
+                    ["all", `全部 ${allMergedRows.length}`],
+                    ...(staleLocalModels.length > 0
+                      ? ([["stale", `失效 ${staleLocalModels.length}`]] as const)
+                      : []),
+                    ["unadded", `未添加 ${unaddedUpstreamModels.length}`],
+                    ["added", `已添加 ${provider.models.length}`],
                   ] as const
                 ).map(([key, label]) => (
                   <button
                     key={key}
                     type="button"
                     onClick={() => setStatusFilter(key)}
-                    className={`rounded-md px-2.5 py-1 font-medium transition-colors ${
+                    className={`rounded-md border px-2 py-0.5 font-medium transition-colors ${
                       statusFilter === key
-                        ? "bg-white text-zinc-900 shadow-sm dark:bg-zinc-800 dark:text-zinc-100"
-                        : "text-zinc-500 hover:text-zinc-800 dark:text-zinc-400 dark:hover:text-zinc-200"
+                        ? key === "stale"
+                          ? "border-rose-500/40 bg-rose-500/15 text-rose-600 dark:text-rose-300"
+                          : "border-emerald-500/40 bg-emerald-500/12 text-emerald-700 dark:text-emerald-300"
+                        : "border-zinc-200 bg-zinc-50/70 text-zinc-600 hover:text-zinc-900 dark:border-zinc-800 dark:bg-[#0d1216] dark:text-zinc-400 dark:hover:text-zinc-200"
                     }`}
                   >
                     {label}
@@ -463,8 +538,8 @@ export function AddModelModal({
               </div>
             </div>
 
-            {/* Content list */}
-            <div className="min-h-[280px] flex-1 overflow-y-auto px-5 py-3">
+            {/* List */}
+            <div className="min-h-0 flex-1 overflow-y-auto px-5 py-3">
               {upstreamLoading && !cachedUpstream ? (
                 <div className="flex h-56 flex-col items-center justify-center gap-2 text-xs text-zinc-500 dark:text-zinc-400">
                   <Loader2 className="h-5 w-5 animate-spin text-emerald-500" />
@@ -513,20 +588,24 @@ export function AddModelModal({
               ) : groupedModels.length === 0 ? (
                 <div className="flex h-48 flex-col items-center justify-center gap-2 text-xs text-zinc-500 dark:text-zinc-400">
                   <span>
-                    {upstreamModels.length === 0
+                    {allMergedRows.length === 0
                       ? "上游未返回任何模型"
                       : "没有匹配当前筛选条件的模型"}
                   </span>
                 </div>
               ) : (
-                <div className="space-y-3">
+                <div className="space-y-2.5">
                   {groupedModels.map(([group, items]) => {
                     const isCollapsed = !upstreamQuery.trim() && collapsedGroups.has(group);
-                    const unaddedInGroup = items.filter((m) => !existingModelIds.has(m.id));
+                    const unaddedInGroup = items.filter((m) => !m.isAdded && !m.isStale);
+                    const removableInGroup = items.filter(
+                      (m) => m.isAdded && (boundSlotsByModelId.get(m.id)?.length ?? 0) === 0,
+                    );
+
                     return (
                       <div
                         key={group}
-                        className="overflow-hidden rounded-xl border border-zinc-200 dark:border-zinc-800"
+                        className="overflow-hidden rounded-xl border border-zinc-200/90 dark:border-zinc-800"
                       >
                         <div className="flex items-center justify-between bg-zinc-50/90 px-3 py-2 dark:bg-[#151d24]">
                           <button
@@ -546,8 +625,8 @@ export function AddModelModal({
                             ) : (
                               <ChevronDown className="h-3.5 w-3.5 text-zinc-400" />
                             )}
-                            <span className="uppercase tracking-wide">{group}</span>
-                            <span className="rounded-full bg-zinc-200/70 px-1.5 py-0.5 text-[10px] font-medium tabular-nums text-zinc-600 dark:bg-zinc-800 dark:text-zinc-400">
+                            <span>{group}</span>
+                            <span className="rounded-full bg-zinc-200/70 px-1.5 py-0.5 font-mono text-[10px] font-medium tabular-nums text-zinc-600 dark:bg-zinc-800 dark:text-zinc-400">
                               {items.length}
                             </span>
                           </button>
@@ -555,23 +634,29 @@ export function AddModelModal({
                           {unaddedInGroup.length > 0 ? (
                             <button
                               type="button"
-                              onClick={() =>
-                                onAddModels(unaddedInGroup.map(toDraftFromUpstream))
-                              }
-                              className="inline-flex items-center gap-1 rounded-md px-2 py-0.5 text-[11px] font-medium text-emerald-600 hover:bg-emerald-500/10 dark:text-emerald-400"
+                              onClick={() => onAddModels(unaddedInGroup.map(toDraftFromRow))}
+                              title={`添加本组全部 (${unaddedInGroup.length})`}
+                              className="inline-flex h-6 w-6 items-center justify-center rounded-md text-zinc-500 transition-colors hover:bg-emerald-500/15 hover:text-emerald-600 dark:text-zinc-400 dark:hover:text-emerald-300"
                             >
-                              <Plus className="h-3 w-3" />
-                              <span>全部添加 ({unaddedInGroup.length})</span>
+                              <Plus className="h-3.5 w-3.5" />
                             </button>
-                          ) : (
-                            <span className="text-[11px] text-zinc-400">已全部添加</span>
-                          )}
+                          ) : removableInGroup.length > 0 ? (
+                            <button
+                              type="button"
+                              onClick={() => {
+                                for (const r of removableInGroup) onRemoveModelById(r.id);
+                              }}
+                              title="移除本组未绑定槽位的模型"
+                              className="inline-flex h-6 w-6 items-center justify-center rounded-md text-zinc-400 transition-colors hover:bg-rose-500/15 hover:text-rose-500"
+                            >
+                              <Minus className="h-3.5 w-3.5" />
+                            </button>
+                          ) : null}
                         </div>
 
                         {!isCollapsed ? (
                           <div className="divide-y divide-zinc-100 dark:divide-zinc-800/70">
                             {items.map((item) => {
-                              const isAdded = existingModelIds.has(item.id);
                               const boundSlots = boundSlotsByModelId.get(item.id) ?? [];
                               const isBound = boundSlots.length > 0;
                               const md = item.modelsDev;
@@ -581,11 +666,15 @@ export function AddModelModal({
 
                               return (
                                 <div
-                                  key={item.id}
-                                  className="flex items-center justify-between gap-3 px-3 py-2 hover:bg-zinc-50/70 dark:hover:bg-zinc-900/40"
+                                  key={`${item.isStale ? "stale" : "up"}-${item.id}`}
+                                  className={`flex items-center justify-between gap-2.5 px-3 py-2 transition-colors ${
+                                    item.isAdded
+                                      ? "bg-emerald-500/[0.08] hover:bg-emerald-500/[0.12]"
+                                      : "hover:bg-zinc-50/70 dark:hover:bg-zinc-900/40"
+                                  }`}
                                 >
                                   <div className="min-w-0 flex-1">
-                                    <div className="flex items-center gap-2">
+                                    <div className="flex flex-wrap items-center gap-1.5">
                                       <span className="truncate font-mono text-xs font-medium text-zinc-900 dark:text-zinc-100">
                                         {item.id}
                                       </span>
@@ -594,33 +683,34 @@ export function AddModelModal({
                                           {item.name}
                                         </span>
                                       ) : null}
+                                      {item.isStale ? (
+                                        <span className="rounded bg-rose-500/15 px-1.5 py-0.5 text-[10px] font-medium text-rose-600 dark:text-rose-400">
+                                          失效
+                                        </span>
+                                      ) : null}
                                     </div>
                                     {md ? (
                                       <div className="mt-0.5 flex flex-wrap items-center gap-1.5 text-[11px] text-zinc-500 dark:text-zinc-400">
-                                        <span className="inline-flex items-center gap-0.5 rounded bg-emerald-500/10 px-1.5 py-0.5 text-[10px] text-emerald-700 dark:text-emerald-300">
-                                          <Sparkles className="h-2.5 w-2.5" />
-                                          <span>models.dev</span>
-                                        </span>
                                         {md.reasoning ? (
-                                          <span className="inline-flex items-center gap-0.5 text-amber-600 dark:text-amber-400">
+                                          <span className="inline-flex items-center gap-0.5 text-sky-600 dark:text-sky-400">
                                             <Brain className="h-3 w-3" />
                                             <span>思考</span>
                                           </span>
                                         ) : null}
                                         {md.input.includes("image") ? (
-                                          <span className="inline-flex items-center gap-0.5 text-violet-600 dark:text-violet-400">
+                                          <span className="inline-flex items-center gap-0.5 text-emerald-600 dark:text-emerald-400">
                                             <Eye className="h-3 w-3" />
                                             <span>视觉</span>
                                           </span>
                                         ) : null}
                                         {ctxText ? (
-                                          <span className="tabular-nums">上下文 {ctxText}</span>
+                                          <span className="tabular-nums">{ctxText}</span>
                                         ) : null}
                                       </div>
                                     ) : null}
                                   </div>
 
-                                  {isAdded ? (
+                                  {item.isAdded ? (
                                     <button
                                       type="button"
                                       disabled={isBound}
@@ -628,25 +718,24 @@ export function AddModelModal({
                                       title={
                                         isBound
                                           ? `已被槽位引用（${boundSlots.map((s) => s.label).join("、")}），不可移除`
-                                          : "点击从列表移除"
+                                          : "移除模型"
                                       }
-                                      className={`inline-flex h-7 items-center gap-1 rounded-lg border px-2.5 text-xs font-medium transition-colors ${
+                                      className={`inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-lg transition-colors ${
                                         isBound
-                                          ? "cursor-not-allowed border-emerald-500/25 bg-emerald-500/10 text-emerald-700/70 dark:text-emerald-300/60"
-                                          : "border-emerald-500/35 bg-emerald-500/10 text-emerald-700 hover:border-rose-500/40 hover:bg-rose-500/10 hover:text-rose-600 dark:text-emerald-300 dark:hover:text-rose-400"
+                                          ? "cursor-not-allowed text-zinc-400/50"
+                                          : "text-zinc-500 hover:bg-rose-500/15 hover:text-rose-600 dark:text-zinc-300 dark:hover:text-rose-400"
                                       }`}
                                     >
-                                      <Check className="h-3.5 w-3.5" />
-                                      <span>{isBound ? "使用中" : "已添加"}</span>
+                                      <Minus className="h-3.5 w-3.5" />
                                     </button>
                                   ) : (
                                     <button
                                       type="button"
-                                      onClick={() => onAddModels([toDraftFromUpstream(item)])}
-                                      className="inline-flex h-7 items-center gap-1 rounded-lg border border-zinc-200 bg-white px-2.5 text-xs font-medium text-zinc-700 transition-colors hover:border-emerald-500/50 hover:bg-emerald-500/10 hover:text-emerald-700 dark:border-zinc-700 dark:bg-[#131a1f] dark:text-zinc-200 dark:hover:border-emerald-500/50 dark:hover:text-emerald-300"
+                                      onClick={() => onAddModels([toDraftFromRow(item)])}
+                                      title="添加模型"
+                                      className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-lg text-zinc-500 transition-colors hover:bg-emerald-500/15 hover:text-emerald-600 dark:text-zinc-300 dark:hover:text-emerald-300"
                                     >
                                       <Plus className="h-3.5 w-3.5" />
-                                      <span>添加</span>
                                     </button>
                                   )}
                                 </div>
@@ -664,7 +753,6 @@ export function AddModelModal({
         ) : (
           /* Manual tab */
           <div className="flex-1 space-y-4 overflow-y-auto px-5 py-4">
-            {/* models.dev quick search */}
             <div className="rounded-xl border border-zinc-200 bg-zinc-50/70 p-3 dark:border-zinc-800 dark:bg-[#0d1216]">
               <div className="mb-1.5 flex items-center justify-between text-xs font-medium text-zinc-700 dark:text-zinc-200">
                 <span className="inline-flex items-center gap-1.5">
@@ -706,8 +794,8 @@ export function AddModelModal({
                         </div>
                       </div>
                       <div className="flex shrink-0 items-center gap-1.5 text-[11px] text-zinc-400">
-                        {item.reasoning ? <Brain className="h-3 w-3 text-amber-500" /> : null}
-                        {item.supportsVision ? <Eye className="h-3 w-3 text-violet-500" /> : null}
+                        {item.reasoning ? <Brain className="h-3 w-3 text-sky-500" /> : null}
+                        {item.supportsVision ? <Eye className="h-3 w-3 text-emerald-500" /> : null}
                       </div>
                     </button>
                   ))}
@@ -754,7 +842,7 @@ export function AddModelModal({
                   onChange={(e) => setManualVision(e.target.checked)}
                   className="h-4 w-4 rounded border-zinc-300 text-emerald-600 focus:ring-emerald-500"
                 />
-                <Eye className="h-3.5 w-3.5 text-violet-500" />
+                <Eye className="h-3.5 w-3.5 text-emerald-500" />
                 <span>支持视觉（图像输入）</span>
               </label>
 
@@ -765,7 +853,7 @@ export function AddModelModal({
                   onChange={(e) => setManualThinking(e.target.checked)}
                   className="h-4 w-4 rounded border-zinc-300 text-emerald-600 focus:ring-emerald-500"
                 />
-                <Brain className="h-3.5 w-3.5 text-amber-500" />
+                <Brain className="h-3.5 w-3.5 text-sky-500" />
                 <span>支持思考 / 推理</span>
               </label>
             </div>

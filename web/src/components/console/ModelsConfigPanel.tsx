@@ -29,15 +29,14 @@ import {
   type ModelTestOutcome,
 } from "./models/ModelDetailPanel";
 import { ProviderDrawer } from "./models/ProviderDrawer";
+import { ProviderSidebar } from "./models/ProviderSidebar";
+import { ProviderDetailPane } from "./models/ProviderDetailPane";
 import {
   AddModelModal,
   type AddModelDraftInput,
   type UpstreamCacheEntry,
 } from "./models/AddModelModal";
-import {
-  type ListFilterMode,
-  ProviderModelList,
-} from "./models/ProviderModelList";
+import { type ListFilterMode } from "./models/ProviderModelList";
 import {
   buildApiModelsConfig,
   createUid,
@@ -221,6 +220,13 @@ export function ModelsConfigPanel({
     providerUid: string | null;
     modelUid: string | null;
   }>(() => resolveInitialSelection(toUiProviders(initialConfig)));
+  const [activePane, setActivePane] = useState<"slots" | string>(
+    () => toUiProviders(initialConfig)[0]?.uid ?? "slots",
+  );
+  const [editingModelRef, setEditingModelRef] = useState<{
+    providerUid: string;
+    modelUid: string;
+  } | null>(null);
   const [mobileDetailOpen, setMobileDetailOpen] = useState(false);
   const [testingModelIds, setTestingModelIds] = useState<Set<string>>(() => new Set());
   const [testOutcomes, setTestOutcomes] = useState<Record<string, ModelTestOutcome>>({});
@@ -683,6 +689,28 @@ export function ModelsConfigPanel({
     setDeleteConfirm(null);
   };
 
+  const handleInlineUpdateProvider = (
+    providerUid: string,
+    patch: Partial<Pick<UiProviderConfig, "baseUrl">>,
+  ) => {
+    setProviders((prev) =>
+      prev.map((p) => (p.uid === providerUid ? { ...p, ...patch } : p)),
+    );
+  };
+
+  const handleInlineSecretChange = (envName: string, value: string) => {
+    const trimmedKey = envName.trim();
+    if (!trimmedKey) return;
+    setPendingSecrets((prev) => {
+      if (!value) {
+        const next = { ...prev };
+        delete next[trimmedKey];
+        return next;
+      }
+      return { ...prev, [trimmedKey]: value };
+    });
+  };
+
   const handleOpenAddModelModal = (
     providerUid: string,
     initialTab: "upstream" | "manual" = "upstream",
@@ -1079,20 +1107,28 @@ export function ModelsConfigPanel({
     }
   }, [savePhase, slots, slotThinking, providers, pendingSecrets, onSecretsUpdated, onSaved, onToast]);
 
+  // Keep activePane valid if providers are deleted/reloaded
+  useEffect(() => {
+    if (activePane !== "slots" && !providers.some((p) => p.uid === activePane)) {
+      setActivePane(providers[0]?.uid ?? "slots");
+    }
+  }, [activePane, providers]);
+
   // Close modals on Escape
   useEffect(() => {
-    if (!testDetailModal && !deleteConfirm && !addModelModal) return;
+    if (!testDetailModal && !deleteConfirm && !addModelModal && !editingModelRef) return;
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
         e.preventDefault();
         setTestDetailModal(null);
         setDeleteConfirm(null);
         setAddModelModal(null);
+        setEditingModelRef(null);
       }
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [testDetailModal, deleteConfirm, addModelModal]);
+  }, [testDetailModal, deleteConfirm, addModelModal, editingModelRef]);
 
   // Cmd/Ctrl + S shortcut when drawer is closed
   useEffect(() => {
@@ -1140,138 +1176,200 @@ export function ModelsConfigPanel({
         </div>
       </div>
 
-      {/* Main Content Container */}
-      <div className="mx-auto flex w-full max-w-[1360px] flex-col gap-6 px-4 py-6 sm:px-6">
-        {/* Section 1: Function Slots Routing Table */}
-        <FunctionSlotsPanel
-          slots={slots}
-          slotThinking={slotThinking}
-          providers={providers}
-          secretStates={secretStates}
-          pendingSecrets={pendingSecrets}
-          hindsightEnabled={hindsightEnabled}
-          onChangeSlot={handleChangeSlot}
-          onChangeSlotThinking={handleChangeSlotThinking}
-          onConfigureProvider={(providerUid) =>
-            setDrawerState({ open: true, mode: "edit", providerUid })
-          }
-        />
-
-        {/* Section 2: Two-column Master-Detail Split */}
-        <div className="grid grid-cols-1 items-start gap-6 lg:grid-cols-[380px_minmax(0,1fr)]">
-          {/* Left: Provider & Model Tree */}
-          <div className={mobileDetailOpen ? "hidden lg:block" : "block"}>
-            <ProviderModelList
+      {/* Main Content Container (Cherry Studio–style 2-column layout) */}
+      <div className="mx-auto w-full max-w-[1360px] px-4 py-6 sm:px-6">
+        <div className="grid grid-cols-1 items-start gap-5 lg:grid-cols-[260px_minmax(0,1fr)] xl:grid-cols-[280px_minmax(0,1fr)]">
+          {/* Left: Pinned Routing Table ("默认模型") + Provider List */}
+          <div className="lg:sticky lg:top-[68px]">
+            <ProviderSidebar
               providers={providers}
-              selectedModelUid={selectedEntry?.model.uid ?? null}
-              modifiedModelUids={modifiedModelUids}
-              slotIndex={slotIndex}
+              slots={slots}
+              hindsightEnabled={hindsightEnabled}
               secretStates={secretStates}
               pendingSecrets={pendingSecrets}
-              collapsedProviderIds={collapsedProviderIds}
-              testingModelIds={testingModelIds}
-              testOutcomes={testOutcomes}
-              searchQuery={searchQuery}
-              filterMode={filterMode}
-              onSearchChange={setSearchQuery}
-              onFilterModeChange={setFilterMode}
-              onSelectModel={handleSelectModel}
-              onToggleProviderCollapse={handleToggleProviderCollapse}
+              activePane={activePane}
+              onSelectPane={(pane) => setActivePane(pane)}
               onAddProvider={() => setDrawerState({ open: true, mode: "create" })}
-              onConfigureProvider={(providerUid) =>
-                setDrawerState({ open: true, mode: "edit", providerUid })
-              }
-              onRequestDeleteProvider={requestDeleteProvider}
-              onOpenAddModelModal={handleOpenAddModelModal}
-              onTestProviderAll={handleTestProviderAll}
             />
           </div>
 
-          {/* Right: Selected Model Detail Panel */}
-          <div
-            className={
-              mobileDetailOpen
-                ? "block"
-                : "hidden lg:sticky lg:top-[68px] lg:block lg:max-h-[calc(100vh-88px)] lg:overflow-y-auto"
-            }
-          >
-            {selectedEntry ? (
-              <ModelDetailPanel
-                provider={selectedEntry.provider}
-                model={selectedEntry.model}
+          {/* Right: Either Default Model Routing Table OR Selected Provider Detail */}
+          <div className="min-w-0">
+            {activePane === "slots" ? (
+              <FunctionSlotsPanel
                 slots={slots}
+                slotThinking={slotThinking}
+                providers={providers}
+                secretStates={secretStates}
+                pendingSecrets={pendingSecrets}
                 hindsightEnabled={hindsightEnabled}
-                isDuplicateId={selectedEntry.isDuplicateId}
-                isTesting={testingModelIds.has(selectedEntry.model.uid)}
-                testOutcome={testOutcomes[selectedEntry.model.uid]}
-                slotTargetLabels={slotTargetLabels}
-                onBackMobile={() => setMobileDetailOpen(false)}
-                onUpdate={(patch) =>
-                  handleUpdateModel(
-                    selectedEntry.provider.uid,
-                    selectedEntry.model.uid,
-                    patch,
-                  )
-                }
-                onUpdateAdvanced={(patch) =>
-                  handleUpdateModelAdvanced(
-                    selectedEntry.provider.uid,
-                    selectedEntry.model.uid,
-                    patch,
-                  )
-                }
                 onChangeSlot={handleChangeSlot}
-                onTest={() =>
-                  void handleTestModel(
-                    selectedEntry.provider.uid,
-                    selectedEntry.model.uid,
-                  )
-                }
-                onShowTestDetail={() => {
-                  const outcome = testOutcomes[selectedEntry.model.uid];
-                  if (!outcome) return;
-                  setCopiedDetail(false);
-                  setTestDetailModal(
-                    buildTestDetailState(
-                      selectedEntry.provider,
-                      selectedEntry.model,
-                      outcome,
-                    ),
-                  );
-                }}
-                onDuplicate={() =>
-                  handleDuplicateModel(
-                    selectedEntry.provider.uid,
-                    selectedEntry.model.uid,
-                  )
-                }
-                onRequestRemove={() =>
-                  requestRemoveModel(
-                    selectedEntry.provider.uid,
-                    selectedEntry.model.uid,
-                  )
-                }
-                onConfigureProvider={() =>
-                  setDrawerState({
-                    open: true,
-                    mode: "edit",
-                    providerUid: selectedEntry.provider.uid,
-                  })
-                }
+                onChangeSlotThinking={handleChangeSlotThinking}
+                onConfigureProvider={(providerUid) => setActivePane(providerUid)}
               />
-            ) : (
-              <div className="flex min-h-[320px] flex-col items-center justify-center gap-3 rounded-xl border border-dashed border-zinc-200 bg-white/50 p-8 text-center dark:border-zinc-800 dark:bg-[#0f1418]/50">
-                <p className="text-sm font-medium text-zinc-700 dark:text-zinc-300">
-                  请从左侧选择一个模型进行编辑
-                </p>
-                <p className="text-xs text-zinc-500 dark:text-zinc-400">
-                  或点击左侧「+ 供应商」添加新的上游接口与模型
-                </p>
-              </div>
-            )}
+            ) : (() => {
+              const activeProvider = providers.find((p) => p.uid === activePane);
+              if (!activeProvider) return null;
+              return (
+                <ProviderDetailPane
+                  provider={activeProvider}
+                  slotIndex={slotIndex}
+                  secretStates={secretStates}
+                  pendingSecrets={pendingSecrets}
+                  testingModelIds={testingModelIds}
+                  testOutcomes={testOutcomes}
+                  selectedModelUid={editingModelRef?.modelUid ?? null}
+                  onInlineUpdateProvider={(patch) =>
+                    handleInlineUpdateProvider(activeProvider.uid, patch)
+                  }
+                  onInlineSecretChange={handleInlineSecretChange}
+                  onConfigureProvider={() =>
+                    setDrawerState({
+                      open: true,
+                      mode: "edit",
+                      providerUid: activeProvider.uid,
+                    })
+                  }
+                  onRequestDeleteProvider={() => requestDeleteProvider(activeProvider.uid)}
+                  onTestProviderAll={() => handleTestProviderAll(activeProvider.uid)}
+                  onTestModel={(modelUid) =>
+                    void handleTestModel(activeProvider.uid, modelUid)
+                  }
+                  onOpenAddModelModal={(initialTab) =>
+                    handleOpenAddModelModal(activeProvider.uid, initialTab)
+                  }
+                  onEditModel={(modelUid) => {
+                    setSelectedModelRef({
+                      providerUid: activeProvider.uid,
+                      modelUid,
+                    });
+                    setEditingModelRef({
+                      providerUid: activeProvider.uid,
+                      modelUid,
+                    });
+                  }}
+                  onRemoveModel={(modelUid) =>
+                    requestRemoveModel(activeProvider.uid, modelUid)
+                  }
+                  onShowTestDetail={(modelUid) => {
+                    const model = activeProvider.models.find((m) => m.uid === modelUid);
+                    const outcome = testOutcomes[modelUid];
+                    if (!model || !outcome) return;
+                    setCopiedDetail(false);
+                    setTestDetailModal(
+                      buildTestDetailState(activeProvider, model, outcome),
+                    );
+                  }}
+                />
+              );
+            })()}
           </div>
         </div>
       </div>
+
+      {/* Model Edit Slide-Over Drawer ("编辑模型") */}
+      <AnimatePresence>
+        {(() => {
+          if (!editingModelRef) return null;
+          const drawerProv = providers.find((p) => p.uid === editingModelRef.providerUid);
+          const drawerModel = drawerProv?.models.find(
+            (m) => m.uid === editingModelRef.modelUid,
+          );
+          if (!drawerProv || !drawerModel) return null;
+          const dupCount = drawerProv.models.filter(
+            (m) => m.id.trim() === drawerModel.id.trim() && drawerModel.id.trim() !== "",
+          ).length;
+
+          return (
+            <motion.div
+              key="model-edit-drawer"
+              role="dialog"
+              aria-modal="true"
+              aria-label="编辑模型"
+              initial={reduceMotion ? false : { opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={reduceMotion ? undefined : { opacity: 0, transition: { duration: 0.14 } }}
+              className="fixed inset-0 z-50 flex justify-end"
+            >
+              <div
+                className="fixed inset-0 bg-black/50 backdrop-blur-[2px]"
+                onClick={() => setEditingModelRef(null)}
+              />
+              <motion.div
+                initial={reduceMotion ? false : { x: 40, opacity: 0 }}
+                animate={{ x: 0, opacity: 1 }}
+                exit={reduceMotion ? undefined : { x: 40, opacity: 0, transition: { duration: 0.14 } }}
+                className="relative z-10 flex h-full w-full max-w-[500px] flex-col border-l border-zinc-200 bg-white shadow-2xl dark:border-zinc-800 dark:bg-[#10161b]"
+              >
+                <div className="flex items-center justify-between border-b border-zinc-200 px-5 py-3.5 dark:border-zinc-800">
+                  <div className="min-w-0">
+                    <h3 className="truncate text-sm font-semibold text-zinc-900 dark:text-zinc-100">
+                      编辑模型
+                    </h3>
+                    <p className="truncate font-mono text-[11px] text-zinc-500 dark:text-zinc-400">
+                      {drawerProv.name}/{drawerModel.id}
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setEditingModelRef(null)}
+                    aria-label="关闭"
+                    className="inline-flex h-8 w-8 items-center justify-center rounded-lg text-zinc-500 hover:bg-zinc-100 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-100"
+                  >
+                    <X className="h-4 w-4" />
+                  </button>
+                </div>
+
+                <div className="min-h-0 flex-1 overflow-y-auto p-4">
+                  <ModelDetailPanel
+                    provider={drawerProv}
+                    model={drawerModel}
+                    slots={slots}
+                    hindsightEnabled={hindsightEnabled}
+                    isDuplicateId={dupCount > 1}
+                    isTesting={testingModelIds.has(drawerModel.uid)}
+                    testOutcome={testOutcomes[drawerModel.uid]}
+                    slotTargetLabels={slotTargetLabels}
+                    onBackMobile={() => setEditingModelRef(null)}
+                    onUpdate={(patch) =>
+                      handleUpdateModel(drawerProv.uid, drawerModel.uid, patch)
+                    }
+                    onUpdateAdvanced={(patch) =>
+                      handleUpdateModelAdvanced(drawerProv.uid, drawerModel.uid, patch)
+                    }
+                    onChangeSlot={handleChangeSlot}
+                    onTest={() => void handleTestModel(drawerProv.uid, drawerModel.uid)}
+                    onShowTestDetail={() => {
+                      const outcome = testOutcomes[drawerModel.uid];
+                      if (!outcome) return;
+                      setCopiedDetail(false);
+                      setTestDetailModal(
+                        buildTestDetailState(drawerProv, drawerModel, outcome),
+                      );
+                    }}
+                    onDuplicate={() => {
+                      handleDuplicateModel(drawerProv.uid, drawerModel.uid);
+                      setEditingModelRef(null);
+                    }}
+                    onRequestRemove={() => {
+                      setEditingModelRef(null);
+                      requestRemoveModel(drawerProv.uid, drawerModel.uid);
+                    }}
+                    onConfigureProvider={() => {
+                      setEditingModelRef(null);
+                      setDrawerState({
+                        open: true,
+                        mode: "edit",
+                        providerUid: drawerProv.uid,
+                      });
+                    }}
+                  />
+                </div>
+              </motion.div>
+            </motion.div>
+          );
+        })()}
+      </AnimatePresence>
 
       {/* Bottom Floating Save Bar (shown only when dirty) */}
       <AnimatePresence>

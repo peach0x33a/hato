@@ -710,3 +710,36 @@ export function serializeComparableState(
     })),
   });
 }
+
+const UI_GROUP_PREFIX_RULES: Array<[RegExp, string]> = [
+  [/^(gpt-|o[134](?:-|$)|chatgpt)/i, "gpt"],
+  [/^claude-/i, "claude"],
+  [/^(gemini-|gemma-)/i, "gemini"],
+  [/^deepseek-/i, "deepseek"],
+  [/^(qwen|qwq)/i, "qwen"],
+  [/^glm-/i, "glm"],
+  [/^(kimi-|moonshot-)/i, "moonshot"],
+  [/^minimax-/i, "minimax"],
+  [/^grok-/i, "grok"],
+  [/^llama/i, "llama"],
+  [/^(mistral|mixtral|codestral)/i, "mistral"],
+];
+
+export function inferUiModelGroup(modelId: string): string {
+  const trimmed = modelId.trim();
+  if (!trimmed) return "other";
+  const slashIdx = trimmed.indexOf("/");
+  if (slashIdx > 0) {
+    return trimmed.slice(0, slashIdx).toLowerCase();
+  }
+  for (const [pattern, group] of UI_GROUP_PREFIX_RULES) {
+    if (pattern.test(trimmed)) {
+      return group;
+    }
+  }
+  const dashIdx = trimmed.indexOf("-");
+  if (dashIdx > 0) {
+    return trimmed.slice(0, dashIdx).toLowerCase();
+  }
+  return "other";
+}
