@@ -12,6 +12,7 @@ import { dirname, join, resolve } from "node:path";
 import dotenv from "dotenv";
 import { parse as parseToml, stringify as stringifyToml } from "smol-toml";
 import type { HatoRepository } from "../db/repo.js";
+import type { HomeChannelPlatform, ProactiveChannelOption } from "../gateway/types.js";
 import { loadHatoConfig, validateHatoConfigObject, type HatoConfig } from "./app.js";
 import { validateModelsConfigObject, type ModelsFileConfig } from "./models.js";
 
@@ -135,10 +136,10 @@ export function writeModelsConfig(
 }
 
 /**
- * Bind a Telegram private DM as the owner's Home Channel (Hermes-style /sethome):
+ * Bind a Telegram private DM as Telegram's Home Channel (Hermes-style per-platform /sethome):
  * - Ensures tgUserId is present in owner.channels.tg.user_ids
- * - Sets owner.proactive_channel = "tg"
- * - Updates config/hato.toml (with .bak backup when present) and SQLite owner/home state
+ * - Updates config/hato.toml (with .bak backup when present) and SQLite per-platform home state
+ * - Does NOT overwrite owner.proactive_channel
  */
 export function bindTelegramHomeChannel(params: {
   hatoConfigPath: string;
@@ -166,7 +167,6 @@ export function bindTelegramHomeChannel(params: {
     ...baseConfig,
     owner: {
       ...baseConfig.owner,
-      proactive_channel: "tg",
       channels: {
         ...baseConfig.owner.channels,
         tg: {
@@ -189,6 +189,7 @@ export function bindTelegramHomeChannel(params: {
     canonicalUserId: params.canonicalUserId,
     channel: "tg",
     targetId: params.tgUserId,
+    defaultProactiveChannel: updatedConfig.owner.proactive_channel,
   });
 
   return {
@@ -200,10 +201,10 @@ export function bindTelegramHomeChannel(params: {
 }
 
 /**
- * Bind QQ private chat as Hato's Home Channel:
+ * Bind QQ private chat as QQ's Home Channel (per-platform):
  * - Ensures qqOpenId is present in owner.channels.qq.open_ids
- * - Sets owner.proactive_channel = "qq"
- * - Updates config/hato.toml (with .bak backup when present) and SQLite owner/home state
+ * - Updates config/hato.toml (with .bak backup when present) and SQLite per-platform home state
+ * - Does NOT overwrite owner.proactive_channel
  */
 export function bindQqHomeChannel(params: {
   hatoConfigPath: string;
@@ -228,7 +229,6 @@ export function bindQqHomeChannel(params: {
     ...baseConfig,
     owner: {
       ...baseConfig.owner,
-      proactive_channel: "qq",
       channels: {
         ...baseConfig.owner.channels,
         qq: {
@@ -251,6 +251,7 @@ export function bindQqHomeChannel(params: {
     canonicalUserId: params.canonicalUserId,
     channel: "qq",
     targetId: params.qqOpenId,
+    defaultProactiveChannel: updatedConfig.owner.proactive_channel,
   });
 
   return {
@@ -261,69 +262,131 @@ export function bindQqHomeChannel(params: {
   };
 }
 
-export interface ActiveHomeBinding {
+/**
+ * Update the global default proactive push channel (`owner.proactive_channel`)
+ * independently from per-platform Home Channel bindings.
+ */
+export function updateProactiveChannel(params: {
+  hatoConfigPath: string;
+  repo: HatoRepository;
+  canonicalUserId: string;
+  proactiveChannel: ProactiveChannelOption;
+  currentConfig: HatoConfig;
+}): {
+  updatedConfig: HatoConfig;
+  savedToConfig: boolean;
+  backupPath?: string;
+} {
+  const absConfigPath = resolve(params.hatoConfigPath);
+  const baseConfig = existsSync(absConfigPath) ? loadHatoConfig(absConfigPath) : params.currentConfig;
+
+  const updatedConfig: HatoConfig = {
+    ...baseConfig,
+    owner: {
+      ...baseConfig.owner,
+      proactive_channel: params.proactiveChannel,
+    },
+  };
+
+  let savedToConfig = false;
+  let backupPath: string | undefined;
+  if (existsSync(absConfigPath)) {
+    const written = writeHatoConfig(absConfigPath, updatedConfig, { backup: true });
+    savedToConfig = true;
+    backupPath = written.backupPath;
+  }
+
+  params.repo.setProactiveChannel(params.canonicalUserId, params.proactiveChannel);
+
+  return {
+    updatedConfig,
+    savedToConfig,
+    backupPath,
+  };
+}
+
+export interface PlatformHomeBinding {
   bound: boolean;
-  channel: "tg" | "qq" | null;
+  channel: HomeChannelPlatform;
   targetId: string | null;
   source: "runtime" | "config" | null;
 }
 
+export interface HomeChannelsState {
+  tg: PlatformHomeBinding;
+  qq: PlatformHomeBinding;
+  proactiveChannel: ProactiveChannelOption;
+}
+
 /**
- * Determine whether a Home Channel is currently bound (either explicitly recorded in SQLite
- * or configured via `hato.toml` owner whitelists, unless explicitly unbound via Web Console).
+ * Determine whether a specific platform's Home Channel is currently bound
+ * (either explicitly recorded in SQLite or configured via `hato.toml` owner whitelist,
+ * unless explicitly unbound via Web Console).
  */
-export function resolveActiveHomeBinding(
+export function resolvePlatformHomeBinding(
+  channel: HomeChannelPlatform,
   config: HatoConfig,
   repo: HatoRepository,
-): ActiveHomeBinding {
-  const runtimeHome = repo.getHomeChannel();
-  if (runtimeHome && (runtimeHome.channel === "tg" || runtimeHome.channel === "qq") && runtimeHome.targetId) {
+): PlatformHomeBinding {
+  const runtimeHome = repo.getHomeChannel(channel);
+  if (runtimeHome && runtimeHome.channel === channel && runtimeHome.targetId) {
     return {
       bound: true,
-      channel: runtimeHome.channel,
+      channel,
       targetId: runtimeHome.targetId,
       source: "runtime",
     };
   }
-  if (repo.isHomeExplicitlyUnbound()) {
-    return { bound: false, channel: null, targetId: null, source: null };
+  if (repo.isHomeExplicitlyUnbound(channel)) {
+    return { bound: false, channel, targetId: null, source: null };
   }
 
-  const firstTg = config.owner.channels.tg.user_ids[0];
+  if (channel === "tg") {
+    const firstTg = config.owner.channels.tg.user_ids[0];
+    if (firstTg !== undefined) {
+      return { bound: true, channel: "tg", targetId: String(firstTg), source: "config" };
+    }
+    return { bound: false, channel: "tg", targetId: null, source: null };
+  }
+
   const firstQq = config.owner.channels.qq.open_ids[0];
-  if (config.owner.proactive_channel === "qq" && firstQq) {
-    return { bound: true, channel: "qq", targetId: String(firstQq), source: "config" };
-  }
-  if (config.owner.proactive_channel === "tg" && firstTg !== undefined) {
-    return { bound: true, channel: "tg", targetId: String(firstTg), source: "config" };
-  }
-  if (firstTg !== undefined) {
-    return { bound: true, channel: "tg", targetId: String(firstTg), source: "config" };
-  }
   if (firstQq) {
     return { bound: true, channel: "qq", targetId: String(firstQq), source: "config" };
   }
-  return { bound: false, channel: null, targetId: null, source: null };
+  return { bound: false, channel: "qq", targetId: null, source: null };
+}
+
+export function resolveAllHomeBindings(
+  config: HatoConfig,
+  repo: HatoRepository,
+): HomeChannelsState {
+  return {
+    tg: resolvePlatformHomeBinding("tg", config, repo),
+    qq: resolvePlatformHomeBinding("qq", config, repo),
+    proactiveChannel: config.owner.proactive_channel,
+  };
 }
 
 /**
- * Unbind the current Home Channel from Web Console so a subsequent `/sethome` can take effect.
- * Optionally clears the bound channel's owner whitelist in `hato.toml` to allow pairing a new account.
+ * Unbind a single platform's Home Channel from Web Console so a subsequent `/sethome` on that
+ * platform can take effect without affecting other platforms.
+ * Optionally clears that platform's owner whitelist in `hato.toml` to allow pairing a new account.
  */
 export function unbindHomeChannel(params: {
+  channel: HomeChannelPlatform;
   hatoConfigPath: string;
   repo: HatoRepository;
   canonicalUserId: string;
   currentConfig: HatoConfig;
   clearChannelWhitelist?: boolean;
 }): {
-  previousHome: ActiveHomeBinding;
+  previousHome: PlatformHomeBinding;
   updatedConfig: HatoConfig;
   clearedWhitelist: boolean;
   savedToConfig: boolean;
   backupPath?: string;
 } {
-  const previousHome = resolveActiveHomeBinding(params.currentConfig, params.repo);
+  const previousHome = resolvePlatformHomeBinding(params.channel, params.currentConfig, params.repo);
   const absConfigPath = resolve(params.hatoConfigPath);
   const baseConfig = existsSync(absConfigPath) ? loadHatoConfig(absConfigPath) : params.currentConfig;
 
@@ -332,8 +395,8 @@ export function unbindHomeChannel(params: {
   let savedToConfig = false;
   let backupPath: string | undefined;
 
-  const shouldClearWhitelist = Boolean(params.clearChannelWhitelist) && previousHome.channel !== null;
-  if (shouldClearWhitelist && previousHome.channel === "tg") {
+  const shouldClearWhitelist = Boolean(params.clearChannelWhitelist);
+  if (shouldClearWhitelist && params.channel === "tg") {
     updatedConfig = {
       ...baseConfig,
       owner: {
@@ -345,7 +408,7 @@ export function unbindHomeChannel(params: {
       },
     };
     clearedWhitelist = true;
-  } else if (shouldClearWhitelist && previousHome.channel === "qq") {
+  } else if (shouldClearWhitelist && params.channel === "qq") {
     updatedConfig = {
       ...baseConfig,
       owner: {
@@ -366,8 +429,9 @@ export function unbindHomeChannel(params: {
   }
 
   params.repo.clearHomeChannel({
+    channel: params.channel,
     canonicalUserId: params.canonicalUserId,
-    clearChannel: clearedWhitelist ? (previousHome.channel ?? undefined) : undefined,
+    clearWhitelist: clearedWhitelist,
   });
 
   return {

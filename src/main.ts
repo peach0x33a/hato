@@ -24,8 +24,9 @@ import { ensureHatoHomeConfig } from "./config/paths.js";
 import {
   bindQqHomeChannel,
   bindTelegramHomeChannel,
-  resolveActiveHomeBinding,
+  resolvePlatformHomeBinding,
   unbindHomeChannel,
+  updateProactiveChannel,
   writeHatoConfig,
 } from "./config/store.js";
 import { openDatabase } from "./db/client.js";
@@ -46,7 +47,13 @@ import { MessageDebouncer, mergeInboundBatches } from "./gateway/debouncer.js";
 import { QqAdapter } from "./gateway/qq.js";
 import { QqOpenApiClient } from "./gateway/qq-client.js";
 import { TelegramAdapter } from "./gateway/tg.js";
-import type { ChannelAdapter, ChannelName, InboundBatch } from "./gateway/types.js";
+import type {
+  ChannelAdapter,
+  ChannelName,
+  HomeChannelPlatform,
+  InboundBatch,
+  ProactiveChannelOption,
+} from "./gateway/types.js";
 import { MarkdownImageRenderer } from "./render/markdown-image.js";
 import { buildUpdateNotificationKey, checkForUpdates } from "./utils/update-check.js";
 import { McpClientPool } from "./mcp/pool.js";
@@ -765,11 +772,13 @@ async function main(): Promise<void> {
     ...(platformInfo?.channel === "tg" || platformInfo?.channel === "qq"
       ? {
           setHomeChannel: async () => {
-            const activeHome = resolveActiveHomeBinding(hatoConfig, repo);
+            const platformChannel: HomeChannelPlatform =
+              platformInfo.channel === "tg" ? "tg" : "qq";
+            const activeHome = resolvePlatformHomeBinding(platformChannel, hatoConfig, repo);
             if (activeHome.bound) {
-              const homeLabel = `${activeHome.channel?.toUpperCase() ?? "UNKNOWN"}:${activeHome.targetId ?? ""}`;
+              const channelLabel = platformInfo.channel === "tg" ? "Telegram" : "QQ";
               throw new Error(
-                `当前已绑定原 Home Channel（${homeLabel}），必须先前往 Web 控制台解绑原 Home 后，/sethome 才能生效。`,
+                `当前 ${channelLabel} 已绑定原 Home Channel（${activeHome.targetId ?? ""}），必须先前往 Web 控制台解绑该平台原 Home 后，/sethome 才能生效。`,
               );
             }
             if (platformInfo.channel === "tg") {
@@ -939,26 +948,54 @@ async function main(): Promise<void> {
   });
 
   const resolveTgTarget = (): string | null => {
+    const binding = resolvePlatformHomeBinding("tg", hatoConfig, repo);
+    if (binding.bound && binding.targetId) {
+      return binding.targetId;
+    }
     const first = hatoConfig.owner.channels.tg.user_ids[0];
     return first !== undefined ? String(first) : null;
   };
 
   const resolveQqTarget = (): string | null => {
+    const binding = resolvePlatformHomeBinding("qq", hatoConfig, repo);
+    if (binding.bound && binding.targetId) {
+      return binding.targetId;
+    }
     const first = hatoConfig.owner.channels.qq.open_ids[0];
     return first !== undefined ? String(first) : null;
   };
 
   const resolveOutboundTarget = (
-    preferredChannel?: ChannelName,
+    preferredChannel?: ChannelName | "last_active",
   ): { channel: "tg" | "qq"; adapter: ChannelAdapter; targetId: string } | null => {
     const tgTargetId = resolveTgTarget();
     const qqTargetId = resolveQqTarget();
 
-    if (preferredChannel === "qq") {
+    let effectivePreferred: HomeChannelPlatform | undefined;
+    let allowFallbackFromQq = hatoConfig.gateway.qq.fallback_channel === "tg";
+
+    if (preferredChannel === "tg" || preferredChannel === "qq") {
+      effectivePreferred = preferredChannel;
+    } else if (preferredChannel === "last_active") {
+      effectivePreferred =
+        repo.getLastActiveImChannel(hatoConfig.owner.canonical_user_id) ?? undefined;
+      allowFallbackFromQq = true;
+    } else {
+      const configured = hatoConfig.owner.proactive_channel;
+      if (configured === "tg" || configured === "qq") {
+        effectivePreferred = configured;
+      } else {
+        effectivePreferred =
+          repo.getLastActiveImChannel(hatoConfig.owner.canonical_user_id) ?? undefined;
+        allowFallbackFromQq = true;
+      }
+    }
+
+    if (effectivePreferred === "qq") {
       if (qqAdapter && qqTargetId) {
         return { channel: "qq", adapter: qqAdapter, targetId: qqTargetId };
       }
-      if (hatoConfig.gateway.qq.fallback_channel === "tg" && tgAdapter && tgTargetId) {
+      if (allowFallbackFromQq && tgAdapter && tgTargetId) {
         return { channel: "tg", adapter: tgAdapter, targetId: tgTargetId };
       }
       return null;
@@ -1138,12 +1175,12 @@ async function main(): Promise<void> {
 
   const ensureTelegramStarted = async () => {
     if (tgAdapter) return;
-    const activeHome = resolveActiveHomeBinding(hatoConfig, repo);
+    const activeHome = resolvePlatformHomeBinding("tg", hatoConfig, repo);
     if (!activeHome.bound && hatoConfig.owner.channels.tg.user_ids.length === 0) {
-      const pairingCode = repo.getOrCreateHomePairingCode();
+      const pairingCode = repo.getOrCreateHomePairingCode("tg");
       logInfo(
         "TG",
-        `尚未绑定 Home Channel。请在 Telegram 私聊 Bot 发送: /sethome ${pairingCode}`,
+        `Telegram 尚未绑定 Home Channel。请在 Telegram 私聊 Bot 发送: /sethome ${pairingCode}`,
       );
     }
 
@@ -1155,17 +1192,17 @@ async function main(): Promise<void> {
       onConfirmAction: (ticketId, approved) =>
         ticketCoordinator.handleConfirmAction(ticketId, approved),
       onClaimHome: async ({ platformUserId, code, username }) => {
-        const currentHome = resolveActiveHomeBinding(hatoConfig, repo);
+        const currentHome = resolvePlatformHomeBinding("tg", hatoConfig, repo);
         if (currentHome.bound) {
           return {
             ok: false,
-            reply: `当前已绑定原 Home Channel（${currentHome.channel?.toUpperCase()}: ${currentHome.targetId}），必须先在 Web 控制台解绑原 Home 后，/sethome 才能生效。`,
+            reply: `当前 Telegram 已绑定原 Home Channel（${currentHome.targetId ?? ""}），必须先在 Web 控制台解绑 Telegram 原 Home 后，/sethome 才能生效。`,
           };
         }
-        if (!repo.verifyAndConsumeHomePairingCode(code)) {
+        if (!repo.verifyAndConsumeHomePairingCode("tg", code)) {
           return {
             ok: false,
-            reply: "配对码无效、已过期或尝试次数过多，请前往 Web 控制台查看最新 `/sethome <配对码>`。",
+            reply: "配对码无效、已过期或尝试次数过多，请前往 Web 控制台查看最新 Telegram `/sethome <配对码>`。",
           };
         }
         const bound = bindTelegramHomeChannel({
@@ -1259,12 +1296,12 @@ async function main(): Promise<void> {
 
   const ensureQqStarted = async () => {
     if (qqAdapter) return;
-    const activeHome = resolveActiveHomeBinding(hatoConfig, repo);
+    const activeHome = resolvePlatformHomeBinding("qq", hatoConfig, repo);
     if (!activeHome.bound && hatoConfig.owner.channels.qq.open_ids.length === 0) {
-      const pairingCode = repo.getOrCreateHomePairingCode();
+      const pairingCode = repo.getOrCreateHomePairingCode("qq");
       logInfo(
         "QQ",
-        `尚未绑定 Home Channel。请在 QQ 私聊机器人发送: /sethome ${pairingCode}`,
+        `QQ 尚未绑定 Home Channel。请在 QQ 私聊机器人发送: /sethome ${pairingCode}`,
       );
     }
     const appId = hatoConfig.gateway.qq.app_id.trim();
@@ -1278,17 +1315,17 @@ async function main(): Promise<void> {
       clientSecret,
       proxyRouter,
       onClaimHome: async ({ platformUserId, code }) => {
-        const currentHome = resolveActiveHomeBinding(hatoConfig, repo);
+        const currentHome = resolvePlatformHomeBinding("qq", hatoConfig, repo);
         if (currentHome.bound) {
           return {
             ok: false,
-            reply: `当前已绑定原 Home Channel（${currentHome.channel?.toUpperCase()}: ${currentHome.targetId}），必须先在 Web 控制台解绑原 Home 后，/sethome 才能生效。`,
+            reply: `当前 QQ 已绑定原 Home Channel（${currentHome.targetId ?? ""}），必须先在 Web 控制台解绑 QQ 原 Home 后，/sethome 才能生效。`,
           };
         }
-        if (!repo.verifyAndConsumeHomePairingCode(code)) {
+        if (!repo.verifyAndConsumeHomePairingCode("qq", code)) {
           return {
             ok: false,
-            reply: "配对码无效、已过期或尝试次数过多，请前往 Web 控制台查看最新 /sethome <配对码>。",
+            reply: "配对码无效、已过期或尝试次数过多，请前往 Web 控制台查看最新 QQ /sethome <配对码>。",
           };
         }
         const bound = bindQqHomeChannel({
@@ -1443,11 +1480,12 @@ async function main(): Promise<void> {
     },
     unbindHome: async (opts) => {
       const res = unbindHomeChannel({
+        channel: opts.channel,
         hatoConfigPath: HATO_CONFIG_PATH,
         repo,
         canonicalUserId: hatoConfig.owner.canonical_user_id,
         currentConfig: hatoConfig,
-        clearChannelWhitelist: opts?.clearChannelWhitelist,
+        clearChannelWhitelist: opts.clearChannelWhitelist,
       });
       hatoConfig = res.updatedConfig;
       personaRuntime.updateConfig(hatoConfig);
@@ -1455,14 +1493,29 @@ async function main(): Promise<void> {
       qqAdapter?.updateConfig(hatoConfig);
       logInfo(
         "HATO",
-        `unbound home channel via Web Console (prev=${res.previousHome.channel ?? "none"}:${res.previousHome.targetId ?? ""}, clearedWhitelist=${res.clearedWhitelist})`,
+        `unbound ${opts.channel} home channel via Web Console (prev=${res.previousHome.channel}:${res.previousHome.targetId ?? ""}, clearedWhitelist=${res.clearedWhitelist})`,
       );
       return {
         ok: true,
         previousHome: res.previousHome,
-        home: resolveActiveHomeBinding(hatoConfig, repo),
+        home: resolvePlatformHomeBinding(opts.channel, hatoConfig, repo),
         clearedWhitelist: res.clearedWhitelist,
       };
+    },
+    setProactiveChannel: async (proactiveChannel: ProactiveChannelOption) => {
+      const res = updateProactiveChannel({
+        hatoConfigPath: HATO_CONFIG_PATH,
+        repo,
+        canonicalUserId: hatoConfig.owner.canonical_user_id,
+        proactiveChannel,
+        currentConfig: hatoConfig,
+      });
+      hatoConfig = res.updatedConfig;
+      personaRuntime.updateConfig(hatoConfig);
+      tgAdapter?.updateConfig(hatoConfig);
+      qqAdapter?.updateConfig(hatoConfig);
+      logInfo("HATO", `updated default proactive_channel=${proactiveChannel} via Web Console`);
+      return { ok: true, proactiveChannel };
     },
   });
   await webConsoleServer.start();
@@ -1531,12 +1584,10 @@ async function main(): Promise<void> {
     repo,
     actorLock,
     deliverOpenLoop: async ({ canonicalUserId, notifyChannel, loopId, content }) => {
-      const preferred: ChannelName | undefined =
-        notifyChannel === "tg" || notifyChannel === "qq"
+      const preferred: ChannelName | "last_active" | undefined =
+        notifyChannel === "tg" || notifyChannel === "qq" || notifyChannel === "last_active"
           ? notifyChannel
-          : hatoConfig.owner.proactive_channel === "tg" || hatoConfig.owner.proactive_channel === "qq"
-            ? hatoConfig.owner.proactive_channel
-            : undefined;
+          : undefined;
       const outbound = resolveOutboundTarget(preferred);
       if (!outbound) {
         return "no_outbound";
@@ -1570,8 +1621,10 @@ async function main(): Promise<void> {
     getHatoConfig: () => hatoConfig,
     repo,
     onScriptOutput: async ({ name, notifyChannel, exitCode, stdoutTail, stderrTail }) => {
-      const preferred: ChannelName | undefined =
-        notifyChannel === "tg" || notifyChannel === "qq" ? notifyChannel : undefined;
+      const preferred: ChannelName | "last_active" | undefined =
+        notifyChannel === "tg" || notifyChannel === "qq" || notifyChannel === "last_active"
+          ? notifyChannel
+          : undefined;
       const outbound = resolveOutboundTarget(preferred);
       if (!outbound) return;
       const body =

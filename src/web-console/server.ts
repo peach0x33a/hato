@@ -28,14 +28,17 @@ import { getOptionalSecret, reloadSecretEnv } from "../config/secrets.js";
 import {
   mergeEnvFile,
   readEnvMap,
-  resolveActiveHomeBinding,
+  resolveAllHomeBindings,
+  resolvePlatformHomeBinding,
   unbindHomeChannel,
+  updateProactiveChannel,
   writeHatoConfig,
   writeModelsConfig,
-  type ActiveHomeBinding,
+  type PlatformHomeBinding,
 } from "../config/store.js";
 import type { HatoRepository } from "../db/repo.js";
 import type { TicketCoordinator } from "../dispatch/coordinator.js";
+import type { HomeChannelPlatform, ProactiveChannelOption } from "../gateway/types.js";
 import { QqOpenApiClient } from "../gateway/qq-client.js";
 import { formatGatewayMessageLog } from "../gateway/msg-log.js";
 import type { CompactionManager } from "../memory/compaction.js";
@@ -119,11 +122,19 @@ export interface WebConsoleServerDeps {
     qq: { enabled: boolean; running: boolean; online: boolean; sessionId?: string };
   };
   toggleGateway?: (channel: "tg" | "qq", enabled: boolean) => Promise<{ ok: boolean; error?: string }>;
-  unbindHome?: (options?: { clearChannelWhitelist?: boolean }) => Promise<{
+  unbindHome?: (options: {
+    channel: HomeChannelPlatform;
+    clearChannelWhitelist?: boolean;
+  }) => Promise<{
     ok: boolean;
-    previousHome: ActiveHomeBinding;
-    home: ActiveHomeBinding;
+    previousHome: PlatformHomeBinding;
+    home: PlatformHomeBinding;
     clearedWhitelist: boolean;
+    error?: string;
+  }>;
+  setProactiveChannel?: (proactiveChannel: ProactiveChannelOption) => Promise<{
+    ok: boolean;
+    proactiveChannel: ProactiveChannelOption;
     error?: string;
   }>;
 }
@@ -365,36 +376,19 @@ export class WebConsoleServer {
           return;
         }
         if (pathname === "/api/pairing-code" && method === "GET") {
-          const repo = this.deps.getRepo();
-          const hato = this.deps.getConfig();
-          const home = resolveActiveHomeBinding(hato, repo);
-          if (home.bound) {
-            sendJson(res, 200, {
-              ok: true,
-              homeBound: true,
-              currentHome: home,
-              code: null,
-              command: null,
-              expiresAt: null,
-            });
-            return;
-          }
-          if (parsedUrl.searchParams.get("refresh") === "1") {
-            repo.deleteRuntimeSetting("home_pairing_code");
-          }
-          const info = repo.getHomePairingCodeInfo();
-          sendJson(res, 200, {
-            ok: true,
-            homeBound: false,
-            currentHome: home,
-            code: info.code,
-            command: `/sethome ${info.code}`,
-            expiresAt: info.expiresAt,
-          });
+          const refresh = parsedUrl.searchParams.get("refresh") === "1";
+          const chParam = parsedUrl.searchParams.get("channel");
+          const refreshChannel: HomeChannelPlatform | undefined =
+            chParam === "tg" || chParam === "qq" ? chParam : undefined;
+          sendJson(res, 200, this.buildHomeBindingsSnapshot({ refresh, refreshChannel }));
           return;
         }
         if (pathname === "/api/home/unbind" && method === "POST") {
           await this.handleUnbindHome(req, res);
+          return;
+        }
+        if (pathname === "/api/home/proactive-channel" && method === "PUT") {
+          await this.handleSetProactiveChannel(req, res);
           return;
         }
         if (pathname === "/api/gateway/toggle" && method === "POST") {
@@ -892,34 +886,86 @@ export class WebConsoleServer {
     return false;
   }
 
+  private buildHomeBindingsSnapshot(options?: {
+    refresh?: boolean;
+    refreshChannel?: HomeChannelPlatform;
+  }) {
+    const hato = this.deps.getConfig();
+    const repo = this.deps.getRepo();
+
+    const buildEntry = (channel: HomeChannelPlatform) => {
+      const binding = resolvePlatformHomeBinding(channel, hato, repo);
+      if (
+        !binding.bound &&
+        options?.refresh &&
+        (!options.refreshChannel || options.refreshChannel === channel)
+      ) {
+        repo.deleteHomePairingCode(channel);
+      }
+      const pairingInfo = binding.bound ? null : repo.getHomePairingCodeInfo(channel);
+      return {
+        channel,
+        enabled: channel === "tg" ? hato.gateway.telegram.enabled : hato.gateway.qq.enabled,
+        bound: binding.bound,
+        targetId: binding.targetId,
+        source: binding.source,
+        whitelistCount:
+          channel === "tg"
+            ? hato.owner.channels.tg.user_ids.length
+            : hato.owner.channels.qq.open_ids.length,
+        pairing: pairingInfo
+          ? {
+              code: pairingInfo.code,
+              command: `/sethome ${pairingInfo.code}`,
+              expiresAt: pairingInfo.expiresAt,
+            }
+          : null,
+      };
+    };
+
+    return {
+      ok: true,
+      proactiveChannel: hato.owner.proactive_channel,
+      lastActiveChannel: repo.getLastActiveImChannel(hato.owner.canonical_user_id),
+      platforms: {
+        tg: buildEntry("tg"),
+        qq: buildEntry("qq"),
+      },
+    };
+  }
+
   private async handleUnbindHome(req: IncomingMessage, res: ServerResponse): Promise<void> {
-    const body = (await readJsonBody(req)) as { clearChannelWhitelist?: unknown };
+    const body = (await readJsonBody(req)) as {
+      channel?: unknown;
+      clearChannelWhitelist?: unknown;
+    };
+    const channel: HomeChannelPlatform | null =
+      body.channel === "tg" ? "tg" : body.channel === "qq" ? "qq" : null;
+    if (!channel) {
+      sendJson(res, 400, { ok: false, error: "Invalid channel (expected 'tg' or 'qq')" });
+      return;
+    }
     const clearChannelWhitelist = body.clearChannelWhitelist === true;
     const repo = this.deps.getRepo();
 
     if (this.deps.unbindHome) {
-      const result = await this.deps.unbindHome({ clearChannelWhitelist });
+      const result = await this.deps.unbindHome({ channel, clearChannelWhitelist });
       if (!result.ok) {
         sendJson(res, 400, { ok: false, error: result.error ?? "解绑原 Home 失败" });
         return;
       }
-      const pairing = repo.getHomePairingCodeInfo();
       sendJson(res, 200, {
-        ok: true,
+        ...this.buildHomeBindingsSnapshot(),
+        channel,
         previousHome: result.previousHome,
-        home: result.home,
         clearedWhitelist: result.clearedWhitelist,
-        pairing: {
-          code: pairing.code,
-          command: `/sethome ${pairing.code}`,
-          expiresAt: pairing.expiresAt,
-        },
       });
       return;
     }
 
     const hato = this.deps.getConfig();
     const resUnbind = unbindHomeChannel({
+      channel,
       hatoConfigPath: this.deps.hatoConfigPath,
       repo,
       canonicalUserId: hato.owner.canonical_user_id,
@@ -927,18 +973,51 @@ export class WebConsoleServer {
       clearChannelWhitelist,
     });
     await this.deps.reloadAll();
-    const pairing = repo.getHomePairingCodeInfo();
     sendJson(res, 200, {
-      ok: true,
+      ...this.buildHomeBindingsSnapshot(),
+      channel,
       previousHome: resUnbind.previousHome,
-      home: resolveActiveHomeBinding(this.deps.getConfig(), repo),
       clearedWhitelist: resUnbind.clearedWhitelist,
-      pairing: {
-        code: pairing.code,
-        command: `/sethome ${pairing.code}`,
-        expiresAt: pairing.expiresAt,
-      },
     });
+  }
+
+  private async handleSetProactiveChannel(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    const body = (await readJsonBody(req)) as { proactiveChannel?: unknown };
+    const proactiveChannel: ProactiveChannelOption | null =
+      body.proactiveChannel === "tg" ||
+      body.proactiveChannel === "qq" ||
+      body.proactiveChannel === "last_active"
+        ? body.proactiveChannel
+        : null;
+    if (!proactiveChannel) {
+      sendJson(res, 400, {
+        ok: false,
+        error: "Invalid proactiveChannel (expected 'tg', 'qq', or 'last_active')",
+      });
+      return;
+    }
+
+    if (this.deps.setProactiveChannel) {
+      const result = await this.deps.setProactiveChannel(proactiveChannel);
+      if (!result.ok) {
+        sendJson(res, 400, { ok: false, error: result.error ?? "更新默认推送渠道失败" });
+        return;
+      }
+      sendJson(res, 200, this.buildHomeBindingsSnapshot());
+      return;
+    }
+
+    const hato = this.deps.getConfig();
+    const repo = this.deps.getRepo();
+    updateProactiveChannel({
+      hatoConfigPath: this.deps.hatoConfigPath,
+      repo,
+      canonicalUserId: hato.owner.canonical_user_id,
+      proactiveChannel,
+      currentConfig: hato,
+    });
+    await this.deps.reloadAll();
+    sendJson(res, 200, this.buildHomeBindingsSnapshot());
   }
 
   private async handleToggleGateway(req: IncomingMessage, res: ServerResponse): Promise<void> {
@@ -1077,12 +1156,15 @@ export class WebConsoleServer {
     const slots = registry.listSlots();
     const personaTarget = slots.find((s) => s.slot === "persona")?.target ?? "";
     const routerTarget = slots.find((s) => s.slot === "router")?.target ?? "";
-    const home = resolveActiveHomeBinding(hato, repo);
+    const homes = {
+      ...resolveAllHomeBindings(hato, repo),
+      lastActiveChannel: repo.getLastActiveImChannel(hato.owner.canonical_user_id),
+    };
 
     sendJson(res, 200, {
       ok: true,
       uptimeSec: Math.round((Date.now() - this.startedAtMs) / 1000),
-      home,
+      homes,
       gateways: {
         telegram: {
           ...gwStatus.telegram,

@@ -198,7 +198,7 @@ const RegisterScriptParams = obj({
   name: str({ description: "Short human-readable name for the scheduled script" }),
   script_path: str({ description: "Path to the executable/script file inside workspace" }),
   cron_expr: str({ description: "5-field cron expression, e.g. '0 9 * * *'" }),
-  notify_channel: opt(oneOf(["tg", "qq"], { description: "Optional notification channel (defaults to owner proactive_channel)" })),
+  notify_channel: opt(oneOf(["tg", "qq", "last_active"], { description: "Optional notification channel (defaults to owner proactive_channel)" })),
   required_secrets: opt(arr(str())),
 });
 
@@ -976,8 +976,7 @@ export class BuiltinPiRunner implements ExecutionRunner {
             throw new Error(`脚本文件不存在: ${abs}`);
           }
           const notify =
-            input.notify_channel ??
-            (hatoConfig.owner.proactive_channel === "qq" ? "qq" : "tg");
+            input.notify_channel ?? hatoConfig.owner.proactive_channel;
           const created = this.deps.repo.registerScript({
             ticketId: ticket.ticketId,
             name: input.name,

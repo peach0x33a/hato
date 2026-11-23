@@ -17,7 +17,12 @@ import {
   turnTraces,
   workingMemoryBlocks,
 } from "./schema.js";
-import type { ChannelName, InboundAttachment } from "../gateway/types.js";
+import type {
+  ChannelName,
+  HomeChannelPlatform,
+  InboundAttachment,
+  ProactiveChannelOption,
+} from "../gateway/types.js";
 
 export interface ChatSessionRecord {
   id: string;
@@ -1158,20 +1163,25 @@ export class HatoRepository {
     this.db.delete(runtimeSettings).where(eq(runtimeSettings.key, key)).run();
   }
 
+  private homeKey(prefix: string, channel: HomeChannelPlatform): string {
+    return `${prefix}:${channel}`;
+  }
+
   setHomeChannel(params: {
     canonicalUserId: string;
-    channel: ChannelName;
+    channel: HomeChannelPlatform;
     targetId: string;
+    defaultProactiveChannel?: ProactiveChannelOption;
   }): void {
     const now = Date.now();
-    this.setRuntimeSetting("home_channel", {
+    this.setRuntimeSetting(this.homeKey("home_channel", params.channel), {
       channel: params.channel,
       targetId: params.targetId,
       updatedAt: now,
     });
-    this.deleteRuntimeSetting("home_unbound");
-    this.deleteRuntimeSetting("home_pairing_code");
-    this.deleteRuntimeSetting("home_pairing_failures");
+    this.deleteRuntimeSetting(this.homeKey("home_unbound", params.channel));
+    this.deleteRuntimeSetting(this.homeKey("home_pairing_code", params.channel));
+    this.deleteRuntimeSetting(this.homeKey("home_pairing_failures", params.channel));
 
     const existing = this.db
       .select()
@@ -1183,7 +1193,6 @@ export class HatoRepository {
       this.db
         .update(owners)
         .set({
-          proactiveChannel: params.channel,
           ...(params.channel === "tg" ? { tgUserId: params.targetId } : { qqOpenId: params.targetId }),
           updatedAt: now,
         })
@@ -1195,25 +1204,36 @@ export class HatoRepository {
         tgUserId: params.channel === "tg" ? params.targetId : null,
         qqOpenId: params.channel === "qq" ? params.targetId : null,
         timezone: "Asia/Shanghai",
-        proactiveChannel: params.channel,
+        proactiveChannel: params.defaultProactiveChannel ?? "last_active",
       });
     }
   }
 
-  getHomeChannel(): { channel: ChannelName; targetId: string; updatedAt: number } | null {
-    return this.getRuntimeSetting<{ channel: ChannelName; targetId: string; updatedAt: number }>(
-      "home_channel",
-    );
+  getHomeChannel(
+    channel: HomeChannelPlatform,
+  ): { channel: HomeChannelPlatform; targetId: string; updatedAt: number } | null {
+    return this.getRuntimeSetting<{
+      channel: HomeChannelPlatform;
+      targetId: string;
+      updatedAt: number;
+    }>(this.homeKey("home_channel", channel));
   }
 
-  clearHomeChannel(params?: { canonicalUserId?: string; clearChannel?: "tg" | "qq" | "all" }): void {
+  clearHomeChannel(params: {
+    channel: HomeChannelPlatform;
+    canonicalUserId?: string;
+    clearWhitelist?: boolean;
+  }): void {
     const now = Date.now();
-    this.deleteRuntimeSetting("home_channel");
-    this.deleteRuntimeSetting("home_pairing_code");
-    this.deleteRuntimeSetting("home_pairing_failures");
-    this.setRuntimeSetting("home_unbound", { unbound: true, updatedAt: now });
+    this.deleteRuntimeSetting(this.homeKey("home_channel", params.channel));
+    this.deleteRuntimeSetting(this.homeKey("home_pairing_code", params.channel));
+    this.deleteRuntimeSetting(this.homeKey("home_pairing_failures", params.channel));
+    this.setRuntimeSetting(this.homeKey("home_unbound", params.channel), {
+      unbound: true,
+      updatedAt: now,
+    });
 
-    if (params?.canonicalUserId && params.clearChannel) {
+    if (params.canonicalUserId && params.clearWhitelist) {
       const existing = this.db
         .select()
         .from(owners)
@@ -1223,12 +1243,7 @@ export class HatoRepository {
         this.db
           .update(owners)
           .set({
-            ...(params.clearChannel === "tg" || params.clearChannel === "all"
-              ? { tgUserId: null }
-              : {}),
-            ...(params.clearChannel === "qq" || params.clearChannel === "all"
-              ? { qqOpenId: null }
-              : {}),
+            ...(params.channel === "tg" ? { tgUserId: null } : { qqOpenId: null }),
             updatedAt: now,
           })
           .where(eq(owners.canonicalUserId, params.canonicalUserId))
@@ -1237,20 +1252,25 @@ export class HatoRepository {
     }
   }
 
-  isHomeExplicitlyUnbound(): boolean {
-    const raw = this.getRuntimeSetting<{ unbound?: boolean }>("home_unbound");
+  isHomeExplicitlyUnbound(channel: HomeChannelPlatform): boolean {
+    const raw = this.getRuntimeSetting<{ unbound?: boolean }>(
+      this.homeKey("home_unbound", channel),
+    );
     return Boolean(raw?.unbound);
   }
 
   getHomePairingCodeInfo(
+    channel: HomeChannelPlatform,
     ttlMs = 15 * 60_000,
     nowMs = Date.now(),
   ): { code: string; createdAt: number; expiresAt: number } {
+    const codeKey = this.homeKey("home_pairing_code", channel);
+    const failuresKey = this.homeKey("home_pairing_failures", channel);
     const existing = this.getRuntimeSetting<{
       code?: string;
       createdAt?: number;
       expiresAt?: number;
-    }>("home_pairing_code");
+    }>(codeKey);
     if (
       existing?.code &&
       typeof existing.code === "string" &&
@@ -1265,20 +1285,35 @@ export class HatoRepository {
     }
     const code = `HATO-${randomBytes(5).toString("hex").toUpperCase()}`;
     const expiresAt = nowMs + Math.max(60_000, ttlMs);
-    this.setRuntimeSetting("home_pairing_code", { code, createdAt: nowMs, expiresAt });
-    this.deleteRuntimeSetting("home_pairing_failures");
+    this.setRuntimeSetting(codeKey, { code, createdAt: nowMs, expiresAt });
+    this.deleteRuntimeSetting(failuresKey);
     return { code, createdAt: nowMs, expiresAt };
   }
 
-  getOrCreateHomePairingCode(ttlMs = 15 * 60_000, nowMs = Date.now()): string {
-    return this.getHomePairingCodeInfo(ttlMs, nowMs).code;
+  getOrCreateHomePairingCode(
+    channel: HomeChannelPlatform,
+    ttlMs = 15 * 60_000,
+    nowMs = Date.now(),
+  ): string {
+    return this.getHomePairingCodeInfo(channel, ttlMs, nowMs).code;
   }
 
-  verifyAndConsumeHomePairingCode(candidate: string, nowMs = Date.now()): boolean {
+  deleteHomePairingCode(channel: HomeChannelPlatform): void {
+    this.deleteRuntimeSetting(this.homeKey("home_pairing_code", channel));
+    this.deleteRuntimeSetting(this.homeKey("home_pairing_failures", channel));
+  }
+
+  verifyAndConsumeHomePairingCode(
+    channel: HomeChannelPlatform,
+    candidate: string,
+    nowMs = Date.now(),
+  ): boolean {
     const MAX_FAILURES = 5;
     const LOCKOUT_WINDOW_MS = 5 * 60_000;
+    const codeKey = this.homeKey("home_pairing_code", channel);
+    const failuresKey = this.homeKey("home_pairing_failures", channel);
     const failureState = this.getRuntimeSetting<{ count?: number; windowStartMs?: number }>(
-      "home_pairing_failures",
+      failuresKey,
     );
     if (
       failureState &&
@@ -1290,12 +1325,10 @@ export class HatoRepository {
       return false;
     }
 
-    const stored = this.getRuntimeSetting<{ code?: string; expiresAt?: number }>(
-      "home_pairing_code",
-    );
+    const stored = this.getRuntimeSetting<{ code?: string; expiresAt?: number }>(codeKey);
     if (!stored?.code || typeof stored.code !== "string") return false;
     if (typeof stored.expiresAt === "number" && nowMs > stored.expiresAt) {
-      this.deleteRuntimeSetting("home_pairing_code");
+      this.deleteRuntimeSetting(codeKey);
       return false;
     }
 
@@ -1307,16 +1340,56 @@ export class HatoRepository {
         failureState &&
         typeof failureState.windowStartMs === "number" &&
         nowMs - failureState.windowStartMs < LOCKOUT_WINDOW_MS;
-      this.setRuntimeSetting("home_pairing_failures", {
+      this.setRuntimeSetting(failuresKey, {
         count: withinWindow ? (failureState.count ?? 0) + 1 : 1,
         windowStartMs: withinWindow ? failureState.windowStartMs : nowMs,
       });
       return false;
     }
 
-    this.deleteRuntimeSetting("home_pairing_code");
-    this.deleteRuntimeSetting("home_pairing_failures");
+    this.deleteRuntimeSetting(codeKey);
+    this.deleteRuntimeSetting(failuresKey);
     return true;
+  }
+
+  setProactiveChannel(canonicalUserId: string, proactiveChannel: ProactiveChannelOption): void {
+    const now = Date.now();
+    const existing = this.db
+      .select()
+      .from(owners)
+      .where(eq(owners.canonicalUserId, canonicalUserId))
+      .get();
+    if (existing) {
+      this.db
+        .update(owners)
+        .set({ proactiveChannel, updatedAt: now })
+        .where(eq(owners.canonicalUserId, canonicalUserId))
+        .run();
+      return;
+    }
+    this.ensureOwner({
+      canonicalUserId,
+      timezone: "Asia/Shanghai",
+      proactiveChannel,
+    });
+  }
+
+  getLastActiveImChannel(canonicalUserId: string): HomeChannelPlatform | null {
+    const row = this.db
+      .select({ channel: rawMessages.channel })
+      .from(rawMessages)
+      .where(
+        and(
+          eq(rawMessages.canonicalUserId, canonicalUserId),
+          eq(rawMessages.role, "user"),
+          inArray(rawMessages.channel, ["tg", "qq"]),
+        ),
+      )
+      .orderBy(desc(rawMessages.createdAt), desc(rawMessages.id))
+      .limit(1)
+      .get();
+    if (!row) return null;
+    return row.channel === "tg" || row.channel === "qq" ? row.channel : null;
   }
 
   failStaleInFlightTickets(reason = "服务重启，中断未完成的后台任务"): number {

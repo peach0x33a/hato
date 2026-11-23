@@ -284,8 +284,8 @@ export function createDefaultSlashCommandRegistry(): SlashCommandRegistry {
     })
     .register({
       command: "sethome",
-      description: "将当前私聊设为 Home Channel",
-      helpLine: "- `/sethome`：将当前对话设为 Home Channel（主动关怀与定时通知默认入口）",
+      description: "将当前私聊设为该平台的 Home Channel",
+      helpLine: "- `/sethome`：将当前私聊设为该平台的 Home Channel（默认推送渠道可在 Web 控制台单独设置）",
       availableWhenUnbound: true,
       async execute(ctx) {
         if (!ctx.deps.setHomeChannel) {
@@ -301,7 +301,7 @@ export function createDefaultSlashCommandRegistry(): SlashCommandRegistry {
           ]
             .filter(Boolean)
             .join("，");
-          return `已将当前 ${channelLabel} 私聊（\`${res.targetId}\`）设为 Home Channel（主动消息与定时通知默认投递到这里），${extras}。`;
+          return `已将当前私聊（\`${res.targetId}\`）设为 ${channelLabel} 的 Home Channel（默认主动推送渠道可在 Web 控制台单独设置），${extras}。`;
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
           return `设置 Home Channel 失败：${msg}`;

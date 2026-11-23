@@ -34,10 +34,12 @@ test("HatoRepository generates one-time pairing code and TelegramAdapter guards 
     currentConfig.owner.channels.tg.user_ids = [];
     writeHatoConfig(hatoPath, currentConfig);
 
-    const code1 = repo.getOrCreateHomePairingCode();
-    const code2 = repo.getOrCreateHomePairingCode();
+    const code1 = repo.getOrCreateHomePairingCode("tg");
+    const code2 = repo.getOrCreateHomePairingCode("tg");
+    const qqCode = repo.getOrCreateHomePairingCode("qq");
     assert.equal(code1, code2);
     assert.ok(code1.startsWith("HATO-"));
+    assert.notEqual(qqCode, code1);
 
     const replies: string[] = [];
     const adapter = new TelegramAdapter({
@@ -46,7 +48,7 @@ test("HatoRepository generates one-time pairing code and TelegramAdapter guards 
       proxyRouter: new ScopedProxyRouter([]),
       onInboundMessage: () => undefined,
       onClaimHome: async ({ platformUserId, code }) => {
-        if (!repo.verifyAndConsumeHomePairingCode(code)) {
+        if (!repo.verifyAndConsumeHomePairingCode("tg", code)) {
           return { ok: false, reply: "配对码无效或已过期" };
         }
         const bound = bindTelegramHomeChannel({
@@ -114,7 +116,9 @@ test("HatoRepository generates one-time pairing code and TelegramAdapter guards 
     assert.equal(handledValid, true);
     assert.equal(replies[2], "认领成功: 777888");
     assert.deepEqual(currentConfig.owner.channels.tg.user_ids, [777888]);
-    assert.equal(repo.verifyAndConsumeHomePairingCode(code1), false);
+    assert.equal(repo.verifyAndConsumeHomePairingCode("tg", code1), false);
+    // Consuming TG pairing code must not affect QQ pairing code
+    assert.equal(repo.verifyAndConsumeHomePairingCode("qq", qqCode), true);
 
     // Once an owner is bound, unbound claim path rejects further claims
     const handledAfterBind = await adapter.handlePrivateTextForClaim({

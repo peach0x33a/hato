@@ -8,9 +8,19 @@ import { fauxAssistantMessage, fauxProvider } from "@earendil-works/pi-ai";
 import { loadHatoConfig } from "../src/config/app.js";
 import { ModelRegistry, type ModelsFileConfig } from "../src/config/models.js";
 import { ScopedProxyRouter } from "../src/config/proxy.js";
-import { bindTelegramHomeChannel, mergeEnvFile, readEnvMap, writeHatoConfig, writeModelsConfig } from "../src/config/store.js";
+import {
+  bindQqHomeChannel,
+  bindTelegramHomeChannel,
+  mergeEnvFile,
+  readEnvMap,
+  updateProactiveChannel,
+  writeHatoConfig,
+  writeModelsConfig,
+} from "../src/config/store.js";
+import { eq } from "drizzle-orm";
 import { openDatabase } from "../src/db/client.js";
 import { HatoRepository } from "../src/db/repo.js";
+import { owners } from "../src/db/schema.js";
 import { createDefaultHatoConfig } from "../src/setup/presets.js";
 import { probeModelSlot, probeTelegramGateway } from "../src/setup/probe.js";
 import {
@@ -107,7 +117,7 @@ test("writeHatoConfig and writeModelsConfig validate, backup existing TOML to .b
   }
 });
 
-test("bindTelegramHomeChannel updates whitelist, proactive_channel, .bak backup, and SQLite home_channel", () => {
+test("per-platform Home binding preserves proactive_channel and updateProactiveChannel updates it independently", () => {
   const tempDir = mkdtempSync(join(tmpdir(), "hato-home-bind-"));
   const hatoPath = join(tempDir, "hato.toml");
   const dbHandle = openDatabase(":memory:");
@@ -117,7 +127,7 @@ test("bindTelegramHomeChannel updates whitelist, proactive_channel, .bak backup,
     initial.owner.proactive_channel = "last_active";
     writeHatoConfig(hatoPath, initial);
 
-    const bound = bindTelegramHomeChannel({
+    const boundTg = bindTelegramHomeChannel({
       hatoConfigPath: hatoPath,
       repo,
       canonicalUserId: "owner",
@@ -125,30 +135,60 @@ test("bindTelegramHomeChannel updates whitelist, proactive_channel, .bak backup,
       currentConfig: initial,
     });
 
-    assert.equal(bound.addedToWhitelist, true);
-    assert.equal(bound.savedToConfig, true);
-    assert.equal(bound.updatedConfig.owner.proactive_channel, "tg");
-    assert.deepEqual(bound.updatedConfig.owner.channels.tg.user_ids, [987654321]);
+    assert.equal(boundTg.addedToWhitelist, true);
+    assert.equal(boundTg.savedToConfig, true);
+    // Must not overwrite proactive_channel
+    assert.equal(boundTg.updatedConfig.owner.proactive_channel, "last_active");
+    assert.deepEqual(boundTg.updatedConfig.owner.channels.tg.user_ids, [987654321]);
     assert.equal(existsSync(`${hatoPath}.bak`), true);
 
-    const reloaded = loadHatoConfig(hatoPath);
-    assert.equal(reloaded.owner.proactive_channel, "tg");
-    assert.deepEqual(reloaded.owner.channels.tg.user_ids, [987654321]);
+    const storedTg = repo.getHomeChannel("tg");
+    assert.equal(storedTg?.channel, "tg");
+    assert.equal(storedTg?.targetId, "987654321");
+    assert.equal(repo.getHomeChannel("qq"), null);
 
-    const storedHome = repo.getHomeChannel();
-    assert.equal(storedHome?.channel, "tg");
-    assert.equal(storedHome?.targetId, "987654321");
+    // Binding QQ independently does not disturb TG or proactive_channel
+    const boundQq = bindQqHomeChannel({
+      hatoConfigPath: hatoPath,
+      repo,
+      canonicalUserId: "owner",
+      qqOpenId: "QQ_OPEN_ID_1",
+      currentConfig: boundTg.updatedConfig,
+    });
+    assert.equal(boundQq.addedToWhitelist, true);
+    assert.equal(boundQq.updatedConfig.owner.proactive_channel, "last_active");
+    assert.deepEqual(boundQq.updatedConfig.owner.channels.qq.open_ids, ["QQ_OPEN_ID_1"]);
+    assert.equal(repo.getHomeChannel("tg")?.targetId, "987654321");
+    assert.equal(repo.getHomeChannel("qq")?.targetId, "QQ_OPEN_ID_1");
 
-    // Calling again for same user must not duplicate user_ids
+    // Calling again for same TG user must not duplicate user_ids
     const rebound = bindTelegramHomeChannel({
       hatoConfigPath: hatoPath,
       repo,
       canonicalUserId: "owner",
       tgUserId: "987654321",
-      currentConfig: bound.updatedConfig,
+      currentConfig: boundQq.updatedConfig,
     });
     assert.equal(rebound.addedToWhitelist, false);
     assert.deepEqual(rebound.updatedConfig.owner.channels.tg.user_ids, [987654321]);
+
+    // updateProactiveChannel switches default push channel independently
+    const updatedQqProactive = updateProactiveChannel({
+      hatoConfigPath: hatoPath,
+      repo,
+      canonicalUserId: "owner",
+      proactiveChannel: "qq",
+      currentConfig: rebound.updatedConfig,
+    });
+    assert.equal(updatedQqProactive.updatedConfig.owner.proactive_channel, "qq");
+    const reloaded = loadHatoConfig(hatoPath);
+    assert.equal(reloaded.owner.proactive_channel, "qq");
+    const ownerRow = dbHandle.db
+      .select()
+      .from(owners)
+      .where(eq(owners.canonicalUserId, "owner"))
+      .get();
+    assert.equal(ownerRow?.proactiveChannel, "qq");
   } finally {
     dbHandle.close();
     rmSync(tempDir, { recursive: true, force: true });

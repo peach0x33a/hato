@@ -19,8 +19,10 @@ import { AnimatePresence, LayoutGroup, motion } from "motion/react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   api,
+  type HomeBindingsResponse,
+  type HomeChannelPlatform,
   type OverviewResponse,
-  type PairingCodeResponse,
+  type ProactiveChannelOption,
   type ProbeItemResult,
   type ProbeResponse,
 } from "@/api";
@@ -298,12 +300,16 @@ export function OverviewPanel({
   );
   const [probingChannel, setProbingChannel] = useState<"telegram" | "qq" | null>(null);
   const [togglingChannel, setTogglingChannel] = useState<"tg" | "qq" | null>(null);
-  const [pairingInfo, setPairingInfo] = useState<PairingCodeResponse | null>(null);
+  const [pairingInfo, setPairingInfo] = useState<HomeBindingsResponse | null>(null);
   const [pairingOpen, setPairingOpen] = useState(false);
   const [pairingLoading, setPairingLoading] = useState(false);
-  const [unbindingHome, setUnbindingHome] = useState(false);
-  const [clearWhitelistOnUnbind, setClearWhitelistOnUnbind] = useState(false);
-  const [copiedPairing, setCopiedPairing] = useState(false);
+  const [refreshingChannel, setRefreshingChannel] = useState<HomeChannelPlatform | null>(null);
+  const [unbindingChannel, setUnbindingChannel] = useState<HomeChannelPlatform | null>(null);
+  const [savingProactive, setSavingProactive] = useState(false);
+  const [clearWhitelistByChannel, setClearWhitelistByChannel] = useState<
+    Record<HomeChannelPlatform, boolean>
+  >({ tg: false, qq: false });
+  const [copiedChannel, setCopiedChannel] = useState<HomeChannelPlatform | null>(null);
   const copiedTimerRef = useRef<number | null>(null);
 
   const loadOverview = useCallback(
@@ -396,64 +402,99 @@ export function OverviewPanel({
     }
   };
 
-  const handleLoadPairingCode = async (refresh = false) => {
-    setPairingLoading(true);
+  const handleLoadPairingCode = async (refresh = false, channel?: HomeChannelPlatform) => {
+    if (channel) {
+      setRefreshingChannel(channel);
+    } else {
+      setPairingLoading(true);
+    }
     try {
-      const res = await api.getPairingCode(refresh);
+      const res = await api.getPairingCode({ refresh, channel });
       setPairingInfo(res);
       setPairingOpen(true);
     } catch (err) {
       onToast({
-        title: "获取配对码失败",
+        title: "获取 Home 绑定状态失败",
         description: err instanceof Error ? err.message : String(err),
         status: "error",
       });
     } finally {
       setPairingLoading(false);
+      setRefreshingChannel(null);
     }
   };
 
-  const handleUnbindHome = async () => {
-    setUnbindingHome(true);
+  const handleUnbindHome = async (channel: HomeChannelPlatform) => {
+    setUnbindingChannel(channel);
+    const clearWhitelist = clearWhitelistByChannel[channel];
     try {
-      const res = await api.unbindHome(clearWhitelistOnUnbind);
+      const res = await api.unbindHome(channel, clearWhitelist);
       setPairingInfo({
-        ok: true,
-        homeBound: res.home.bound,
-        currentHome: res.home,
-        code: res.pairing.code,
-        command: res.pairing.command,
-        expiresAt: res.pairing.expiresAt,
+        ok: res.ok,
+        proactiveChannel: res.proactiveChannel,
+        lastActiveChannel: res.lastActiveChannel,
+        platforms: res.platforms,
       });
       setPairingOpen(true);
       await loadOverview(true);
+      const label = channel === "tg" ? "Telegram" : "QQ";
       onToast({
-        title: "已解绑原 Home Channel",
+        title: `已解绑 ${label} Home Channel`,
         description: res.clearedWhitelist
-          ? "已同时清空原通道主人白名单，现在可使用 /sethome 绑定新账号。"
-          : "现在可在 Telegram 或 QQ 发送 /sethome 重新绑定。",
+          ? `已同时清空 ${label} 主人白名单，现在可使用 /sethome 绑定新账号。`
+          : `现在可在 ${label} 私聊发送 /sethome 重新绑定。`,
         status: "success",
       });
     } catch (err) {
       onToast({
-        title: "解绑原 Home 失败",
+        title: "解绑 Home 失败",
         description: err instanceof Error ? err.message : String(err),
         status: "error",
       });
     } finally {
-      setUnbindingHome(false);
+      setUnbindingChannel(null);
     }
   };
 
-  const handleCopyPairing = async () => {
-    if (!pairingInfo?.command) return;
+  const handleSetProactiveChannel = async (proactiveChannel: ProactiveChannelOption) => {
+    if (savingProactive || pairingInfo?.proactiveChannel === proactiveChannel) return;
+    setSavingProactive(true);
     try {
-      await navigator.clipboard.writeText(pairingInfo.command);
-      setCopiedPairing(true);
+      const res = await api.setProactiveChannel(proactiveChannel);
+      setPairingInfo(res);
+      await loadOverview(true);
+      const label =
+        proactiveChannel === "tg"
+          ? "Telegram"
+          : proactiveChannel === "qq"
+            ? "QQ"
+            : "最近活跃平台";
+      onToast({
+        title: "默认主动推送渠道已更新",
+        description: `主动关怀、定时脚本与版本更新通知将默认优先投递至：${label}。`,
+        status: "success",
+      });
+    } catch (err) {
+      onToast({
+        title: "更新默认推送渠道失败",
+        description: err instanceof Error ? err.message : String(err),
+        status: "error",
+      });
+    } finally {
+      setSavingProactive(false);
+    }
+  };
+
+  const handleCopyPairing = async (channel: HomeChannelPlatform) => {
+    const command = pairingInfo?.platforms[channel]?.pairing?.command;
+    if (!command) return;
+    try {
+      await navigator.clipboard.writeText(command);
+      setCopiedChannel(channel);
       if (copiedTimerRef.current !== null) {
         window.clearTimeout(copiedTimerRef.current);
       }
-      copiedTimerRef.current = window.setTimeout(() => setCopiedPairing(false), 1500);
+      copiedTimerRef.current = window.setTimeout(() => setCopiedChannel(null), 1500);
     } catch {
       onToast({ title: "复制失败，请手动复制指令", status: "error" });
     }
@@ -545,89 +586,183 @@ export function OverviewPanel({
             animate={{ opacity: 1, y: 0, scale: 1 }}
             exit={{ opacity: 0, y: -8, scale: 0.98 }}
             transition={{ ...SPRING_LAYOUT, opacity: { duration: 0.16 } }}
-            className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-primary/30 bg-primary/5 px-4 py-3 text-xs"
+            className="space-y-3 rounded-2xl border border-primary/30 bg-primary/5 px-4 py-3.5 text-xs"
           >
-            {pairingInfo.homeBound ? (
-              <>
-                <div className="flex flex-col gap-1.5">
-                  <div className="flex flex-wrap items-center gap-2">
-                    <KeyRound className="size-4 text-primary" />
-                    <span className="font-medium text-foreground">当前已绑定 Home Channel：</span>
-                    <code className="rounded-md bg-muted px-2 py-0.5 font-mono text-xs font-semibold text-foreground">
-                      {pairingInfo.currentHome.channel === "tg" ? "Telegram" : "QQ"} ·{" "}
-                      {pairingInfo.currentHome.targetId}
-                    </code>
-                    <span className="text-muted-foreground">
-                      如需执行 /sethome 更换 Home，必须先在此解绑原 Home
-                    </span>
-                  </div>
-                  <label className="inline-flex cursor-pointer items-center gap-1.5 text-[11px] text-muted-foreground select-none">
-                    <input
-                      type="checkbox"
-                      className="size-3.5 rounded border-border accent-primary"
-                      checked={clearWhitelistOnUnbind}
-                      onChange={(e) => setClearWhitelistOnUnbind(e.target.checked)}
-                    />
-                    同时清空原通道主人白名单（换绑同平台新账号时勾选）
-                  </label>
-                </div>
-                <div className="flex items-center gap-2">
-                  <Button
-                    type="button"
-                    variant="outline"
-                    size="sm"
-                    className="border-destructive/40 text-destructive hover:bg-destructive/10"
-                    disabled={unbindingHome}
-                    onClick={() => void handleUnbindHome()}
-                  >
-                    {unbindingHome ? (
-                      <Loader2 className="size-3.5 animate-spin" />
-                    ) : (
-                      <Unlink className="size-3.5" />
-                    )}
-                    解绑原 Home
-                  </Button>
-                </div>
-              </>
-            ) : (
-              <>
+            {/* 默认主动推送渠道设置 */}
+            <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border/50 pb-3">
+              <div className="flex flex-col gap-1">
                 <div className="flex flex-wrap items-center gap-2">
                   <KeyRound className="size-4 text-primary" />
-                  <span className="font-medium text-foreground">主人绑定指令（15 分钟有效）：</span>
-                  <code className="rounded-md bg-muted px-2 py-1 font-mono text-xs font-semibold text-foreground">
-                    {pairingInfo.command}
-                  </code>
+                  <span className="font-medium text-foreground">默认主动推送渠道</span>
                   <span className="text-muted-foreground">
-                    在 Telegram 或 QQ 私聊机器人发送即可绑定并设为 Home Channel（已在白名单的账号可直接发送 /sethome）
+                    用于主动关怀、定时脚本与版本更新通知
                   </span>
                 </div>
-                <div className="flex items-center gap-2">
-                  <Button
-                    type="button"
-                    variant="outline"
-                    size="sm"
-                    onClick={() => void handleCopyPairing()}
+                {pairingInfo.proactiveChannel === "last_active" ? (
+                  <span className="pl-6 text-[11px] text-muted-foreground">
+                    当前最近活跃平台：
+                    {pairingInfo.lastActiveChannel === "tg"
+                      ? "Telegram"
+                      : pairingInfo.lastActiveChannel === "qq"
+                        ? "QQ"
+                        : "暂无 IM 活跃记录（将自动回退至已绑定平台）"}
+                  </span>
+                ) : !pairingInfo.platforms[pairingInfo.proactiveChannel].bound ? (
+                  <span className="pl-6 text-[11px] text-amber-500">
+                    {pairingInfo.proactiveChannel === "tg" ? "Telegram" : "QQ"} 尚未绑定 Home，请在下方完成配对
+                  </span>
+                ) : null}
+              </div>
+              <div className="inline-flex items-center gap-1 rounded-xl border border-border/70 bg-background/60 p-1">
+                {(
+                  [
+                    { value: "tg", label: "Telegram" },
+                    { value: "qq", label: "QQ" },
+                    { value: "last_active", label: "最近活跃" },
+                  ] as const
+                ).map((opt) => {
+                  const active = pairingInfo.proactiveChannel === opt.value;
+                  return (
+                    <button
+                      key={opt.value}
+                      type="button"
+                      disabled={savingProactive}
+                      onClick={() => void handleSetProactiveChannel(opt.value)}
+                      className={`rounded-lg px-2.5 py-1 text-[11px] font-medium transition-colors ${
+                        active
+                          ? "bg-primary text-primary-foreground shadow-xs"
+                          : "text-muted-foreground hover:bg-muted/60 hover:text-foreground"
+                      }`}
+                    >
+                      {opt.label}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+
+            {/* 各平台独立 Home 绑定 */}
+            <div className="space-y-2">
+              {(["tg", "qq"] as const).map((channel) => {
+                const entry = pairingInfo.platforms[channel];
+                const label = channel === "tg" ? "Telegram" : "QQ";
+                const isUnbinding = unbindingChannel === channel;
+                const isRefreshing = refreshingChannel === channel;
+                const isCopied = copiedChannel === channel;
+                return (
+                  <div
+                    key={channel}
+                    className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-border/60 bg-background/40 px-3.5 py-2.5"
                   >
-                    {copiedPairing ? (
-                      <Check className="size-3.5 text-emerald-500" />
+                    {entry.bound ? (
+                      <>
+                        <div className="flex flex-col gap-1.5">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <span className="rounded-md bg-muted px-2 py-0.5 font-medium text-foreground">
+                              {label}
+                            </span>
+                            <span className="rounded-full bg-emerald-500/15 px-2 py-0.5 text-[11px] font-medium text-emerald-500">
+                              已绑定
+                            </span>
+                            {!entry.enabled ? (
+                              <span className="rounded-full bg-muted px-2 py-0.5 text-[11px] text-muted-foreground">
+                                网关未启用
+                              </span>
+                            ) : null}
+                            <code className="rounded-md bg-muted px-2 py-0.5 font-mono text-xs font-semibold text-foreground">
+                              {entry.targetId}
+                            </code>
+                            <span className="text-muted-foreground">
+                              如需执行 /sethome 更换，需先解绑
+                            </span>
+                          </div>
+                          <label className="inline-flex cursor-pointer items-center gap-1.5 text-[11px] text-muted-foreground select-none">
+                            <input
+                              type="checkbox"
+                              className="size-3.5 rounded border-border accent-primary"
+                              checked={clearWhitelistByChannel[channel]}
+                              onChange={(e) =>
+                                setClearWhitelistByChannel((prev) => ({
+                                  ...prev,
+                                  [channel]: e.target.checked,
+                                }))
+                              }
+                            />
+                            同时清空 {label} 主人白名单（换绑同平台新账号时勾选）
+                          </label>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <Button
+                            type="button"
+                            variant="outline"
+                            size="sm"
+                            className="border-destructive/40 text-destructive hover:bg-destructive/10"
+                            disabled={isUnbinding}
+                            onClick={() => void handleUnbindHome(channel)}
+                          >
+                            {isUnbinding ? (
+                              <Loader2 className="size-3.5 animate-spin" />
+                            ) : (
+                              <Unlink className="size-3.5" />
+                            )}
+                            解绑
+                          </Button>
+                        </div>
+                      </>
                     ) : (
-                      <Copy className="size-3.5" />
+                      <>
+                        <div className="flex flex-wrap items-center gap-2">
+                          <span className="rounded-md bg-muted px-2 py-0.5 font-medium text-foreground">
+                            {label}
+                          </span>
+                          <span className="rounded-full bg-muted px-2 py-0.5 text-[11px] text-muted-foreground">
+                            未绑定
+                          </span>
+                          {!entry.enabled ? (
+                            <span className="rounded-full bg-muted px-2 py-0.5 text-[11px] text-muted-foreground">
+                              网关未启用
+                            </span>
+                          ) : null}
+                          {entry.pairing ? (
+                            <code className="rounded-md bg-muted px-2 py-1 font-mono text-xs font-semibold text-foreground">
+                              {entry.pairing.command}
+                            </code>
+                          ) : null}
+                          <span className="text-muted-foreground">
+                            在 {label} 私聊机器人发送即可绑定（15 分钟有效；已在白名单可直接发送 /sethome）
+                          </span>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <Button
+                            type="button"
+                            variant="outline"
+                            size="sm"
+                            onClick={() => void handleCopyPairing(channel)}
+                          >
+                            {isCopied ? (
+                              <Check className="size-3.5 text-emerald-500" />
+                            ) : (
+                              <Copy className="size-3.5" />
+                            )}
+                            {isCopied ? "已复制" : "复制"}
+                          </Button>
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            size="sm"
+                            disabled={isRefreshing}
+                            onClick={() => void handleLoadPairingCode(true, channel)}
+                          >
+                            <RefreshCw className={`size-3.5 ${isRefreshing ? "animate-spin" : ""}`} />
+                            换一个
+                          </Button>
+                        </div>
+                      </>
                     )}
-                    {copiedPairing ? "已复制" : "复制"}
-                  </Button>
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    size="sm"
-                    disabled={pairingLoading}
-                    onClick={() => void handleLoadPairingCode(true)}
-                  >
-                    <RefreshCw className={`size-3.5 ${pairingLoading ? "animate-spin" : ""}`} />
-                    换一个
-                  </Button>
-                </div>
-              </>
-            )}
+                  </div>
+                );
+              })}
+            </div>
           </motion.div>
         ) : null}
       </AnimatePresence>

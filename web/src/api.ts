@@ -514,20 +514,34 @@ export interface SaveConfigResponse {
   error?: string;
 }
 
-export interface ActiveHomeBinding {
+export type HomeChannelPlatform = "tg" | "qq";
+export type ProactiveChannelOption = "tg" | "qq" | "last_active";
+
+export interface PlatformHomeBinding {
   bound: boolean;
-  channel: "tg" | "qq" | null;
+  channel: HomeChannelPlatform;
   targetId: string | null;
   source: "runtime" | "config" | null;
 }
 
-export interface PairingCodeResponse {
+export interface PlatformHomeEntry extends PlatformHomeBinding {
+  enabled: boolean;
+  whitelistCount: number;
+  pairing: {
+    code: string;
+    command: string;
+    expiresAt: number;
+  } | null;
+}
+
+export interface HomeBindingsResponse {
   ok: boolean;
-  homeBound: boolean;
-  currentHome: ActiveHomeBinding;
-  code: string | null;
-  command: string | null;
-  expiresAt: number | null;
+  proactiveChannel: ProactiveChannelOption;
+  lastActiveChannel: HomeChannelPlatform | null;
+  platforms: {
+    tg: PlatformHomeEntry;
+    qq: PlatformHomeEntry;
+  };
 }
 
 export interface OverviewResponse {
@@ -541,7 +555,12 @@ export interface OverviewResponse {
     releaseUrl: string;
   };
   uptimeSec: number;
-  home?: ActiveHomeBinding;
+  homes?: {
+    tg: PlatformHomeBinding;
+    qq: PlatformHomeBinding;
+    proactiveChannel: ProactiveChannelOption;
+    lastActiveChannel: HomeChannelPlatform | null;
+  };
   gateways: {
     telegram: {
       enabled: boolean;
@@ -933,21 +952,30 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ force }),
     }),
-  getPairingCode: (refresh = false) =>
-    requestJson<PairingCodeResponse>(
-      refresh ? "/api/pairing-code?refresh=1" : "/api/pairing-code",
-    ),
-  unbindHome: (clearChannelWhitelist = false) =>
-    requestJson<{
-      ok: boolean;
-      previousHome: ActiveHomeBinding;
-      home: ActiveHomeBinding;
-      clearedWhitelist: boolean;
-      pairing: { code: string; command: string; expiresAt: number };
-    }>("/api/home/unbind", {
+  getPairingCode: (opts?: { refresh?: boolean; channel?: HomeChannelPlatform }) => {
+    const params = new URLSearchParams();
+    if (opts?.refresh) params.set("refresh", "1");
+    if (opts?.channel) params.set("channel", opts.channel);
+    const qs = params.toString();
+    return requestJson<HomeBindingsResponse>(qs ? `/api/pairing-code?${qs}` : "/api/pairing-code");
+  },
+  unbindHome: (channel: HomeChannelPlatform, clearChannelWhitelist = false) =>
+    requestJson<
+      HomeBindingsResponse & {
+        channel: HomeChannelPlatform;
+        previousHome: PlatformHomeBinding;
+        clearedWhitelist: boolean;
+      }
+    >("/api/home/unbind", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ clearChannelWhitelist }),
+      body: JSON.stringify({ channel, clearChannelWhitelist }),
+    }),
+  setProactiveChannel: (proactiveChannel: ProactiveChannelOption) =>
+    requestJson<HomeBindingsResponse>("/api/home/proactive-channel", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ proactiveChannel }),
     }),
   toggleGateway: (channel: "tg" | "qq", enabled: boolean) =>
     requestJson<{ ok: boolean; channel: "tg" | "qq"; enabled: boolean }>("/api/gateway/toggle", {

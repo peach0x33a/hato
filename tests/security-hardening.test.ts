@@ -11,9 +11,10 @@ import { loadMcpConfig } from "../src/config/mcp.js";
 import { ModelRegistry } from "../src/config/models.js";
 import { ScopedProxyRouter } from "../src/config/proxy.js";
 import {
+  bindQqHomeChannel,
   bindTelegramHomeChannel,
   mergeEnvFile,
-  resolveActiveHomeBinding,
+  resolvePlatformHomeBinding,
   unbindHomeChannel,
   writeHatoConfig,
 } from "../src/config/store.js";
@@ -224,36 +225,67 @@ hindsight_llm = "faux-provider/faux-persona-1"
     });
     assert.equal(exfilRes.status, 403);
 
-    // 5. Pairing code blocked while Home is bound; allowed after POST /api/home/unbind
+    // 5. Per-platform Home bindings: TG bound (pairing=null), QQ unbound (pairing available)
     const boundPairingRes = await fetch(`${baseUrl}/api/pairing-code`, { headers: authHeaders });
     const boundPairingJson = (await boundPairingRes.json()) as {
       ok: boolean;
-      homeBound: boolean;
-      code: string | null;
-      currentHome: { channel: string; targetId: string };
+      proactiveChannel: string;
+      platforms: {
+        tg: { bound: boolean; targetId: string | null; pairing: { code: string } | null };
+        qq: { bound: boolean; targetId: string | null; pairing: { code: string } | null };
+      };
     };
     assert.equal(boundPairingJson.ok, true);
-    assert.equal(boundPairingJson.homeBound, true);
-    assert.equal(boundPairingJson.code, null);
-    assert.equal(boundPairingJson.currentHome.channel, "tg");
-    assert.equal(boundPairingJson.currentHome.targetId, "10001");
+    assert.equal(boundPairingJson.platforms.tg.bound, true);
+    assert.equal(boundPairingJson.platforms.tg.targetId, "10001");
+    assert.equal(boundPairingJson.platforms.tg.pairing, null);
+    assert.equal(boundPairingJson.platforms.qq.bound, false);
+    assert.ok(boundPairingJson.platforms.qq.pairing?.code.startsWith("HATO-"));
 
+    // Unbinding TG only unbinds TG, unlocks TG pairing, and leaves QQ untouched
     const unbindRes = await fetch(`${baseUrl}/api/home/unbind`, {
       method: "POST",
       headers: { ...authHeaders, "Content-Type": "application/json" },
-      body: JSON.stringify({ clearChannelWhitelist: true }),
+      body: JSON.stringify({ channel: "tg", clearChannelWhitelist: true }),
     });
     const unbindJson = (await unbindRes.json()) as {
       ok: boolean;
-      home: { bound: boolean };
+      channel: string;
       clearedWhitelist: boolean;
-      pairing: { code: string; command: string; expiresAt: number };
+      platforms: {
+        tg: { bound: boolean; pairing: { code: string; command: string } | null };
+        qq: { bound: boolean; pairing: { code: string } | null };
+      };
     };
     assert.equal(unbindJson.ok, true);
-    assert.equal(unbindJson.home.bound, false);
+    assert.equal(unbindJson.channel, "tg");
+    assert.equal(unbindJson.platforms.tg.bound, false);
     assert.equal(unbindJson.clearedWhitelist, true);
-    assert.ok(unbindJson.pairing.code.startsWith("HATO-"));
+    assert.ok(unbindJson.platforms.tg.pairing?.code.startsWith("HATO-"));
+    assert.equal(unbindJson.platforms.qq.bound, false);
     assert.equal(currentConfig.owner.channels.tg.user_ids.length, 0);
+
+    // PUT /api/home/proactive-channel validates & updates default proactive channel
+    const badProactiveRes = await fetch(`${baseUrl}/api/home/proactive-channel`, {
+      method: "PUT",
+      headers: { ...authHeaders, "Content-Type": "application/json" },
+      body: JSON.stringify({ proactiveChannel: "web" }),
+    });
+    assert.equal(badProactiveRes.status, 400);
+
+    const okProactiveRes = await fetch(`${baseUrl}/api/home/proactive-channel`, {
+      method: "PUT",
+      headers: { ...authHeaders, "Content-Type": "application/json" },
+      body: JSON.stringify({ proactiveChannel: "last_active" }),
+    });
+    assert.equal(okProactiveRes.status, 200);
+    const okProactiveJson = (await okProactiveRes.json()) as {
+      ok: boolean;
+      proactiveChannel: string;
+    };
+    assert.equal(okProactiveJson.ok, true);
+    assert.equal(okProactiveJson.proactiveChannel, "last_active");
+    assert.equal(currentConfig.owner.proactive_channel, "last_active");
 
     // 6. Sticker image accepts ?token= when auth is enabled (returns 404 for missing sticker, NOT 401)
     const stickerUnauth = await fetch(`${baseUrl}/api/stickers/stk_missing/image`);
@@ -381,35 +413,81 @@ test("Home binding requires Console unbind before /sethome, and pairing code loc
     cfg.owner.channels.qq.open_ids = [];
     writeHatoConfig(hatoPath, cfg, { backup: false });
 
-    assert.equal(resolveActiveHomeBinding(cfg, repo).bound, false);
+    assert.equal(resolvePlatformHomeBinding("tg", cfg, repo).bound, false);
+    assert.equal(resolvePlatformHomeBinding("qq", cfg, repo).bound, false);
 
-    // Pairing code rate-limit lockout after 5 failures
-    const code = repo.getOrCreateHomePairingCode();
-    assert.equal(code.length, "HATO-".length + 10);
+    // Pairing code rate-limit lockout after 5 failures is scoped per platform
+    const tgCode = repo.getOrCreateHomePairingCode("tg");
+    const qqCode = repo.getOrCreateHomePairingCode("qq");
+    assert.equal(tgCode.length, "HATO-".length + 10);
     for (let i = 0; i < 5; i++) {
-      assert.equal(repo.verifyAndConsumeHomePairingCode("HATO-WRONG00000"), false);
+      assert.equal(repo.verifyAndConsumeHomePairingCode("tg", "HATO-WRONG00000"), false);
     }
-    // Even real code is locked out during lockout window
-    assert.equal(repo.verifyAndConsumeHomePairingCode(code), false);
+    // Even real TG code is locked out during lockout window, while QQ remains unaffected
+    assert.equal(repo.verifyAndConsumeHomePairingCode("tg", tgCode), false);
+    assert.equal(repo.verifyAndConsumeHomePairingCode("qq", qqCode), true);
 
-    // After binding, resolveActiveHomeBinding reports bound=true until unbindHomeChannel
-    const bound = bindTelegramHomeChannel({
+    // Binding TG does not mark QQ bound; unbinding TG does not unbind QQ
+    const boundTg = bindTelegramHomeChannel({
       hatoConfigPath: hatoPath,
       repo,
       canonicalUserId: "owner",
       tgUserId: "123456",
       currentConfig: cfg,
     });
-    assert.equal(resolveActiveHomeBinding(bound.updatedConfig, repo).bound, true);
-
-    const unbound = unbindHomeChannel({
+    const boundBoth = bindQqHomeChannel({
       hatoConfigPath: hatoPath,
       repo,
       canonicalUserId: "owner",
-      currentConfig: bound.updatedConfig,
+      qqOpenId: "QQ_OPEN_99",
+      currentConfig: boundTg.updatedConfig,
+    });
+    assert.equal(resolvePlatformHomeBinding("tg", boundBoth.updatedConfig, repo).bound, true);
+    assert.equal(resolvePlatformHomeBinding("qq", boundBoth.updatedConfig, repo).bound, true);
+
+    const unboundTg = unbindHomeChannel({
+      channel: "tg",
+      hatoConfigPath: hatoPath,
+      repo,
+      canonicalUserId: "owner",
+      currentConfig: boundBoth.updatedConfig,
       clearChannelWhitelist: false,
     });
-    assert.equal(resolveActiveHomeBinding(unbound.updatedConfig, repo).bound, false);
+    assert.equal(resolvePlatformHomeBinding("tg", unboundTg.updatedConfig, repo).bound, false);
+    assert.equal(resolvePlatformHomeBinding("qq", unboundTg.updatedConfig, repo).bound, true);
+
+    // getLastActiveImChannel ignores web/assistant messages and picks latest IM user message
+    assert.equal(repo.getLastActiveImChannel("owner"), null);
+    repo.appendRawMessage({
+      canonicalUserId: "owner",
+      channel: "tg",
+      role: "user",
+      content: "hi from tg",
+      createdAt: 1000,
+    });
+    repo.appendRawMessage({
+      canonicalUserId: "owner",
+      channel: "web",
+      role: "user",
+      content: "hi from web",
+      createdAt: 2000,
+    });
+    assert.equal(repo.getLastActiveImChannel("owner"), "tg");
+    repo.appendRawMessage({
+      canonicalUserId: "owner",
+      channel: "qq",
+      role: "user",
+      content: "hi from qq",
+      createdAt: 3000,
+    });
+    repo.appendRawMessage({
+      canonicalUserId: "owner",
+      channel: "tg",
+      role: "assistant",
+      content: "assistant reply",
+      createdAt: 4000,
+    });
+    assert.equal(repo.getLastActiveImChannel("owner"), "qq");
   } finally {
     dbHandle.close();
     rmSync(tempDir, { recursive: true, force: true });
