@@ -28,6 +28,8 @@ import {
   type WorkerResult,
 } from "./schema.js";
 
+import type { SelfConfigInput } from "../persona/self-config.js";
+
 export interface SensitiveFileConfirmPayload {
   kind: "send_env_file";
   channel: ChannelName;
@@ -35,6 +37,12 @@ export interface SensitiveFileConfirmPayload {
   path: string;
   caption?: string;
   text?: string;
+}
+
+export interface SelfConfigConfirmPayload {
+  kind: "self_config";
+  action: SelfConfigInput;
+  summaryTitle: string;
 }
 
 export interface TicketCoordinatorDeps {
@@ -50,6 +58,10 @@ export interface TicketCoordinatorDeps {
   executeSensitiveFileConfirm?: (
     canonicalUserId: string,
     payload: SensitiveFileConfirmPayload,
+  ) => Promise<{ ok: boolean; message: string }>;
+  executeSelfConfigConfirm?: (
+    canonicalUserId: string,
+    payload: SelfConfigConfirmPayload,
   ) => Promise<{ ok: boolean; message: string }>;
 }
 
@@ -173,6 +185,60 @@ export class TicketCoordinator {
       ok: true,
       ticketId,
       message: `目标文件 ${filename} 属于敏感 .env 凭据文件，已发送二次确认请求 (${ticketId})，需主人显式确认后才会发出。`,
+    };
+  }
+
+  async enqueueSelfConfigConfirm(params: {
+    canonicalUserId: string;
+    channel: ChannelName;
+    action: SelfConfigInput;
+    summaryTitle: string;
+    promptText: string;
+  }): Promise<{ ok: boolean; ticketId: string; message: string }> {
+    const ticketId = `t_${randomBytes(4).toString("hex")}`;
+    const briefTitle = params.summaryTitle.slice(0, 48);
+    const payload: SelfConfigConfirmPayload = {
+      kind: "self_config",
+      action: params.action,
+      summaryTitle: briefTitle,
+    };
+
+    this.deps.repo.createTicket({
+      id: ticketId,
+      canonicalUserId: params.canonicalUserId,
+      status: "awaiting_confirm",
+      backend: "builtin-pi",
+      briefTitle,
+      originChannel: params.channel,
+      progressNote: "等待主人确认修改设置",
+    });
+    this.deps.repo.updateTicket(ticketId, {
+      resultJson: JSON.stringify({
+        ticket_id: ticketId,
+        status: "awaiting_confirm",
+        narration_hint: params.promptText,
+        verbatim_blocks: [],
+        artifacts: [],
+        required_secrets: [],
+        caveats: [],
+        confirm_action: params.promptText,
+        self_config_confirm: payload,
+      }),
+    });
+
+    await this.deps.bus.emit({
+      type: "ticket_confirm_required",
+      canonicalUserId: params.canonicalUserId,
+      originChannel: params.channel,
+      ticketId,
+      briefTitle,
+      promptText: params.promptText,
+    });
+
+    return {
+      ok: true,
+      ticketId,
+      message: `已发送设置修改确认请求 (${ticketId})：${briefTitle}，需主人点击确认按钮后才会生效。`,
     };
   }
 
@@ -576,6 +642,39 @@ export class TicketCoordinator {
           progressNote: msg.slice(0, 120),
         });
         return `发送失败：${msg}`;
+      }
+    }
+
+    const selfConfigPayload = parseSelfConfigConfirmPayload(ticket.resultJson);
+    if (selfConfigPayload) {
+      if (!this.deps.executeSelfConfigConfirm) {
+        this.deps.repo.updateTicket(ticketId, {
+          status: "failed",
+          progressNote: "缺少设置修改执行器",
+        });
+        return `工单 ${ticketId} 执行失败：未接入设置修改执行器。`;
+      }
+      this.deps.repo.updateTicket(ticketId, {
+        status: "running",
+        progressNote: "主人已确认，正在应用设置修改",
+      });
+      try {
+        const res = await this.deps.executeSelfConfigConfirm(
+          ticket.canonicalUserId,
+          selfConfigPayload,
+        );
+        this.deps.repo.updateTicket(ticketId, {
+          status: res.ok ? "done" : "failed",
+          progressNote: res.message.slice(0, 120),
+        });
+        return res.ok ? `已确认并执行：${res.message}` : `执行失败：${res.message}`;
+      } catch (err) {
+        const msg = summarizeError(err);
+        this.deps.repo.updateTicket(ticketId, {
+          status: "failed",
+          progressNote: msg.slice(0, 120),
+        });
+        return `执行失败：${msg}`;
       }
     }
 
@@ -1062,6 +1161,35 @@ function parseSensitiveFileConfirmPayload(
         path: payload.path,
         caption: typeof payload.caption === "string" ? payload.caption : undefined,
         text: typeof payload.text === "string" ? payload.text : undefined,
+      };
+    }
+  } catch {
+    return null;
+  }
+  return null;
+}
+
+function parseSelfConfigConfirmPayload(
+  resultJson: string | null | undefined,
+): SelfConfigConfirmPayload | null {
+  if (!resultJson) return null;
+  try {
+    const parsed = JSON.parse(resultJson) as {
+      self_config_confirm?: Partial<SelfConfigConfirmPayload>;
+    };
+    const payload = parsed?.self_config_confirm;
+    if (
+      payload &&
+      payload.kind === "self_config" &&
+      payload.action &&
+      typeof payload.action === "object" &&
+      typeof payload.action.action === "string" &&
+      typeof payload.summaryTitle === "string"
+    ) {
+      return {
+        kind: "self_config",
+        action: payload.action,
+        summaryTitle: payload.summaryTitle,
       };
     }
   } catch {

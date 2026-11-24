@@ -15,7 +15,12 @@ export function loadSecretEnv(envPath = resolveDefaultEnvPath()): void {
 /**
  * Force-reload .env into process.env (used by /reload after secret edits).
  */
-export function reloadSecretEnv(envPath = resolveDefaultEnvPath()): void {
+export function reloadSecretEnv(envPath = resolveDefaultEnvPath(), deletedKeys?: readonly string[]): void {
+  if (deletedKeys) {
+    for (const key of deletedKeys) {
+      delete process.env[key];
+    }
+  }
   dotenv.config({ path: envPath, override: true, quiet: true });
   envLoaded = true;
 }

@@ -153,6 +153,30 @@ export function SecretsAndProbePanel({
     }
   };
 
+  const commitSecretClear = async (key: string) => {
+    const targetId = `clear:${key}`;
+    setTargetSaveState(targetId, "loading");
+    try {
+      const res = await api.saveSecrets({ [key]: null });
+      setTargetSaveState(targetId, "success");
+      onSecretsUpdated(res.secretStates, res.changes);
+      onToast({
+        title: `已清除密钥 ${key}`,
+        description: res.changes?.length ? res.changes.join("；") : undefined,
+        status: "success",
+      });
+      scheduleResetSaveState(targetId, 1200);
+    } catch (err) {
+      setTargetSaveState(targetId, "error");
+      onToast({
+        title: "清除密钥失败",
+        description: err instanceof Error ? err.message : String(err),
+        status: "error",
+      });
+      scheduleResetSaveState(targetId, 1800);
+    }
+  };
+
   const runProbe = async (target: "all" | ProbeTargetKey) => {
     setProbingTarget(target);
     try {
@@ -413,6 +437,18 @@ export function SecretsAndProbePanel({
                         <Pencil className="size-3.5" />
                         {item.configured ? "修改密钥" : "立即配置"}
                       </Button>
+                      {item.configured ? (
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="ghost"
+                          disabled={saveStates[`clear:${item.key}`] === "loading"}
+                          onClick={() => void commitSecretClear(item.key)}
+                          className="text-red-500 hover:bg-red-500/10 hover:text-red-500"
+                        >
+                          清除
+                        </Button>
+                      ) : null}
                     </div>
                   )}
                 </div>

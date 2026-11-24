@@ -1,3 +1,4 @@
+import { lookup } from "node:dns/promises";
 import { isIP } from "node:net";
 import type { ResolvedWebFetchConfig } from "../config/app.js";
 import type { ScopedProxyRouter } from "../config/proxy.js";
@@ -67,6 +68,42 @@ function isPrivateOrBlockedIpv6(rawHost: string): boolean {
     }
   }
   return false;
+}
+
+/**
+ * Returns true if the given IPv4 or IPv6 address is private, loopback, link-local, CGNAT, ULA, or otherwise blocked.
+ */
+export function isBlockedIpAddress(ip: string): boolean {
+  const bare = ip.replace(/^\[|\]$/g, "").toLowerCase();
+  const version = isIP(bare);
+  if (version === 4) return isPrivateOrBlockedIpv4(bare);
+  if (version === 6) return isPrivateOrBlockedIpv6(bare);
+  return false;
+}
+
+/**
+ * Resolves a hostname (or checks an IP literal) and throws if any resolved address is private or blocked.
+ */
+export async function assertSafeResolvedHost(
+  hostname: string,
+  lookupFn: typeof lookup = lookup,
+): Promise<void> {
+  const bareHost = hostname.replace(/^\[|\]$/g, "").toLowerCase();
+  if (isIP(bareHost)) {
+    if (isBlockedIpAddress(bareHost)) {
+      throw new Error(`出于安全限制，禁止访问内网或环回 IP 地址 "${hostname}"`);
+    }
+    return;
+  }
+  const records = await lookupFn(bareHost, { all: true, verbatim: true });
+  if (!records || records.length === 0) {
+    throw new Error(`DNS 解析未返回有效地址: "${hostname}"`);
+  }
+  for (const entry of records) {
+    if (isBlockedIpAddress(entry.address)) {
+      throw new Error(`出于安全限制，域名 "${hostname}" 解析到内网或受限 IP "${entry.address}"`);
+    }
+  }
 }
 
 /**
@@ -149,6 +186,7 @@ export async function runWebFetch(params: {
   input: WebFetchInput;
   signal?: AbortSignal;
   allowPrivateNetworks?: boolean;
+  lookupFn?: typeof lookup;
 }): Promise<WebFetchOutput> {
   if (!params.config.enabled) {
     const text = "网页抓取已在配置中禁用（web.fetch.enabled = false）。";
@@ -173,6 +211,12 @@ export async function runWebFetch(params: {
     let currentUrl = parsedUrl;
     let res: Response | null = null;
     for (let hop = 0; hop <= MAX_REDIRECT_HOPS; hop++) {
+      if (
+        !params.allowPrivateNetworks &&
+        params.proxyRouter.resolveScope(WEB_ACCESS_FETCH_SCOPE).mode === "direct"
+      ) {
+        await assertSafeResolvedHost(currentUrl.hostname, params.lookupFn);
+      }
       res = await params.proxyRouter.runWithScope(WEB_ACCESS_FETCH_SCOPE, () =>
         params.proxyRouter.scopedFetch(
           currentUrl.toString(),

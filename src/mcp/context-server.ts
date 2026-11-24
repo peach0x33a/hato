@@ -28,6 +28,7 @@ export function createScopedContextMcpServer(params: {
     maxHours: 24,
   };
   let lookedBackTotal = 0;
+  let oldestCursorMsgId: string | undefined;
 
   const server = new Server(
     { name: "hato-context", version: "0.1.0" },
@@ -96,6 +97,7 @@ export function createScopedContextMcpServer(params: {
         timezone: params.timezone,
         lookback,
       });
+      oldestCursorMsgId = slice.oldestLoadedMsgId ?? undefined;
       return {
         content: [{ type: "text", text: slice.formattedText }],
       };
@@ -107,10 +109,15 @@ export function createScopedContextMcpServer(params: {
         repo: params.repo,
         contextId: requestedCtxId,
         count,
+        beforeMsgId: oldestCursorMsgId,
         alreadyLookedBack: lookedBackTotal,
         timezone: params.timezone,
         lookback,
+        persistCursor: false,
       });
+      if (expanded.oldestLoadedMsgId) {
+        oldestCursorMsgId = expanded.oldestLoadedMsgId;
+      }
       lookedBackTotal += expanded.messages.length;
       return {
         content: [{ type: "text", text: expanded.formattedText }],
@@ -165,7 +172,8 @@ async function runCliEntrypoint(): Promise<void> {
     dbHandle.close();
     throw new Error(`Invalid or unknown context_id "${contextId}"`);
   }
-  const expectedToken = computeContextToken(absDbPath, ticket.id, contextId);
+  const secretSeed = process.env.HATO_CTX_SECRET?.trim() || absDbPath;
+  const expectedToken = computeContextToken(secretSeed, ticket.id, contextId);
   if (!verifyContextToken(providedToken, expectedToken)) {
     dbHandle.close();
     throw new Error("Invalid HATO_CTX_TOKEN for requested context_id");

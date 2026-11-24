@@ -934,6 +934,55 @@ reasoning = true
       modelsConfig: { slot_thinking?: Record<string, string> };
     };
     assert.equal(cfgAfterBody.modelsConfig.slot_thinking?.persona, "low");
+
+    // Reject forbidden secret env names (LD_PRELOAD / NODE_OPTIONS) with 400
+    const forbiddenRes = await fetch(`${baseUrl}/api/config/secrets`, {
+      method: "PUT",
+      headers: { ...authHeaders, "Content-Type": "application/json" },
+      body: JSON.stringify({ updates: { LD_PRELOAD: "/tmp/evil.so", NODE_OPTIONS: "--require /tmp/evil.js" } }),
+    });
+    assert.equal(forbiddenRes.status, 400);
+
+    // Delete an existing secret via null
+    const setTavilyRes = await fetch(`${baseUrl}/api/config/secrets`, {
+      method: "PUT",
+      headers: { ...authHeaders, "Content-Type": "application/json" },
+      body: JSON.stringify({ updates: { TAVILY_API_KEY: "tvly-secret-123456" } }),
+    });
+    assert.equal(setTavilyRes.status, 200);
+    assert.equal(process.env.TAVILY_API_KEY, "tvly-secret-123456");
+
+    const delTavilyRes = await fetch(`${baseUrl}/api/config/secrets`, {
+      method: "PUT",
+      headers: { ...authHeaders, "Content-Type": "application/json" },
+      body: JSON.stringify({ updates: { TAVILY_API_KEY: null } }),
+    });
+    assert.equal(delTavilyRes.status, 200);
+    const delTavilyBody = (await delTavilyRes.json()) as { deletedKeys: string[] };
+    assert.ok(delTavilyBody.deletedKeys.includes("TAVILY_API_KEY"));
+    assert.equal(process.env.TAVILY_API_KEY, undefined);
+
+    // GET /api/health returns 403 on spoofed Host header (DNS rebinding defense)
+    const parsed = new URL(baseUrl);
+    const spoofedHealthStatus = await new Promise<number>((resolveStatus, reject) => {
+      const http = require("node:http") as typeof import("node:http");
+      const req = http.request(
+        {
+          hostname: parsed.hostname,
+          port: Number(parsed.port),
+          path: "/api/health",
+          method: "GET",
+          headers: { Host: "evil.attacker.com" },
+        },
+        (res) => {
+          res.resume();
+          resolveStatus(res.statusCode ?? 0);
+        },
+      );
+      req.on("error", reject);
+      req.end();
+    });
+    assert.equal(spoofedHealthStatus, 403);
   } finally {
     delete process.env[tokenEnvName];
     await server.stop();

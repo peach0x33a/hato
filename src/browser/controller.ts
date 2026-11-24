@@ -3,6 +3,7 @@ import { resolve } from "node:path";
 import { chromium, type BrowserContext, type CDPSession, type Page } from "playwright-core";
 import type { ResolvedWebBrowserConfig } from "../config/app.js";
 import type { ScopedProxyRouter } from "../config/proxy.js";
+import { assertSafeResolvedHost, validateFetchUrl } from "../persona/web-fetch.js";
 import { logInfo, logWarn, summarizeError } from "../utils/logger.js";
 import {
   buildBrowserLaunchArgs,
@@ -677,6 +678,40 @@ export class BrowserController {
       );
     }
 
+    const dnsCache = new Map<string, number>();
+    await openedContext.route("**/*", async (route) => {
+      const reqUrl = route.request().url();
+      let protocol: string;
+      try {
+        protocol = new URL(reqUrl).protocol;
+      } catch {
+        await route.abort("accessdenied");
+        return;
+      }
+      if (protocol === "about:" || protocol === "data:" || protocol === "blob:") {
+        await route.continue();
+        return;
+      }
+      if (protocol !== "http:" && protocol !== "https:") {
+        await route.abort("accessdenied");
+        return;
+      }
+      try {
+        const parsed = validateFetchUrl(reqUrl);
+        if (proxyKey === "direct") {
+          const now = Date.now();
+          const cachedUntil = dnsCache.get(parsed.hostname);
+          if (!cachedUntil || cachedUntil <= now) {
+            await assertSafeResolvedHost(parsed.hostname);
+            dnsCache.set(parsed.hostname, now + 60_000);
+          }
+        }
+        await route.continue();
+      } catch {
+        await route.abort("accessdenied");
+      }
+    });
+
     await openedContext.addInitScript(INIT_STEALTH_SCRIPT);
     openedContext.on("page", (newPage) => {
       this.activePage = newPage;
@@ -921,26 +956,8 @@ const BLOCKED_BROWSER_HOSTS = new Set([
   "metadata.goog",
 ]);
 
-function normalizeNavigationUrl(rawUrl: string): string {
-  const trimmed = rawUrl.trim();
-  let parsed: URL;
-  try {
-    parsed = new URL(trimmed);
-  } catch {
-    throw new Error(`无效网页地址: "${rawUrl}"`);
-  }
-  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
-    throw new Error(`浏览器任务仅允许访问 http:// 或 https:// 网址，收到 "${parsed.protocol}"`);
-  }
-  const bareHost = parsed.hostname.toLowerCase().replace(/^\[|\]$/g, "");
-  if (
-    BLOCKED_BROWSER_HOSTS.has(bareHost) ||
-    bareHost.startsWith("169.254.") ||
-    bareHost.startsWith("::ffff:169.254.")
-  ) {
-    throw new Error(`出于安全限制，浏览器任务禁止访问云元数据地址 "${parsed.hostname}"`);
-  }
-  return parsed.toString();
+export function normalizeNavigationUrl(rawUrl: string): string {
+  return validateFetchUrl(rawUrl).toString();
 }
 
 function escapeAttrValue(value: string): string {

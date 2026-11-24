@@ -1,7 +1,6 @@
-import { timingSafeEqual } from "node:crypto";
-import { copyFileSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import http, { type IncomingMessage, type ServerResponse } from "node:http";
-import { dirname, extname, resolve, sep } from "node:path";
+import { dirname, resolve } from "node:path";
 import { getSupportedThinkingLevels, type ImageContent } from "@earendil-works/pi-ai";
 import type { BrowserRuntime } from "../browser/runtime.js";
 import type { ActorLock } from "../bus/actor-bus.js";
@@ -27,6 +26,7 @@ import { fetchUpstreamModels } from "../config/upstream-models.js";
 import type { ScopedProxyRouter } from "../config/proxy.js";
 import { getOptionalSecret, reloadSecretEnv } from "../config/secrets.js";
 import {
+  isForbiddenSecretEnvName,
   mergeEnvFile,
   readEnvMap,
   resolveAllHomeBindings,
@@ -37,6 +37,32 @@ import {
   writeModelsConfig,
   type PlatformHomeBinding,
 } from "../config/store.js";
+import {
+  HttpStatusError,
+  isLoopbackHost,
+  maskSecretPreview,
+  pruneCache,
+  readJsonBody,
+  sendJson,
+  serveStaticAsset,
+  timingSafeTokenEqual,
+  validateRequestOriginAndHost,
+} from "./http-utils.js";
+import {
+  handleMemoryForget,
+  handleMemoryOverview,
+  handleMemoryRecall,
+  handleMemoryRecords,
+  handleMemorySync,
+} from "./memory-routes.js";
+import {
+  handleBrowserAction,
+  handleBrowserInput,
+  handleBrowserScreenshot,
+  handleBrowserStatus,
+  handleBrowserStream,
+} from "./browser-routes.js";
+import { tryHandleMediaNotebookRoute } from "./media-notebook-routes.js";
 import type {
   HatoRepository,
   MemorySyncBank,
@@ -146,69 +172,6 @@ export interface WebConsoleServerDeps {
   }>;
 }
 
-class HttpStatusError extends Error {
-  constructor(
-    public readonly statusCode: number,
-    message: string,
-  ) {
-    super(message);
-    this.name = "HttpStatusError";
-  }
-}
-
-const LOOPBACK_HOSTS = new Set(["127.0.0.1", "localhost", "::1", "[::1]"]);
-const MAX_CACHE_ENTRIES = 200;
-
-function isLoopbackHost(host: string): boolean {
-  return LOOPBACK_HOSTS.has(host.trim().toLowerCase());
-}
-
-function timingSafeTokenEqual(provided: string, expected: string): boolean {
-  const a = Buffer.from(provided, "utf8");
-  const b = Buffer.from(expected, "utf8");
-  if (a.length === 0 || a.length !== b.length) return false;
-  return timingSafeEqual(a, b);
-}
-
-function extractHostnameFromHostHeader(hostHeader: string): string {
-  const trimmed = hostHeader.trim().toLowerCase();
-  if (trimmed.startsWith("[")) {
-    const closeIdx = trimmed.indexOf("]");
-    return closeIdx > 0 ? trimmed.slice(0, closeIdx + 1) : trimmed;
-  }
-  const colonIdx = trimmed.lastIndexOf(":");
-  return colonIdx > 0 ? trimmed.slice(0, colonIdx) : trimmed;
-}
-
-function pruneCache<T extends { expiresAt: number }>(cache: Map<string, T>, nowMs = Date.now()): void {
-  for (const [k, v] of cache.entries()) {
-    if (v.expiresAt <= nowMs) {
-      cache.delete(k);
-    }
-  }
-  while (cache.size > MAX_CACHE_ENTRIES) {
-    const firstKey = cache.keys().next().value;
-    if (firstKey === undefined) break;
-    cache.delete(firstKey);
-  }
-}
-
-const MIME_TYPES: Record<string, string> = {
-  ".html": "text/html; charset=utf-8",
-  ".js": "application/javascript; charset=utf-8",
-  ".css": "text/css; charset=utf-8",
-  ".json": "application/json; charset=utf-8",
-  ".svg": "image/svg+xml",
-  ".png": "image/png",
-  ".jpg": "image/jpeg",
-  ".jpeg": "image/jpeg",
-  ".webp": "image/webp",
-  ".ico": "image/x-icon",
-  ".woff2": "font/woff2",
-};
-
-const MAX_JSON_BODY_BYTES = 16 * 1024 * 1024;
-
 /**
  * Embedded HTTP/SSE console server exposing config, diagnostics, telemetry, and live chat APIs
  * alongside the built Vite + beUI SPA bundle.
@@ -304,6 +267,15 @@ export class WebConsoleServer {
     const pathname = parsedUrl.pathname;
 
     try {
+      if (pathname.startsWith("/api/")) {
+        const consoleCfg = resolveWebConsoleConfig(this.deps.getConfig());
+        const csrfCheck = validateRequestOriginAndHost(req, method, consoleCfg.host);
+        if (!csrfCheck.ok) {
+          sendJson(res, 403, { ok: false, error: csrfCheck.error });
+          return;
+        }
+      }
+
       if (pathname === "/api/health" && method === "GET") {
         const hato = this.deps.getConfig();
         const consoleCfg = resolveWebConsoleConfig(hato);
@@ -372,11 +344,6 @@ export class WebConsoleServer {
       }
 
       if (pathname.startsWith("/api/")) {
-        const csrfCheck = this.validateRequestOriginAndHost(req, method);
-        if (!csrfCheck.ok) {
-          sendJson(res, 403, { ok: false, error: csrfCheck.error });
-          return;
-        }
         if (!this.isAuthorized(req, pathname, parsedUrl)) {
           sendJson(res, 401, { ok: false, error: "Unauthorized: invalid or missing console token" });
           return;
@@ -492,23 +459,23 @@ export class WebConsoleServer {
           return;
         }
         if (pathname === "/api/memory/overview" && method === "GET") {
-          await this.handleMemoryOverview(res);
+          await handleMemoryOverview(this.deps, res);
           return;
         }
         if (pathname === "/api/memory/records" && method === "GET") {
-          await this.handleMemoryRecords(parsedUrl, res);
+          await handleMemoryRecords(this.deps, parsedUrl, res);
           return;
         }
         if (pathname === "/api/memory/recall" && method === "POST") {
-          await this.handleMemoryRecall(req, res);
+          await handleMemoryRecall(this.deps, req, res);
           return;
         }
         if (pathname === "/api/memory/sync" && method === "POST") {
-          await this.handleMemorySync(req, res);
+          await handleMemorySync(this.deps, req, res);
           return;
         }
         if (pathname === "/api/memory/forget" && method === "POST") {
-          await this.handleMemoryForget(req, res);
+          await handleMemoryForget(this.deps, req, res);
           return;
         }
         if (pathname === "/api/statics" && method === "GET") {
@@ -532,243 +499,7 @@ export class WebConsoleServer {
           this.handleLogsStream(req, res);
           return;
         }
-        if (pathname === "/api/stickers" && method === "GET") {
-          const svc = this.deps.getStickerService?.();
-          if (!svc) {
-            sendJson(res, 200, { ok: true, stickers: [] });
-            return;
-          }
-          const uid = this.deps.getConfig().owner.canonical_user_id;
-          const q = parsedUrl.searchParams.get("q") ?? undefined;
-          const list = svc.getStore().list(uid, { query: q });
-          sendJson(res, 200, { ok: true, stickers: list });
-          return;
-        }
-        const stickerImageMatch = pathname.match(/^\/api\/stickers\/([^/]+)\/image$/);
-        if (stickerImageMatch && method === "GET") {
-          const svc = this.deps.getStickerService?.();
-          const uid = this.deps.getConfig().owner.canonical_user_id;
-          const id = decodeURIComponent(stickerImageMatch[1]!);
-          const rec = svc?.getStore().getById(uid, id);
-          if (!rec || !existsSync(rec.localPath)) {
-            sendJson(res, 404, { ok: false, error: "Sticker not found" });
-            return;
-          }
-          res.writeHead(200, {
-            "Content-Type": rec.mimeType || "image/webp",
-            "Cache-Control": "private, max-age=300",
-          });
-          res.end(readFileSync(rec.localPath));
-          return;
-        }
-        const stickerItemMatch = pathname.match(/^\/api\/stickers\/([^/]+)$/);
-        if (stickerItemMatch && method === "PATCH") {
-          const svc = this.deps.getStickerService?.();
-          if (!svc) {
-            sendJson(res, 503, { ok: false, error: "Sticker service unavailable" });
-            return;
-          }
-          const uid = this.deps.getConfig().owner.canonical_user_id;
-          const id = decodeURIComponent(stickerItemMatch[1]!);
-          const body = (await readJsonBody(req)) as {
-            caption?: string;
-            emotions?: string[];
-            scenes?: string[];
-            style?: string;
-          };
-          const updated = svc.getStore().updateMetadata(uid, id, {
-            ...(typeof body.caption === "string" ? { caption: body.caption.trim() } : {}),
-            ...(Array.isArray(body.emotions) ? { emotions: body.emotions.map((x) => String(x).trim()).filter(Boolean) } : {}),
-            ...(Array.isArray(body.scenes) ? { scenes: body.scenes.map((x) => String(x).trim()).filter(Boolean) } : {}),
-            ...(typeof body.style === "string" ? { style: body.style.trim() } : {}),
-            status: "ready",
-            errorMessage: null,
-          });
-          if (!updated) {
-            sendJson(res, 404, { ok: false, error: "Sticker not found" });
-            return;
-          }
-          sendJson(res, 200, { ok: true, sticker: updated });
-          return;
-        }
-        if (stickerItemMatch && method === "DELETE") {
-          const svc = this.deps.getStickerService?.();
-          if (!svc) {
-            sendJson(res, 503, { ok: false, error: "Sticker service unavailable" });
-            return;
-          }
-          const uid = this.deps.getConfig().owner.canonical_user_id;
-          const id = decodeURIComponent(stickerItemMatch[1]!);
-          const deleted = svc.deleteSticker(uid, id);
-          if (!deleted) {
-            sendJson(res, 404, { ok: false, error: "Sticker not found" });
-            return;
-          }
-          sendJson(res, 200, { ok: true });
-          return;
-        }
-        if (pathname === "/api/notebook" && method === "GET") {
-          const svc = this.deps.getNotebookService?.();
-          if (!svc) {
-            sendJson(res, 200, {
-              ok: true,
-              entries: [],
-              usedSemanticIndex: false,
-              degraded: false,
-              memoryConfigured: false,
-              stats: { total: 0, textCount: 0, imageCount: 0, mixedCount: 0, syncedCount: 0 },
-            });
-            return;
-          }
-          const uid = this.deps.getConfig().owner.canonical_user_id;
-          const q = parsedUrl.searchParams.get("q") ?? undefined;
-          const rawKind = parsedUrl.searchParams.get("kind") ?? "all";
-          const kind: NotebookEntryKind | "all" =
-            rawKind === "text" || rawKind === "image" || rawKind === "mixed" ? rawKind : "all";
-          const result = await svc.searchEntries(uid, { query: q, kind, limit: 100 });
-          const stats = svc.getStore().getStats(uid);
-          sendJson(res, 200, {
-            ok: true,
-            entries: result.entries,
-            usedSemanticIndex: result.usedSemanticIndex,
-            degraded: result.degraded,
-            ...(result.errorMessage ? { errorMessage: result.errorMessage } : {}),
-            memoryConfigured: svc.isMemoryIndexConfigured(),
-            stats,
-          });
-          return;
-        }
-        if (pathname === "/api/notebook" && method === "POST") {
-          const svc = this.deps.getNotebookService?.();
-          if (!svc) {
-            sendJson(res, 503, { ok: false, error: "Notebook service unavailable" });
-            return;
-          }
-          const uid = this.deps.getConfig().owner.canonical_user_id;
-          const body = (await readJsonBody(req)) as {
-            title?: unknown;
-            summary?: unknown;
-            reason?: unknown;
-            content?: unknown;
-            tags?: unknown;
-            imageDataUrl?: unknown;
-          };
-          try {
-            const entry = await svc.saveEntry(uid, {
-              title: typeof body.title === "string" ? body.title : undefined,
-              summary: typeof body.summary === "string" ? body.summary : "",
-              reason: typeof body.reason === "string" ? body.reason : "",
-              content: typeof body.content === "string" ? body.content : undefined,
-              tags: Array.isArray(body.tags)
-                ? body.tags.map((x) => String(x).trim()).filter(Boolean)
-                : undefined,
-              imageDataUrl: typeof body.imageDataUrl === "string" ? body.imageDataUrl : undefined,
-            });
-            sendJson(res, 201, { ok: true, entry });
-          } catch (err) {
-            sendJson(res, 400, { ok: false, error: summarizeError(err) });
-          }
-          return;
-        }
-        if (pathname === "/api/notebook/reindex" && method === "POST") {
-          const svc = this.deps.getNotebookService?.();
-          if (!svc) {
-            sendJson(res, 503, { ok: false, error: "Notebook service unavailable" });
-            return;
-          }
-          const uid = this.deps.getConfig().owner.canonical_user_id;
-          const body = (await readJsonBody(req).catch(() => ({}))) as { force?: unknown };
-          const result = await svc.reindexAll(uid, { force: body.force === true });
-          sendJson(res, 200, { ...result, ok: result.ok });
-          return;
-        }
-        const notebookImageMatch = pathname.match(/^\/api\/notebook\/([^/]+)\/image$/);
-        if (notebookImageMatch && method === "GET") {
-          const svc = this.deps.getNotebookService?.();
-          const uid = this.deps.getConfig().owner.canonical_user_id;
-          const id = decodeURIComponent(notebookImageMatch[1]!);
-          const entry = svc?.getStore().getById(uid, id);
-          if (!entry || !entry.imagePath || !existsSync(entry.imagePath)) {
-            sendJson(res, 404, { ok: false, error: "Notebook image not found" });
-            return;
-          }
-          res.writeHead(200, {
-            "Content-Type": entry.imageMimeType || "image/png",
-            "Cache-Control": "private, max-age=300",
-          });
-          res.end(readFileSync(entry.imagePath));
-          return;
-        }
-        const notebookItemMatch = pathname.match(/^\/api\/notebook\/([^/]+)$/);
-        if (notebookItemMatch && method === "GET") {
-          const svc = this.deps.getNotebookService?.();
-          if (!svc) {
-            sendJson(res, 503, { ok: false, error: "Notebook service unavailable" });
-            return;
-          }
-          const uid = this.deps.getConfig().owner.canonical_user_id;
-          const id = decodeURIComponent(notebookItemMatch[1]!);
-          const entry = svc.getStore().getById(uid, id);
-          if (!entry) {
-            sendJson(res, 404, { ok: false, error: "Notebook entry not found" });
-            return;
-          }
-          sendJson(res, 200, { ok: true, entry });
-          return;
-        }
-        if (notebookItemMatch && method === "PATCH") {
-          const svc = this.deps.getNotebookService?.();
-          if (!svc) {
-            sendJson(res, 503, { ok: false, error: "Notebook service unavailable" });
-            return;
-          }
-          const uid = this.deps.getConfig().owner.canonical_user_id;
-          const id = decodeURIComponent(notebookItemMatch[1]!);
-          const body = (await readJsonBody(req)) as {
-            title?: unknown;
-            summary?: unknown;
-            reason?: unknown;
-            content?: unknown;
-            tags?: unknown;
-            imageDataUrl?: unknown;
-            removeImage?: unknown;
-          };
-          try {
-            const updated = await svc.updateEntry(uid, id, {
-              ...(typeof body.title === "string" ? { title: body.title } : {}),
-              ...(typeof body.summary === "string" ? { summary: body.summary } : {}),
-              ...(typeof body.reason === "string" ? { reason: body.reason } : {}),
-              ...(typeof body.content === "string" ? { content: body.content } : {}),
-              ...(Array.isArray(body.tags)
-                ? { tags: body.tags.map((x) => String(x).trim()).filter(Boolean) }
-                : {}),
-              ...(typeof body.imageDataUrl === "string" ? { imageDataUrl: body.imageDataUrl } : {}),
-              ...(body.removeImage === true ? { removeImage: true } : {}),
-            });
-            if (!updated) {
-              sendJson(res, 404, { ok: false, error: "Notebook entry not found" });
-              return;
-            }
-            sendJson(res, 200, { ok: true, entry: updated });
-          } catch (err) {
-            sendJson(res, 400, { ok: false, error: summarizeError(err) });
-          }
-          return;
-        }
-        if (notebookItemMatch && method === "DELETE") {
-          const svc = this.deps.getNotebookService?.();
-          if (!svc) {
-            sendJson(res, 503, { ok: false, error: "Notebook service unavailable" });
-            return;
-          }
-          const uid = this.deps.getConfig().owner.canonical_user_id;
-          const id = decodeURIComponent(notebookItemMatch[1]!);
-          const deleted = await svc.deleteEntry(uid, id);
-          if (!deleted) {
-            sendJson(res, 404, { ok: false, error: "Notebook entry not found" });
-            return;
-          }
-          sendJson(res, 200, { ok: true });
+        if (await tryHandleMediaNotebookRoute(this.deps, req, res, pathname, method, parsedUrl)) {
           return;
         }
         if (pathname === "/api/tickets" && method === "GET") {
@@ -780,34 +511,23 @@ export class WebConsoleServer {
           return;
         }
         if (pathname === "/api/browser/status" && method === "GET") {
-          const status = await this.deps.getBrowserRuntime().getInteractiveStatus();
-          sendJson(res, 200, { ok: true, status });
+          await handleBrowserStatus(this.deps, res);
           return;
         }
         if (pathname === "/api/browser/stream" && method === "GET") {
-          this.handleBrowserStream(req, res);
+          handleBrowserStream(this.deps, req, res);
           return;
         }
         if (pathname === "/api/browser/screenshot" && method === "GET") {
-          const buf = await this.deps.getBrowserRuntime().captureScreenshot();
-          if (!buf) {
-            sendJson(res, 404, { ok: false, error: "浏览器尚未打开" });
-            return;
-          }
-          res.writeHead(200, {
-            "Content-Type": "image/jpeg",
-            "Content-Length": buf.byteLength,
-            "Cache-Control": "no-store",
-          });
-          res.end(buf);
+          await handleBrowserScreenshot(this.deps, res);
           return;
         }
         if (pathname === "/api/browser/action" && method === "POST") {
-          await this.handleBrowserAction(req, res);
+          await handleBrowserAction(this.deps, req, res);
           return;
         }
         if (pathname === "/api/browser/input" && method === "POST") {
-          await this.handleBrowserInput(req, res);
+          await handleBrowserInput(this.deps, req, res);
           return;
         }
 
@@ -816,7 +536,7 @@ export class WebConsoleServer {
       }
 
       if (method === "GET" || method === "HEAD") {
-        this.serveStaticAsset(pathname, res, method === "HEAD");
+        serveStaticAsset(this.staticDir, pathname, res, method === "HEAD");
         return;
       }
 
@@ -830,66 +550,6 @@ export class WebConsoleServer {
         res.end();
       }
     }
-  }
-
-  private validateRequestOriginAndHost(
-    req: IncomingMessage,
-    method: string,
-  ): { ok: true } | { ok: false; error: string } {
-    const consoleCfg = resolveWebConsoleConfig(this.deps.getConfig());
-    const hostHeader = typeof req.headers.host === "string" ? req.headers.host.trim() : "";
-
-    // DNS rebinding defense when bound to loopback: reject unexpected Host headers.
-    if (hostHeader && isLoopbackHost(consoleCfg.host)) {
-      const reqHost = extractHostnameFromHostHeader(hostHeader);
-      if (!isLoopbackHost(reqHost)) {
-        return { ok: false, error: `Forbidden Host header "${hostHeader}"` };
-      }
-    }
-
-    const secFetchSite =
-      typeof req.headers["sec-fetch-site"] === "string"
-        ? req.headers["sec-fetch-site"].trim().toLowerCase()
-        : "";
-    if (secFetchSite === "cross-site") {
-      return { ok: false, error: "Forbidden cross-site API request" };
-    }
-
-    const originHeader = typeof req.headers.origin === "string" ? req.headers.origin.trim() : "";
-    if (originHeader) {
-      try {
-        const originUrl = new URL(originHeader);
-        const sameHost = hostHeader && originUrl.host.toLowerCase() === hostHeader.toLowerCase();
-        const isViteDevSameOrigin =
-          secFetchSite === "same-origin" &&
-          isLoopbackHost(consoleCfg.host) &&
-          isLoopbackHost(originUrl.hostname);
-        if (!sameHost && !isViteDevSameOrigin) {
-          return { ok: false, error: `Forbidden cross-origin request from "${originHeader}"` };
-        }
-      } catch {
-        return { ok: false, error: "Malformed Origin header" };
-      }
-    }
-
-    if (method === "POST" || method === "PUT" || method === "PATCH") {
-      const contentType =
-        typeof req.headers["content-type"] === "string"
-          ? req.headers["content-type"].trim().toLowerCase()
-          : "";
-      const contentLength = Number(req.headers["content-length"] ?? "0");
-      const hasBody =
-        (Number.isFinite(contentLength) && contentLength > 0) ||
-        Boolean(req.headers["transfer-encoding"]);
-      if (hasBody && !contentType.startsWith("application/json")) {
-        return {
-          ok: false,
-          error: "Unsupported Content-Type: JSON endpoints require application/json",
-        };
-      }
-    }
-
-    return { ok: true };
   }
 
   private isAuthorized(req: IncomingMessage, pathname: string, parsedUrl: URL): boolean {
@@ -1873,16 +1533,23 @@ export class WebConsoleServer {
   private async handleSaveSecrets(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const payload = (await readJsonBody(req)) as { updates?: Record<string, unknown> };
     const updatesInput = payload.updates ?? {};
-    const updates: Record<string, string | undefined> = {};
+    const updates: Record<string, string | null | undefined> = {};
 
     for (const [key, val] of Object.entries(updatesInput)) {
-      if (typeof val === "string" && val.trim().length > 0) {
-        updates[key.trim()] = val.trim();
+      const cleanKey = key.trim();
+      if (!cleanKey) continue;
+      if (isForbiddenSecretEnvName(cleanKey)) {
+        throw new HttpStatusError(400, `Forbidden secret environment variable name "${cleanKey}"`);
+      }
+      if (val === null || (typeof val === "string" && val.trim() === "")) {
+        updates[cleanKey] = null;
+      } else if (typeof val === "string") {
+        updates[cleanKey] = val.trim();
       }
     }
 
     const merged = mergeEnvFile(this.envPath, updates);
-    reloadSecretEnv(this.envPath);
+    reloadSecretEnv(this.envPath, merged.deletedKeys);
     const reloadRes = await this.deps.reloadAll();
 
     const envMap = readEnvMap(this.envPath);
@@ -1899,6 +1566,7 @@ export class WebConsoleServer {
     sendJson(res, 200, {
       ok: true,
       writtenKeys: merged.writtenKeys,
+      deletedKeys: merged.deletedKeys,
       secretStates,
       ...reloadRes,
     });
@@ -2292,156 +1960,6 @@ export class WebConsoleServer {
     sendJson(res, 200, { ok: true, result });
   }
 
-  private async handleMemoryOverview(res: ServerResponse): Promise<void> {
-    const hato = this.deps.getConfig();
-    const uid = hato.owner.canonical_user_id;
-    const repo = this.deps.getRepo();
-    const provider = resolveMemoryProvider(hato);
-    const store = this.deps.getMemoryStore?.() ?? null;
-    const configured = Boolean(store?.isConfigured());
-    const stats = repo.getMemorySyncStats(uid);
-    const workingMemory = repo.getWorkingMemory(uid);
-
-    const [vaults, usage] = configured && store
-      ? await Promise.all([
-          store.listVaults?.().catch(() => []) ?? Promise.resolve([]),
-          store.getUsage?.().catch(() => null) ?? Promise.resolve(null),
-        ])
-      : [[], null];
-
-    sendJson(res, 200, {
-      ok: true,
-      provider,
-      configured,
-      stats,
-      vaults,
-      usage,
-      workingMemory,
-    });
-  }
-
-  private async handleMemoryRecords(parsedUrl: URL, res: ServerResponse): Promise<void> {
-    const hato = this.deps.getConfig();
-    const uid = hato.owner.canonical_user_id;
-    const repo = this.deps.getRepo();
-
-    const rawBank = parsedUrl.searchParams.get("bank")?.trim() ?? "";
-    const bank: MemorySyncBank | undefined =
-      rawBank === "persona" || rawBank === "tech" || rawBank === "notebook"
-        ? rawBank
-        : undefined;
-
-    const rawStatus = parsedUrl.searchParams.get("status")?.trim() ?? "";
-    const validStatuses: ReadonlySet<string> = new Set([
-      "synced",
-      "degraded",
-      "denied",
-      "error",
-      "erased",
-    ]);
-    const status: MemorySyncStatus | undefined = validStatuses.has(rawStatus)
-      ? (rawStatus as MemorySyncStatus)
-      : undefined;
-
-    const includeErasedParam = parsedUrl.searchParams.get("includeErased");
-    const includeErased = includeErasedParam === "1" || includeErasedParam === "true";
-    const q = parsedUrl.searchParams.get("q")?.trim().toLowerCase() ?? "";
-    const rawLimit = Number(parsedUrl.searchParams.get("limit") ?? "100");
-    const limit = Number.isFinite(rawLimit) ? Math.max(1, Math.min(200, Math.floor(rawLimit))) : 100;
-
-    let records = repo.listMemorySyncRecords(uid, {
-      bank,
-      status,
-      includeErased,
-      limit: q ? 200 : limit,
-    });
-
-    if (q) {
-      records = records
-        .filter(
-          (r) =>
-            r.content.toLowerCase().includes(q) ||
-            (r.externalMemoryId ?? "").toLowerCase().includes(q) ||
-            r.id.toLowerCase().includes(q),
-        )
-        .slice(0, limit);
-    }
-
-    sendJson(res, 200, { ok: true, records });
-  }
-
-  private async handleMemoryRecall(req: IncomingMessage, res: ServerResponse): Promise<void> {
-    const body = (await readJsonBody(req)) as {
-      query?: unknown;
-      bank?: unknown;
-      limit?: unknown;
-    };
-    const query = typeof body.query === "string" ? body.query.trim() : "";
-    if (!query) {
-      sendJson(res, 400, { ok: false, error: "请输入要检索的记忆关键词或问题" });
-      return;
-    }
-
-    const store = this.deps.getMemoryStore?.() ?? null;
-    if (!store || !store.isConfigured()) {
-      sendJson(res, 400, { ok: false, error: "当前记忆提供商未启用或未配置密钥" });
-      return;
-    }
-
-    const rawBank = typeof body.bank === "string" ? body.bank.trim() : "";
-    const bank: MemorySyncBank =
-      rawBank === "tech" || rawBank === "notebook" ? rawBank : "persona";
-    const rawLimit = typeof body.limit === "number" ? body.limit : 8;
-    const limit = Number.isFinite(rawLimit) ? Math.max(1, Math.min(20, Math.floor(rawLimit))) : 8;
-
-    const uid = this.deps.getConfig().owner.canonical_user_id;
-    const result = await store.recall(uid, { bank, query, limit });
-    sendJson(res, 200, { ok: true, result });
-  }
-
-  private async handleMemorySync(req: IncomingMessage, res: ServerResponse): Promise<void> {
-    const curator = this.deps.getMemoryCurator?.();
-    if (!curator) {
-      sendJson(res, 503, { ok: false, error: "当前运行时未挂载 MemoryCurator" });
-      return;
-    }
-    const body = (await readJsonBody(req)) as { includeDenied?: unknown };
-    const uid = this.deps.getConfig().owner.canonical_user_id;
-    const summary = await curator.retainPending(uid, {
-      includeDeniedRetries: Boolean(body.includeDenied),
-    });
-    sendJson(res, 200, { ok: true, summary });
-  }
-
-  private async handleMemoryForget(req: IncomingMessage, res: ServerResponse): Promise<void> {
-    const curator = this.deps.getMemoryCurator?.();
-    if (!curator) {
-      sendJson(res, 503, { ok: false, error: "当前运行时未挂载 MemoryCurator" });
-      return;
-    }
-    const body = (await readJsonBody(req)) as { recordIds?: unknown; query?: unknown };
-    const uid = this.deps.getConfig().owner.canonical_user_id;
-
-    if (Array.isArray(body.recordIds) && body.recordIds.length > 0) {
-      const recordIds = body.recordIds.filter((id): id is string => typeof id === "string");
-      if (recordIds.length === 0) {
-        sendJson(res, 400, { ok: false, error: "请提供有效的记忆记录 ID" });
-        return;
-      }
-      const summary = await curator.forgetByRecordIds(uid, recordIds);
-      sendJson(res, 200, { ok: true, summary });
-      return;
-    }
-
-    const query = typeof body.query === "string" ? body.query.trim() : "";
-    if (!query) {
-      sendJson(res, 400, { ok: false, error: "请提供 recordIds 或搜索关键词 query" });
-      return;
-    }
-    const summary = await curator.forgetByQuery(uid, query);
-    sendJson(res, 200, { ok: true, summary });
-  }
-
   private async handleWorkerCliProbe(res: ServerResponse): Promise<void> {
     const config = this.deps.getConfig();
     const probeFn = this.deps.probeExternalClis ?? probeAllExternalClis;
@@ -2661,169 +2179,6 @@ export class WebConsoleServer {
     res.once("close", cleanup);
   }
 
-  private handleBrowserStream(req: IncomingMessage, res: ServerResponse): void {
-    res.writeHead(200, {
-      "Content-Type": "text/event-stream; charset=utf-8",
-      "Cache-Control": "no-cache, no-transform",
-      Connection: "keep-alive",
-    });
-    res.write(": connected\n\n");
-
-    const browser = this.deps.getBrowserRuntime();
-    const unsubscribe = browser.subscribeStream((event) => {
-      if (res.writableEnded) return;
-      if (event.type === "status") {
-        res.write(`data: ${JSON.stringify({ type: "status", status: { ...event.status, busy: browser.isBusy() } })}\n\n`);
-      } else {
-        res.write(`data: ${JSON.stringify(event)}\n\n`);
-      }
-    });
-
-    const keepAlive = setInterval(() => {
-      if (!res.writableEnded) {
-        res.write(": ping\n\n");
-      }
-    }, 15_000);
-    keepAlive.unref();
-
-    const cleanup = () => {
-      clearInterval(keepAlive);
-      unsubscribe();
-      if (!res.writableEnded) res.end();
-    };
-    req.once("close", cleanup);
-    res.once("close", cleanup);
-  }
-
-  private async handleBrowserAction(req: IncomingMessage, res: ServerResponse): Promise<void> {
-    const body = (await readJsonBody(req)) as {
-      action?: unknown;
-      url?: unknown;
-      index?: unknown;
-      width?: unknown;
-      height?: unknown;
-    };
-    const action = typeof body.action === "string" ? body.action.trim() : "";
-    const browser = this.deps.getBrowserRuntime();
-
-    let status;
-    switch (action) {
-      case "open":
-        status = await browser.openBrowser();
-        if (typeof body.url === "string" && body.url.trim()) {
-          status = await browser.navigateManual(body.url);
-        }
-        break;
-      case "close":
-        status = await browser.closeBrowser();
-        break;
-      case "navigate":
-        if (typeof body.url !== "string" || !body.url.trim()) {
-          sendJson(res, 400, { ok: false, error: "缺少 url 参数" });
-          return;
-        }
-        status = await browser.navigateManual(body.url);
-        break;
-      case "back":
-        status = await browser.goBackManual();
-        break;
-      case "forward":
-        status = await browser.goForwardManual();
-        break;
-      case "reload":
-        status = await browser.reloadManual();
-        break;
-      case "new_tab":
-        status = await browser.newTabManual(typeof body.url === "string" ? body.url : undefined);
-        break;
-      case "switch_tab":
-        status = await browser.switchTabManual(Number(body.index ?? 0));
-        break;
-      case "close_tab":
-        status = await browser.closeTabManual(Number(body.index ?? 0));
-        break;
-      case "resize": {
-        const w = Number(body.width);
-        const h = Number(body.height);
-        if (!Number.isFinite(w) || !Number.isFinite(h)) {
-          sendJson(res, 400, { ok: false, error: "缺少有效 width/height 参数" });
-          return;
-        }
-        status = await browser.resizeViewportManual(w, h);
-        break;
-      }
-      case "takeover":
-        status = await browser.beginManualControl();
-        break;
-      case "release_takeover":
-        status = await browser.endManualControl();
-        break;
-      case "resume_takeover":
-        status = await browser.resumeTakeover();
-        break;
-      default:
-        sendJson(res, 400, { ok: false, error: `未知浏览器动作: ${action}` });
-        return;
-    }
-
-    sendJson(res, 200, { ok: true, status });
-  }
-
-  private async handleBrowserInput(req: IncomingMessage, res: ServerResponse): Promise<void> {
-    const body = (await readJsonBody(req)) as {
-      kind?: unknown;
-      action?: unknown;
-      x?: unknown;
-      y?: unknown;
-      button?: unknown;
-      deltaX?: unknown;
-      deltaY?: unknown;
-      key?: unknown;
-      text?: unknown;
-    };
-    const kind = body.kind;
-    const browser = this.deps.getBrowserRuntime();
-
-    if (kind === "mouse") {
-      const action = typeof body.action === "string" ? body.action : "";
-      if (!["move", "down", "up", "click", "dblclick", "wheel"].includes(action)) {
-        sendJson(res, 400, { ok: false, error: `无效鼠标动作: ${action}` });
-        return;
-      }
-      const button =
-        body.button === "right" || body.button === "middle" || body.button === "left"
-          ? body.button
-          : "left";
-      await browser.dispatchMouse({
-        action: action as "move" | "down" | "up" | "click" | "dblclick" | "wheel",
-        x: typeof body.x === "number" ? body.x : Number(body.x),
-        y: typeof body.y === "number" ? body.y : Number(body.y),
-        button,
-        deltaX: typeof body.deltaX === "number" ? body.deltaX : Number(body.deltaX) || 0,
-        deltaY: typeof body.deltaY === "number" ? body.deltaY : Number(body.deltaY) || 0,
-      });
-      sendJson(res, 200, { ok: true });
-      return;
-    }
-
-    if (kind === "keyboard") {
-      const action = typeof body.action === "string" ? body.action : "";
-      if (!["press", "down", "up", "insertText"].includes(action)) {
-        sendJson(res, 400, { ok: false, error: `无效键盘动作: ${action}` });
-        return;
-      }
-      await browser.dispatchKeyboard({
-        action: action as "press" | "down" | "up" | "insertText",
-        key: typeof body.key === "string" ? body.key : undefined,
-        text: typeof body.text === "string" ? body.text : undefined,
-      });
-      sendJson(res, 200, { ok: true });
-      return;
-    }
-
-    sendJson(res, 400, { ok: false, error: `未知输入类型: ${String(kind)}` });
-  }
-
   private collectKnownSecretEnvNames(hato: HatoConfig, registry: ModelRegistry): string[] {
     const envMap = readEnvMap(this.envPath);
     const consoleCfg = resolveWebConsoleConfig(hato);
@@ -2840,88 +2195,4 @@ export class WebConsoleServer {
     ]);
     return [...keys].filter((k) => k.trim().length > 0).sort();
   }
-
-  private serveStaticAsset(pathname: string, res: ServerResponse, headOnly: boolean): void {
-    const indexPath = resolve(this.staticDir, "index.html");
-    if (!existsSync(indexPath)) {
-      res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
-      if (!headOnly) {
-        res.end(
-          `<!doctype html><html><body style="font-family:sans-serif;padding:32px;line-height:1.6">` +
-            `<h2>Hato Web 控制台后端已运行</h2>` +
-            `<p>前端静态产物尚未构建，请运行 <code>bun run build:web</code> 后刷新页面。</p>` +
-            `</body></html>`,
-        );
-      } else {
-        res.end();
-      }
-      return;
-    }
-
-    const cleanRel = pathname === "/" ? "index.html" : pathname.replace(/^\/+/, "");
-    const candidate = resolve(this.staticDir, cleanRel);
-    const safeCandidate =
-      candidate === this.staticDir || candidate.startsWith(`${this.staticDir}${sep}`)
-        ? candidate
-        : indexPath;
-
-    const targetPath =
-      existsSync(safeCandidate) && statSync(safeCandidate).isFile() ? safeCandidate : indexPath;
-
-    const ext = extname(targetPath).toLowerCase();
-    const contentType = MIME_TYPES[ext] ?? "application/octet-stream";
-    const bytes = readFileSync(targetPath);
-    const cacheControl =
-      ext === ".html"
-        ? "no-store, no-cache, must-revalidate"
-        : cleanRel.startsWith("assets/")
-          ? "public, max-age=31536000, immutable"
-          : "no-cache";
-
-    res.writeHead(200, {
-      "Content-Type": contentType,
-      "Content-Length": bytes.byteLength,
-      "Cache-Control": cacheControl,
-    });
-    if (headOnly) {
-      res.end();
-      return;
-    }
-    res.end(bytes);
-  }
-}
-
-function maskSecretPreview(secret: string): string {
-  const clean = secret.trim();
-  if (clean.length <= 8) return "***";
-  return `${clean.slice(0, 4)}***${clean.slice(-4)}`;
-}
-
-async function readJsonBody(req: IncomingMessage): Promise<unknown> {
-  const chunks: Buffer[] = [];
-  let total = 0;
-  for await (const chunk of req) {
-    const buf = chunk as Buffer;
-    total += buf.byteLength;
-    if (total > MAX_JSON_BODY_BYTES) {
-      throw new HttpStatusError(413, "Request body exceeds 16MB limit");
-    }
-    chunks.push(buf);
-  }
-  const raw = Buffer.concat(chunks).toString("utf8").trim();
-  if (!raw) return {};
-  try {
-    return JSON.parse(raw);
-  } catch {
-    throw new HttpStatusError(400, "Invalid JSON request body");
-  }
-}
-
-function sendJson(res: ServerResponse, statusCode: number, body: unknown): void {
-  const json = JSON.stringify(body);
-  res.writeHead(statusCode, {
-    "Content-Type": "application/json; charset=utf-8",
-    "Content-Length": Buffer.byteLength(json),
-  });
-  res.end(json);
 }

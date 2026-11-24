@@ -4,6 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { fauxAssistantMessage, fauxProvider, fauxToolCall } from "@earendil-works/pi-ai";
+import { EventBus } from "../src/bus/actor-bus.js";
+import { TicketCoordinator } from "../src/dispatch/coordinator.js";
 import { loadHatoConfig } from "../src/config/app.js";
 import { ModelRegistry } from "../src/config/models.js";
 import { ScopedProxyRouter } from "../src/config/proxy.js";
@@ -225,7 +227,28 @@ hindsight_llm = "faux-provider/model-a"
     assert.equal(factRes.ok, true);
     assert.deepEqual(repo.listRelationshipFacts(), [{ key: "昵称", value: "阿鸠" }]);
 
-    // 6. Persona invokes self_config tool mid-turn to append a rule to soul.md
+    // 6. Persona invokes self_config tool mid-turn -> requires confirmation before mutating soul.md
+    const bus = new EventBus();
+    const confirmEvents: string[] = [];
+    bus.on("ticket_confirm_required", (ev) => {
+      confirmEvents.push(ev.ticketId);
+    });
+    const coordinator = new TicketCoordinator({
+      getHatoConfig: () => cfg,
+      repo,
+      router: {} as never,
+      dispatcher: {} as never,
+      bus,
+      getModelRegistry: () => registry,
+      executeSelfConfigConfirm: async (_canonicalUserId, payload) => {
+        const out = await runSelfConfigAction(deps, payload.action);
+        return { ok: out.ok, message: out.summary };
+      },
+    });
+    runtime.setSelfConfigConfirmHandler((input) =>
+      coordinator.enqueueSelfConfigConfirm(input),
+    );
+
     faux.setResponses([
       () =>
         fauxAssistantMessage(
@@ -237,7 +260,7 @@ hindsight_llm = "faux-provider/model-a"
           ],
           { stopReason: "toolUse" },
         ),
-      () => fauxAssistantMessage("好呀，记在 soul.md 里了"),
+      () => fauxAssistantMessage("已发送确认请求，等你点确认按钮哦"),
     ]);
 
     const turnOut = await runtime.handleUserBatch({
@@ -253,10 +276,51 @@ hindsight_llm = "faux-provider/model-a"
     });
 
     assert.deepEqual(turnOut.toolCalls, ["self_config"]);
-    assert.deepEqual(turnOut.bubbles, ["好呀，记在 soul.md 里了"]);
+    assert.deepEqual(turnOut.bubbles, ["已发送确认请求，等你点确认按钮哦"]);
+    assert.equal(confirmEvents.length, 1);
+    const firstTicketId = confirmEvents[0]!;
+    assert.equal(repo.getTicket(firstTicketId)?.status, "awaiting_confirm");
+    assert.doesNotMatch(readFileSync(join(promptsDir, "soul.md"), "utf8"), /以后少用波浪号/);
+
+    // Reject first ticket -> soul.md remains unchanged
+    await coordinator.handleConfirmAction(firstTicketId, false);
+    assert.equal(repo.getTicket(firstTicketId)?.status, "cancelled");
+    assert.doesNotMatch(readFileSync(join(promptsDir, "soul.md"), "utf8"), /以后少用波浪号/);
+
+    // Second turn -> approve ticket -> soul.md is updated and reloadCount increments
+    const reloadsBeforeApprove = reloadCount;
+    faux.setResponses([
+      () =>
+        fauxAssistantMessage(
+          [
+            fauxToolCall("self_config", {
+              action: "edit_soul",
+              append_note: "以后少用波浪号",
+            }),
+          ],
+          { stopReason: "toolUse" },
+        ),
+      () => fauxAssistantMessage("好呀，已再次发送确认请求"),
+    ]);
+    await runtime.handleUserBatch({
+      canonicalUserId: "owner",
+      originChannel: "tg",
+      originPlatformUserId: "123",
+      platformMsgIds: ["m2"],
+      latestPlatformMsgId: "m2",
+      combinedText: "再发一次确认",
+      attachments: [],
+      firstTimestampMs: Date.now(),
+      lastTimestampMs: Date.now(),
+    });
+    assert.equal(confirmEvents.length, 2);
+    const secondTicketId = confirmEvents[1]!;
+    const confirmReply = await coordinator.handleConfirmAction(secondTicketId, true);
+    assert.match(confirmReply, /^已确认并执行/);
+    assert.equal(repo.getTicket(secondTicketId)?.status, "done");
     assert.match(readFileSync(join(promptsDir, "soul.md"), "utf8"), /以后少用波浪号/);
     assert.match(runtime.getBasePersonaPrompt(), /以后少用波浪号/);
-    assert.ok(reloadCount >= 5);
+    assert.ok(reloadCount > reloadsBeforeApprove);
   } finally {
     dbHandle.close();
     rmSync(tempDir, { recursive: true, force: true });

@@ -68,6 +68,7 @@ import {
 } from "./interruption.js";
 import { loadLayeredPrompts, type LoadedLayeredPrompts } from "./prompts.js";
 import { createPersonaReadOnlyTools } from "./tools.js";
+import type { SelfConfigInput } from "./self-config.js";
 import { sortToolsCanonically } from "./tool-disclosure.js";
 
 export const NO_REPLY_SENTINEL = "[NO_REPLY]";
@@ -198,6 +199,15 @@ export class PersonaRuntime {
         caption?: string;
         text?: string;
       }) => Promise<{ ok: boolean; ticketId?: string; message: string }>)
+    | null = null;
+  private selfConfigConfirmHandler:
+    | ((input: {
+        canonicalUserId: string;
+        channel: InboundBatch["originChannel"];
+        action: SelfConfigInput;
+        summaryTitle: string;
+        promptText: string;
+      }) => Promise<{ ok: boolean; ticketId: string; message: string }>)
     | null = null;
   private activePhotoSender: SendPhotoToUserFn | null = null;
   private renderMarkdownImageHandler:
@@ -519,6 +529,23 @@ export class PersonaRuntime {
     }
   }
 
+  setSelfConfigConfirmHandler(
+    handler:
+      | ((input: {
+          canonicalUserId: string;
+          channel: InboundBatch["originChannel"];
+          action: SelfConfigInput;
+          summaryTitle: string;
+          promptText: string;
+        }) => Promise<{ ok: boolean; ticketId: string; message: string }>)
+      | null,
+  ): void {
+    this.selfConfigConfirmHandler = handler;
+    if (!this.activeTurn) {
+      this.syncTools();
+    }
+  }
+
   setStickerHandlers(
     handlers: {
       onSearch: (input: { canonicalUserId: string; query: string; emotion?: string; limit?: number }) => Promise<string>;
@@ -600,6 +627,10 @@ export class PersonaRuntime {
     this.liveTraceTracker = tracker;
   }
 
+  syncThinkingLevelFromRegistry(): void {
+    this.agent.state.thinkingLevel = this.modelRegistry.resolveSlotThinkingLevel("persona");
+  }
+
   reloadPrompt(): void {
     this.layeredPrompts = loadLayeredPrompts(
       this.hatoConfig.paths.prompts_dir,
@@ -633,7 +664,11 @@ export class PersonaRuntime {
     return this.basePersonaPrompt;
   }
 
-  refreshTranscriptFromDb(): void {
+  refreshTranscriptFromDb(options?: { force?: boolean }): void {
+    if (this.activeTurn && !options?.force) {
+      this.pendingTranscriptRefresh = true;
+      return;
+    }
     const canonicalUserId = this.hatoConfig.owner.canonical_user_id;
     const systemPromptText = buildStaticSystemPrompt(
       this.basePersonaPrompt,
@@ -836,6 +871,22 @@ export class PersonaRuntime {
                 text: input.text,
               });
             },
+          }
+        : {}),
+      ...(this.selfConfigConfirmHandler
+        ? {
+            onRequestSelfConfigConfirm: (input: {
+              action: SelfConfigInput;
+              summaryTitle: string;
+              promptText: string;
+            }) =>
+              this.selfConfigConfirmHandler!({
+                canonicalUserId,
+                channel: this.activeTurnOriginChannel,
+                action: input.action,
+                summaryTitle: input.summaryTitle,
+                promptText: input.promptText,
+              }),
           }
         : {}),
       ...(this.botProfileHandler ? { onBotProfile: this.botProfileHandler } : {}),

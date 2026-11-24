@@ -96,4 +96,59 @@ describe("workspace-gc", () => {
       rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  test("cleanupExpiredWorkspaces preserves expired isolated workspaces referenced by script_registry", () => {
+    const dir = mkdtempSync(join(tmpdir(), "hato-wgc-script-"));
+    try {
+      const workspacesDir = join(dir, "workspaces");
+      mkdirSync(workspacesDir, { recursive: true });
+      const dbHandle = openDatabase(join(dir, "test.db"));
+      const repo = new HatoRepository(dbHandle.db);
+
+      const now = Date.now();
+      const scriptTicketDir = join(workspacesDir, "t_script");
+      mkdirSync(scriptTicketDir, { recursive: true });
+      const scriptFile = join(scriptTicketDir, "job.sh");
+      writeFileSync(scriptFile, "#!/bin/sh\necho ok\n");
+
+      repo.createTicket({
+        id: "t_script",
+        canonicalUserId: "u1",
+        status: "done",
+        backend: "builtin-pi",
+        briefTitle: "registered script ticket",
+        originChannel: "tg",
+      });
+      repo.updateTicket("t_script", {
+        workspaceExpiresAt: now - 1000,
+        mandateJson: JSON.stringify({
+          workspace_mode: "isolated",
+          workspace_dir: scriptTicketDir,
+          is_host_repo: false,
+          network: "egress",
+          timeout_ms: 60000,
+          skills: [],
+          allowed_mcp_servers: [],
+          confirm_before: [],
+        }),
+      });
+      repo.registerScript({
+        ticketId: "t_script",
+        name: "keep-alive-job",
+        scriptPath: scriptFile,
+        cronExpr: "0 * * * *",
+        notifyChannel: "tg",
+      });
+
+      const res = cleanupExpiredWorkspaces({ repo, workspacesDir, nowMs: now });
+      expect(res.removedCount).toBe(0);
+      expect(res.clearedCount).toBe(0);
+      expect(existsSync(scriptTicketDir)).toBe(true);
+      expect(existsSync(scriptFile)).toBe(true);
+
+      dbHandle.close();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });

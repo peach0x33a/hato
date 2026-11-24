@@ -1166,8 +1166,8 @@ export const api = {
         method: "DELETE",
       },
     ),
-  saveSecrets: (updates: Record<string, string>) =>
-    requestJson<{ ok: boolean; writtenKeys: string[]; secretStates: SecretState[]; changes?: string[] }>(
+  saveSecrets: (updates: Record<string, string | null>) =>
+    requestJson<{ ok: boolean; writtenKeys: string[]; deletedKeys?: string[]; secretStates: SecretState[]; changes?: string[] }>(
       "/api/config/secrets",
       {
         method: "PUT",

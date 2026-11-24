@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import type { WorkerResult } from "../dispatch/schema.js";
 import type { ChannelName, InboundBatch } from "../gateway/types.js";
 
@@ -60,10 +61,17 @@ export type BusListener<K extends BusEvent["type"] = BusEvent["type"]> = (
  */
 export class ActorLock {
   private readonly tails = new Map<string, Promise<void>>();
+  private readonly als = new AsyncLocalStorage<ReadonlySet<string>>();
 
   run<T>(actorKey: string, task: () => Promise<T>): Promise<T> {
+    const held = this.als.getStore();
+    if (held?.has(actorKey)) {
+      return task();
+    }
+    const nextKeys = new Set([...(held ?? []), actorKey]);
     const previous = this.tails.get(actorKey) ?? Promise.resolve();
-    const next = previous.then(task, task);
+    const runTask = () => this.als.run(nextKeys, task);
+    const next = previous.then(runTask, runTask);
     const tail = next.then(
       () => undefined,
       () => undefined,

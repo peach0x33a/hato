@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, realpathSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, resolve, sep } from "node:path";
 import { promisify } from "node:util";
@@ -15,6 +15,7 @@ import { streamSimpleWithRetry } from "../utils/llm-retry.js";
 import type { ScopedProxyRouter } from "../config/proxy.js";
 import type { HatoRepository } from "../db/repo.js";
 import { expandEarlierContext, readTaskContext } from "../dispatch/context-slice.js";
+import { isValidCronExpression } from "../dispatch/script-scheduler.js";
 import type { WorkerMandate, WorkerResult } from "../dispatch/schema.js";
 import type { McpClientPool } from "../mcp/pool.js";
 import { readSkillContent, selectWorkerSkills } from "../skills/loader.js";
@@ -132,17 +133,22 @@ export function isProtectedEnvPath(targetPath: string): boolean {
 function isCommandReferencingProtectedEnv(command: string, workspaceRoot: string): boolean {
   const normalizedCmd = command.trim();
   if (!normalizedCmd) return false;
+  if (/\/proc\/[^/\s]+\/environ\b/.test(normalizedCmd)) {
+    return true;
+  }
+  const hatoHome = resolve(resolveHatoHomeDir());
+  const referencesHatoHome =
+    normalizedCmd.includes(".hato") ||
+    normalizedCmd.includes("HATO_HOME") ||
+    normalizedCmd.includes(hatoHome);
+  if (referencesHatoHome && /\.[e*?\[]/.test(normalizedCmd)) {
+    return true;
+  }
   if (!/(?:^|[\s"'`=/])\.env(?:\.[A-Za-z0-9_.-]+)?(?=$|[\s"'`;|&)>])/.test(normalizedCmd)) {
     return false;
   }
-  const hatoHome = resolve(resolveHatoHomeDir());
   const repoRoot = resolve(process.cwd());
-  if (
-    normalizedCmd.includes(".hato") ||
-    normalizedCmd.includes("HATO_HOME") ||
-    normalizedCmd.includes(hatoHome) ||
-    normalizedCmd.includes(repoRoot)
-  ) {
+  if (referencesHatoHome || normalizedCmd.includes(repoRoot)) {
     return true;
   }
   const ws = resolve(workspaceRoot);
@@ -971,16 +977,53 @@ export class BuiltinPiRunner implements ExecutionRunner {
         description: "Register a verified script into Hato's cron script_registry so it runs periodically.",
         parameters: RegisterScriptParams,
         execute: async (_id, input) => {
+          if (!isValidCronExpression(input.cron_expr)) {
+            throw new Error(`无效的 cron 表达式: ${input.cron_expr}`);
+          }
           const abs = resolveSafeWorkspacePath(input.script_path);
           if (!existsSync(abs)) {
             throw new Error(`脚本文件不存在: ${abs}`);
+          }
+          if (!isVmUnrestricted) {
+            const confirmKey = `register_script:${input.name}:${input.cron_expr}`;
+            if (
+              !state.approvedConfirmKeys.has(confirmKey) &&
+              !state.approvedConfirmKeys.has("register_script")
+            ) {
+              params.onRequestConfirm(
+                `注册常驻定时脚本 "${input.name}" (cron: ${input.cron_expr}, 脚本: ${basename(abs)})`,
+                confirmKey,
+              );
+              return {
+                content: [
+                  {
+                    type: "text",
+                    text: "已向主人发起常驻定时脚本注册确认请求，工单已挂起等待确认。",
+                  },
+                ],
+                details: { awaiting_confirm: true },
+              };
+            }
+          }
+          let targetScriptPath = abs;
+          if (!isVmUnrestricted && mandate.workspace_mode === "isolated") {
+            const persistedPath = resolve(
+              dirname(hatoConfig.paths.workspaces_dir),
+              "scripts",
+              ticket.ticketId.replace(/[^A-Za-z0-9._-]+/g, "_"),
+              basename(abs),
+            );
+            mkdirSync(dirname(persistedPath), { recursive: true });
+            copyFileSync(abs, persistedPath);
+            chmodSync(persistedPath, statSync(abs).mode);
+            targetScriptPath = persistedPath;
           }
           const notify =
             input.notify_channel ?? hatoConfig.owner.proactive_channel;
           const created = this.deps.repo.registerScript({
             ticketId: ticket.ticketId,
             name: input.name,
-            scriptPath: abs,
+            scriptPath: targetScriptPath,
             cronExpr: input.cron_expr,
             notifyChannel: notify,
             requiredSecrets: input.required_secrets ?? [],
@@ -992,7 +1035,7 @@ export class BuiltinPiRunner implements ExecutionRunner {
                 text: `已注册常驻脚本 [${created.id}] "${created.name}" (${created.cronExpr}) -> ${created.notifyChannel}`,
               },
             ],
-            details: { ok: true, id: created.id, scriptPath: abs },
+            details: { ok: true, id: created.id, scriptPath: targetScriptPath },
           };
         },
       },

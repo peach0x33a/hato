@@ -31,6 +31,7 @@ import {
 } from "./config/store.js";
 import { openDatabase } from "./db/client.js";
 import { HatoRepository } from "./db/repo.js";
+import { runSelfConfigAction } from "./persona/self-config.js";
 import {
   filterPendingAutoArtifacts,
   formatTicketArtifactPromptHint,
@@ -174,6 +175,24 @@ async function main(): Promise<void> {
     getModelRegistry: () => modelRegistry,
     proxyRouter,
     liveTraceTracker,
+    executeSelfConfigConfirm: async (_canonicalUserId, payload) => {
+      const out = await runSelfConfigAction(
+        {
+          hatoConfigPath: HATO_CONFIG_PATH,
+          getHatoConfig: () => hatoConfig,
+          getModelRegistry: () => modelRegistry,
+          repo,
+          onReloadRuntime: async () => {
+            await reloadAll();
+          },
+          onThinkingUpdated: () => {
+            personaRuntime.syncThinkingLevelFromRegistry();
+          },
+        },
+        payload.action,
+      );
+      return { ok: out.ok, message: out.summary };
+    },
     executeSensitiveFileConfirm: async (canonicalUserId, payload) => {
       if (payload.channel === "web") {
         if (payload.text?.trim()) {
@@ -223,6 +242,9 @@ async function main(): Promise<void> {
   personaRuntime.setImageGenHandler((input) => ticketCoordinator.enqueueImageGeneration(input));
   personaRuntime.setSensitiveFileConfirmHandler((input) =>
     ticketCoordinator.enqueueSensitiveFileConfirm(input),
+  );
+  personaRuntime.setSelfConfigConfirmHandler((input) =>
+    ticketCoordinator.enqueueSelfConfigConfirm(input),
   );
   personaRuntime.setStickerHandlers({
     onSearch: async ({ canonicalUserId, query, emotion, limit }) => {
@@ -1162,12 +1184,15 @@ async function main(): Promise<void> {
   });
 
   bus.on("executed_event", async ({ canonicalUserId, channel, summary, occurredAtMs, silent }) => {
-    repo.appendRawMessage({
-      canonicalUserId,
-      channel,
-      role: "executed_event",
-      content: summary,
-      createdAt: occurredAtMs,
+    await actorLock.run(canonicalUserId, async () => {
+      repo.appendRawMessage({
+        canonicalUserId,
+        channel,
+        role: "executed_event",
+        content: summary,
+        createdAt: occurredAtMs,
+      });
+      personaRuntime.refreshTranscriptFromDb();
     });
     const outbound = channel === "web" ? null : resolveOutboundTarget(channel);
     if (!silent && outbound) {
@@ -1623,6 +1648,7 @@ async function main(): Promise<void> {
   const scriptScheduler = new ScriptScheduler({
     getHatoConfig: () => hatoConfig,
     repo,
+    getProtectedSecretNames: () => new Set(modelRegistry.listProviders().map((p) => p.apiKeyEnv)),
     onScriptOutput: async ({ name, notifyChannel, exitCode, stdoutTail, stderrTail }) => {
       const preferred: ChannelName | "last_active" | undefined =
         notifyChannel === "tg" || notifyChannel === "qq" || notifyChannel === "last_active"

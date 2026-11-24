@@ -261,3 +261,19 @@ name = "Unused"
     rmSync(tempDir, { recursive: true, force: true });
   }
 });
+
+test("normalizeNavigationUrl blocks local, private, metadata, and file URLs", async () => {
+  const { normalizeNavigationUrl } = await import("../src/browser/controller.js");
+  const blockedUrls = [
+    "http://127.0.0.1:3820",
+    "http://localhost:3820",
+    "http://[::1]:3820",
+    "http://192.168.1.1",
+    "http://169.254.169.254/latest/meta-data/",
+    "file:///etc/passwd",
+  ];
+  for (const url of blockedUrls) {
+    assert.throws(() => normalizeNavigationUrl(url), `Expected ${url} to be blocked`);
+  }
+  assert.equal(normalizeNavigationUrl("https://example.com/path"), "https://example.com/path");
+});

@@ -42,25 +42,68 @@ export function readEnvMap(envPath = ".env"): Record<string, string> {
   return dotenv.parse(raw);
 }
 
+export const FORBIDDEN_SECRET_ENV_NAMES = new Set<string>([
+  "PATH",
+  "HOME",
+  "USER",
+  "LOGNAME",
+  "SHELL",
+  "PWD",
+  "TMPDIR",
+  "TEMP",
+  "TMP",
+  "LD_PRELOAD",
+  "LD_LIBRARY_PATH",
+  "DYLD_INSERT_LIBRARIES",
+  "DYLD_LIBRARY_PATH",
+  "DYLD_FRAMEWORK_PATH",
+  "NODE_OPTIONS",
+  "BUN_OPTIONS",
+  "NODE_TLS_REJECT_UNAUTHORIZED",
+  "SSL_CERT_FILE",
+  "SSL_CERT_DIR",
+  "NODE_EXTRA_CA_CERTS",
+  "HATO_HOME",
+  "HTTP_PROXY",
+  "HTTPS_PROXY",
+  "ALL_PROXY",
+  "NO_PROXY",
+]);
+
+export function isForbiddenSecretEnvName(name: string): boolean {
+  return FORBIDDEN_SECRET_ENV_NAMES.has(name.trim().toUpperCase());
+}
+
 /**
  * Safely merge non-undefined entries into a .env file while preserving existing comments,
- * blank lines, and untouched keys. Values set to undefined are left unchanged.
+ * blank lines, and untouched keys. Values set to undefined are left unchanged; values set
+ * to null are deleted from the .env file.
  */
 export function mergeEnvFile(
   envPath: string,
-  updates: Record<string, string | undefined>,
-): { path: string; writtenKeys: string[] } {
+  updates: Record<string, string | null | undefined>,
+): { path: string; writtenKeys: string[]; deletedKeys: string[] } {
   const absPath = resolve(envPath);
   mkdirSync(dirname(absPath), { recursive: true });
 
   const entriesToWrite = new Map<string, string>();
+  const keysToDelete = new Set<string>();
   for (const [key, value] of Object.entries(updates)) {
     if (value === undefined) continue;
     const trimmedKey = key.trim();
     if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(trimmedKey)) {
       throw new Error(`Invalid environment variable name "${key}"`);
     }
-    entriesToWrite.set(trimmedKey, value);
+    if (isForbiddenSecretEnvName(trimmedKey)) {
+      throw new Error(`Forbidden environment variable name "${trimmedKey}"`);
+    }
+    if (value === null) {
+      keysToDelete.add(trimmedKey);
+      entriesToWrite.delete(trimmedKey);
+    } else {
+      entriesToWrite.set(trimmedKey, value);
+      keysToDelete.delete(trimmedKey);
+    }
   }
 
   const existingRaw = existsSync(absPath) ? readFileSync(absPath, "utf8") : "";
@@ -68,15 +111,26 @@ export function mergeEnvFile(
   const handled = new Set<string>();
   const writtenKeys: string[] = [];
 
-  const nextLines = lines.map((line) => {
+  const nextLines: string[] = [];
+  for (const line of lines) {
     const match = /^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=/.exec(line);
-    if (!match) return line;
+    if (!match) {
+      nextLines.push(line);
+      continue;
+    }
     const key = match[1]!;
-    if (!entriesToWrite.has(key)) return line;
+    if (keysToDelete.has(key)) {
+      handled.add(key);
+      continue;
+    }
+    if (!entriesToWrite.has(key)) {
+      nextLines.push(line);
+      continue;
+    }
     handled.add(key);
     writtenKeys.push(key);
-    return `${key}=${formatEnvValue(entriesToWrite.get(key)!)}`;
-  });
+    nextLines.push(`${key}=${formatEnvValue(entriesToWrite.get(key)!)}`);
+  }
 
   // Remove trailing empty line before appending new keys, then ensure single trailing newline.
   while (nextLines.length > 0 && nextLines[nextLines.length - 1] === "" && entriesToWrite.size > handled.size) {
@@ -96,7 +150,7 @@ export function mergeEnvFile(
   } catch {
     // Windows or restricted FS may ignore chmod
   }
-  return { path: absPath, writtenKeys };
+  return { path: absPath, writtenKeys, deletedKeys: Array.from(keysToDelete) };
 }
 
 /**

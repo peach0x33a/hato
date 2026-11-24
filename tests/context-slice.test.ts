@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -152,5 +155,108 @@ test("createScopedContextMcpServer locks access strictly to allowedContextId", a
     await server.close();
   } finally {
     dbHandle.close();
+  }
+});
+
+test("createScopedContextMcpServer supports read_task_context and progressive expand_earlier_context on readonly DB", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "hato-ctx-ro-"));
+  const dbPath = join(dir, "hato.db");
+  try {
+    const rwHandle = openDatabase(dbPath);
+    const rwRepo = new HatoRepository(rwHandle.db);
+    rwRepo.ensureOwner({
+      canonicalUserId: "owner",
+      timezone: "UTC",
+      proactiveChannel: "tg",
+    });
+    const baseTs = 1_700_000_000_000;
+    const m1 = rwRepo.appendRawMessage({
+      canonicalUserId: "owner",
+      channel: "tg",
+      platformMsgId: "m1",
+      role: "user",
+      content: "first-msg",
+      createdAt: baseTs,
+    });
+    const m2 = rwRepo.appendRawMessage({
+      canonicalUserId: "owner",
+      channel: "tg",
+      platformMsgId: "m2",
+      role: "user",
+      content: "second-msg",
+      createdAt: baseTs + 1000,
+    });
+    const m3 = rwRepo.appendRawMessage({
+      canonicalUserId: "owner",
+      channel: "tg",
+      platformMsgId: "m3",
+      role: "user",
+      content: "third-msg",
+      createdAt: baseTs + 2000,
+    });
+    const m4 = rwRepo.appendRawMessage({
+      canonicalUserId: "owner",
+      channel: "tg",
+      platformMsgId: "m4",
+      role: "user",
+      content: "fourth-msg",
+      createdAt: baseTs + 3000,
+    });
+    rwRepo.createTicket({
+      id: "t_ro_1",
+      canonicalUserId: "owner",
+      status: "running",
+      backend: "builtin-pi",
+      briefTitle: "readonly test",
+      originChannel: "tg",
+      contextId: "ctx_ro_1",
+      contextFromMsgId: m4.id,
+      contextToMsgId: m4.id,
+    });
+    rwHandle.close();
+
+    const roHandle = openDatabase(dbPath, { readonly: true });
+    try {
+      const roRepo = new HatoRepository(roHandle.db);
+      const server = createScopedContextMcpServer({
+        repo: roRepo,
+        allowedContextId: "ctx_ro_1",
+      });
+      const client = new Client({ name: "test-ro-client", version: "1.0.0" }, { capabilities: {} });
+      const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+      await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+
+      const readRes = await client.callTool({
+        name: "read_task_context",
+        arguments: { context_id: "ctx_ro_1" },
+      });
+      assert.notEqual(readRes.isError, true);
+      assert.match((readRes.content as Array<{ text: string }>)[0]!.text, /fourth-msg/);
+
+      const exp1 = await client.callTool({
+        name: "expand_earlier_context",
+        arguments: { context_id: "ctx_ro_1", count: 1 },
+      });
+      assert.notEqual(exp1.isError, true);
+      const exp1Text = (exp1.content as Array<{ text: string }>)[0]!.text;
+      assert.match(exp1Text, /third-msg/);
+      assert.doesNotMatch(exp1Text, /second-msg/);
+
+      const exp2 = await client.callTool({
+        name: "expand_earlier_context",
+        arguments: { context_id: "ctx_ro_1", count: 1 },
+      });
+      assert.notEqual(exp2.isError, true);
+      const exp2Text = (exp2.content as Array<{ text: string }>)[0]!.text;
+      assert.match(exp2Text, /second-msg/);
+      assert.doesNotMatch(exp2Text, /third-msg/);
+
+      await client.close();
+      await server.close();
+    } finally {
+      roHandle.close();
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
   }
 });

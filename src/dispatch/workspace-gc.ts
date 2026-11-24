@@ -24,6 +24,9 @@ export function cleanupExpiredWorkspaces(params: {
   const nowMs = params.nowMs ?? Date.now();
   const root = resolve(params.workspacesDir);
   const expired = params.repo.listExpiredWorkspaceTickets(nowMs, params.limit ?? 50);
+  const registeredScripts = params.repo.listScripts(500);
+  const protectedTicketIds = new Set(registeredScripts.map((s) => s.ticketId));
+  const protectedPaths = registeredScripts.map((s) => resolve(s.scriptPath));
 
   let removedCount = 0;
   let clearedCount = 0;
@@ -39,6 +42,13 @@ export function cleanupExpiredWorkspaces(params: {
     }
 
     const candidateDir = resolve(root, ticket.id);
+    if (
+      protectedTicketIds.has(ticket.id) ||
+      protectedPaths.some((p) => p === candidateDir || p.startsWith(candidateDir + sep))
+    ) {
+      continue;
+    }
+
     if (candidateDir !== root && candidateDir.startsWith(`${root}${sep}`) && existsSync(candidateDir)) {
       rmSync(candidateDir, { recursive: true, force: true });
       removedCount++;

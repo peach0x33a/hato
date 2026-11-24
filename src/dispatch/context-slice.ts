@@ -1,6 +1,12 @@
-import { createHmac, timingSafeEqual } from "node:crypto";
+import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import type { HatoRepository, RawMessageRecord } from "../db/repo.js";
 import { formatLocalDateTime } from "../time/clock.js";
+
+export const PROCESS_CONTEXT_SECRET = randomBytes(32).toString("hex");
+
+export function getProcessContextSecret(): string {
+  return PROCESS_CONTEXT_SECRET;
+}
 
 export interface ContextLookbackLimits {
   maxStepCount: number;
@@ -117,6 +123,7 @@ export function expandEarlierContext(params: {
   alreadyLookedBack?: number;
   timezone?: string;
   lookback: ContextLookbackLimits;
+  persistCursor?: boolean;
 }): ContextSliceResult {
   const ticket = params.repo.getTicketByContextId(params.contextId);
   if (!ticket) {
@@ -158,7 +165,7 @@ export function expandEarlierContext(params: {
     minCreatedAt,
   );
 
-  if (rows.length > 0) {
+  if (rows.length > 0 && params.persistCursor !== false) {
     params.repo.updateTicket(ticket.id, { maxLookbackMsgId: rows[0]!.id });
   }
 

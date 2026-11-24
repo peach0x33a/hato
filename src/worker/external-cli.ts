@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 import { isWorkerBackendEnabled, resolveSkillsDir, type HatoConfig } from "../config/app.js";
 import type { McpConfig } from "../config/mcp.js";
 import type { ScopedProxyRouter } from "../config/proxy.js";
-import { computeContextToken } from "../dispatch/context-slice.js";
+import { computeContextToken, getProcessContextSecret } from "../dispatch/context-slice.js";
 import type { WorkerMandate, WorkerResult } from "../dispatch/schema.js";
 import { selectWorkerSkills } from "../skills/loader.js";
 import { logInfo, logWarn, summarizeError } from "../utils/logger.js";
@@ -444,12 +444,14 @@ export function buildContextMcpSpec(params: {
   const tsEntry = resolve(selfDir, "../mcp/context-server.ts");
   const isCompiledJs = existsSync(jsEntry) && selfDir.includes(`${join("dist", "worker")}`);
 
+  const contextSecret = getProcessContextSecret();
   const env: Record<string, string> = {
     HATO_DB_PATH: resolve(params.hatoConfig.paths.sqlite),
     HATO_CONTEXT_ID: params.contextId,
     HATO_TIMEZONE: params.hatoConfig.owner.timezone,
+    HATO_CTX_SECRET: contextSecret,
     HATO_CTX_TOKEN: computeContextToken(
-      resolve(params.hatoConfig.paths.sqlite),
+      contextSecret,
       params.ticketId,
       params.contextId,
     ),

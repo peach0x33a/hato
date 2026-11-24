@@ -21,7 +21,7 @@ import {
 } from "lucide-react";
 import { AnimatePresence, LayoutGroup, MotionConfig, motion, useReducedMotion } from "motion/react";
 import { ThemeProvider } from "next-themes";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
 import {
   api,
   type ChatSessionRecord,
@@ -30,21 +30,42 @@ import {
   type HealthResponse,
   setStoredToken,
 } from "@/api";
-import { ChatPanel } from "@/components/console/ChatPanel";
 import { ConsoleInput } from "@/components/console/ConsolePrimitives";
-import { LogsPanel } from "@/components/console/LogsPanel";
-import { MemoryPanel } from "@/components/console/MemoryPanel";
-import { ModelsConfigPanel } from "@/components/console/ModelsConfigPanel";
-import { NotebookPanel } from "@/components/console/NotebookPanel";
-import { OverviewPanel } from "@/components/console/OverviewPanel";
-import { PromptPanel } from "@/components/console/PromptPanel";
-import { RemoteBrowserPanel } from "@/components/console/RemoteBrowserPanel";
-import { StickersPanel } from "@/components/console/StickersPanel";
 import {
-  SettingsPanel,
   type SettingsSectionId,
   VALID_SETTINGS_SECTIONS,
-} from "@/components/console/SettingsPanel";
+} from "@/components/console/settings/types";
+
+const ChatPanel = lazy(() =>
+  import("@/components/console/ChatPanel").then((m) => ({ default: m.ChatPanel })),
+);
+const LogsPanel = lazy(() =>
+  import("@/components/console/LogsPanel").then((m) => ({ default: m.LogsPanel })),
+);
+const MemoryPanel = lazy(() =>
+  import("@/components/console/MemoryPanel").then((m) => ({ default: m.MemoryPanel })),
+);
+const ModelsConfigPanel = lazy(() =>
+  import("@/components/console/ModelsConfigPanel").then((m) => ({ default: m.ModelsConfigPanel })),
+);
+const NotebookPanel = lazy(() =>
+  import("@/components/console/NotebookPanel").then((m) => ({ default: m.NotebookPanel })),
+);
+const OverviewPanel = lazy(() =>
+  import("@/components/console/OverviewPanel").then((m) => ({ default: m.OverviewPanel })),
+);
+const PromptPanel = lazy(() =>
+  import("@/components/console/PromptPanel").then((m) => ({ default: m.PromptPanel })),
+);
+const RemoteBrowserPanel = lazy(() =>
+  import("@/components/console/RemoteBrowserPanel").then((m) => ({ default: m.RemoteBrowserPanel })),
+);
+const StickersPanel = lazy(() =>
+  import("@/components/console/StickersPanel").then((m) => ({ default: m.StickersPanel })),
+);
+const SettingsPanel = lazy(() =>
+  import("@/components/console/SettingsPanel").then((m) => ({ default: m.SettingsPanel })),
+);
 import { AnimatedBadge } from "@/components/motion/animated-badge";
 import {
   AnimatedToastStack,
@@ -770,7 +791,14 @@ function ConsoleShell() {
                     : "min-h-full"
                 }
               >
-                {workspaceTab === "overview" && (
+                <Suspense
+                  fallback={
+                    <div className="flex h-full min-h-[240px] items-center justify-center text-muted-foreground">
+                      <Loader2 className="size-5 animate-spin" />
+                    </div>
+                  }
+                >
+                  {workspaceTab === "overview" && (
                   <OverviewPanel
                     onNavigateTab={(tab) => navigateToTab(tab)}
                     onNavigateSettings={(section) =>
@@ -880,6 +908,7 @@ function ConsoleShell() {
                       onRetry={() => void loadHealthAndConfig()}
                     />
                   ))}
+                </Suspense>
               </motion.div>
             </AnimatePresence>
           </main>
@@ -896,22 +925,30 @@ function ConsoleShell() {
               className="absolute inset-0 z-20 flex min-h-0 bg-background"
             >
               {configSnap ? (
-                <SettingsPanel
-                  initialConfig={configSnap.hatoConfig}
-                  secretStates={configSnap.secretStates}
-                  activeSection={settingsSection}
-                  onSectionChange={setSettingsSection}
-                  onBack={() => setActiveTab(lastNonSettingsTab)}
-                  onToast={notify}
-                  onSavedConfig={(next) => {
-                    setConfigSnap((prev) => (prev ? { ...prev, hatoConfig: next } : prev));
-                  }}
-                  onSecretsUpdated={(nextStates) => {
-                    setConfigSnap((prev) =>
-                      prev ? { ...prev, secretStates: nextStates } : prev,
-                    );
-                  }}
-                />
+                <Suspense
+                  fallback={
+                    <div className="flex h-full w-full items-center justify-center text-muted-foreground">
+                      <Loader2 className="size-5 animate-spin" />
+                    </div>
+                  }
+                >
+                  <SettingsPanel
+                    initialConfig={configSnap.hatoConfig}
+                    secretStates={configSnap.secretStates}
+                    activeSection={settingsSection}
+                    onSectionChange={setSettingsSection}
+                    onBack={() => setActiveTab(lastNonSettingsTab)}
+                    onToast={notify}
+                    onSavedConfig={(next) => {
+                      setConfigSnap((prev) => (prev ? { ...prev, hatoConfig: next } : prev));
+                    }}
+                    onSecretsUpdated={(nextStates) => {
+                      setConfigSnap((prev) =>
+                        prev ? { ...prev, secretStates: nextStates } : prev,
+                      );
+                    }}
+                  />
+                </Suspense>
               ) : (
                 <ConfigFallbackState
                   label="正在加载设置…"

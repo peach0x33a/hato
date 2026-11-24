@@ -4,7 +4,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { openDatabase } from "../src/db/client.js";
 import { HatoRepository } from "../src/db/repo.js";
-import { matchesCronExpression, ScriptScheduler } from "../src/dispatch/script-scheduler.js";
+import {
+  buildSanitizedScriptEnv,
+  isValidCronExpression,
+  matchesCronExpression,
+  ScriptScheduler,
+} from "../src/dispatch/script-scheduler.js";
 import { createDefaultHatoConfig } from "../src/setup/presets.js";
 import { parseLocalDateTimeToEpochMs } from "../src/time/clock.js";
 
@@ -65,6 +70,87 @@ describe("script-scheduler", () => {
       const afterFail = repo.listScripts(10).find((s) => s.id === registered.id)!;
       expect(afterFail.consecutiveFailures).toBe(5);
       expect(afterFail.enabled).toBe(false);
+
+      dbHandle.close();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("isValidCronExpression validates 5-field cron syntax and bounds", () => {
+    expect(isValidCronExpression("*/5 * * * *")).toBe(true);
+    expect(isValidCronExpression("0 9 * * 1-5")).toBe(true);
+    expect(isValidCronExpression("1,15,30 0-23/2 1-31 1-12 0-7")).toBe(true);
+
+    expect(isValidCronExpression("* * * *")).toBe(false);
+    expect(isValidCronExpression("60 * * * *")).toBe(false);
+    expect(isValidCronExpression("* 24 * * *")).toBe(false);
+    expect(isValidCronExpression("* * 0 * *")).toBe(false);
+    expect(isValidCronExpression("* * * 13 *")).toBe(false);
+    expect(isValidCronExpression("5-2 * * * *")).toBe(false);
+    expect(isValidCronExpression("*/0 * * * *")).toBe(false);
+  });
+
+  test("buildSanitizedScriptEnv blocks dangerous loader keys and blockedSecrets", () => {
+    const env = buildSanitizedScriptEnv(
+      ["RSS_API_KEY", "TG_BOT_TOKEN", "LD_PRELOAD", "NODE_OPTIONS", "HATO_HOME"],
+      {
+        PATH: "/usr/bin",
+        RSS_API_KEY: "rss-secret",
+        TG_BOT_TOKEN: "tg-secret",
+        LD_PRELOAD: "/tmp/evil.so",
+        NODE_OPTIONS: "--require /tmp/evil.js",
+        HATO_HOME: "/tmp/hato",
+      },
+      new Set(["TG_BOT_TOKEN"]),
+    );
+
+    expect(env.PATH).toBe("/usr/bin");
+    expect(env.RSS_API_KEY).toBe("rss-secret");
+    expect(env.TG_BOT_TOKEN).toBeUndefined();
+    expect(env.LD_PRELOAD).toBeUndefined();
+    expect(env.NODE_OPTIONS).toBeUndefined();
+    expect(env.HATO_HOME).toBeUndefined();
+  });
+
+  test("ScriptScheduler catches up missed minutes and deduplicates same-minute restarts via job_runs", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "hato-sched-catchup-"));
+    try {
+      const dbHandle = openDatabase(join(dir, "test.db"));
+      const repo = new HatoRepository(dbHandle.db);
+      const cfg = createDefaultHatoConfig(dir);
+      cfg.owner.timezone = "Asia/Singapore";
+
+      const registered = repo.registerScript({
+        ticketId: "t_catchup",
+        name: "catchup-job",
+        scriptPath: join(dir, "job.sh"),
+        cronExpr: "*/1 * * * *",
+        notifyChannel: "tg",
+      });
+
+      const scheduler1 = new ScriptScheduler({
+        getHatoConfig: () => cfg,
+        repo,
+        runScript: async () => ({ exitCode: 0, stdoutTail: "", stderrTail: "" }),
+      });
+
+      const t0 = parseLocalDateTimeToEpochMs("2026-11-21 10:00", "Asia/Singapore")!;
+      await scheduler1.tick(t0);
+      expect(repo.listJobRuns(registered.id, 10)).toHaveLength(1);
+
+      // Jump forward 3 minutes: should catch up 10:01, 10:02, and 10:03
+      await scheduler1.tick(t0 + 3 * 60_000);
+      expect(repo.listJobRuns(registered.id, 10)).toHaveLength(4);
+
+      // Simulate process restart in the same minute (10:03): should not re-run
+      const scheduler2 = new ScriptScheduler({
+        getHatoConfig: () => cfg,
+        repo,
+        runScript: async () => ({ exitCode: 0, stdoutTail: "", stderrTail: "" }),
+      });
+      await scheduler2.tick(t0 + 3 * 60_000 + 20_000);
+      expect(repo.listJobRuns(registered.id, 10)).toHaveLength(4);
 
       dbHandle.close();
     } finally {

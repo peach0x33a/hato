@@ -53,6 +53,53 @@ function matchCronField(field: string, value: number, min: number, max: number):
   return false;
 }
 
+function isValidCronToken(token: string, min: number, max: number): boolean {
+  if (!token) return false;
+  if (token === "*") return true;
+  if (token.startsWith("*/")) {
+    const step = Number(token.slice(2));
+    return Number.isInteger(step) && step >= 1;
+  }
+  const [rangePart, stepPart, ...extra] = token.split("/");
+  if (extra.length > 0) return false;
+  if (stepPart !== undefined) {
+    const step = Number(stepPart);
+    if (!Number.isInteger(step) || step < 1) return false;
+  }
+  if (!rangePart) return false;
+  if (rangePart.includes("-")) {
+    const [aStr, bStr, ...rest] = rangePart.split("-");
+    if (rest.length > 0 || !aStr || !bStr) return false;
+    const a = Number(aStr);
+    const b = Number(bStr);
+    return Number.isInteger(a) && Number.isInteger(b) && a >= min && b <= max && a <= b;
+  }
+  if (stepPart !== undefined) return false;
+  const n = Number(rangePart);
+  return Number.isInteger(n) && n >= min && n <= max;
+}
+
+function isValidCronField(field: string, min: number, max: number): boolean {
+  const tokens = field.split(",");
+  return tokens.length > 0 && tokens.every((t) => isValidCronToken(t, min, max));
+}
+
+/**
+ * Validates a standard 5-field cron expression (`min hour dom month dow`).
+ */
+export function isValidCronExpression(expr: string): boolean {
+  const fields = expr.trim().split(/\s+/);
+  if (fields.length !== 5) return false;
+  const [minF, hourF, domF, monF, dowF] = fields as [string, string, string, string, string];
+  return (
+    isValidCronField(minF, 0, 59) &&
+    isValidCronField(hourF, 0, 23) &&
+    isValidCronField(domF, 1, 31) &&
+    isValidCronField(monF, 1, 12) &&
+    isValidCronField(dowF, 0, 7)
+  );
+}
+
 /**
  * Evaluates a standard 5-field cron expression (`min hour dom month dow`)
  * in the target IANA timezone.
@@ -83,6 +130,7 @@ export interface ScriptExecutionResult {
 export interface ScriptSchedulerDeps {
   getHatoConfig: () => HatoConfig;
   repo: HatoRepository;
+  getProtectedSecretNames?: () => ReadonlySet<string>;
   runScript?: (scriptPath: string, requiredSecrets?: readonly string[]) => Promise<ScriptExecutionResult>;
   onScriptOutput?: (params: {
     scriptId: string;
@@ -119,9 +167,27 @@ function parseRequiredSecrets(rawJson: string | null | undefined): string[] {
   }
 }
 
+const DANGEROUS_SECRET_KEYS = new Set([
+  "PATH",
+  "HOME",
+  "USER",
+  "SHELL",
+  "LD_PRELOAD",
+  "LD_LIBRARY_PATH",
+  "DYLD_INSERT_LIBRARIES",
+  "DYLD_LIBRARY_PATH",
+  "NODE_OPTIONS",
+  "BUN_OPTIONS",
+  "NODE_TLS_REJECT_UNAUTHORIZED",
+  "SSL_CERT_FILE",
+  "NODE_EXTRA_CA_CERTS",
+  "HATO_HOME",
+]);
+
 export function buildSanitizedScriptEnv(
   requiredSecrets: readonly string[] = [],
   baseEnv: Readonly<Record<string, string | undefined>> = process.env,
+  blockedSecrets?: ReadonlySet<string>,
 ): Record<string, string> {
   const out: Record<string, string> = {};
   for (const key of SAFE_SCRIPT_ENV_KEYS) {
@@ -133,6 +199,8 @@ export function buildSanitizedScriptEnv(
   for (const rawKey of requiredSecrets) {
     const key = rawKey.trim();
     if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) continue;
+    if (DANGEROUS_SECRET_KEYS.has(key.toUpperCase())) continue;
+    if (blockedSecrets?.has(key)) continue;
     const val = baseEnv[key];
     if (typeof val === "string" && val.length > 0) {
       out[key] = val;
@@ -148,6 +216,7 @@ export function buildSanitizedScriptEnv(
 export class ScriptScheduler {
   private timer: ReturnType<typeof setInterval> | null = null;
   private running = false;
+  private lastEvaluatedMs: number | null = null;
   private readonly lastMinuteByScript = new Map<string, string>();
 
   constructor(private readonly deps: ScriptSchedulerDeps) {}
@@ -174,31 +243,79 @@ export class ScriptScheduler {
     try {
       const cfg = this.deps.getHatoConfig();
       const tz = cfg.owner.timezone;
-      const local = formatLocalDateTime(nowMs, tz);
-      const minuteKey = `${local.isoDate} ${String(local.hour).padStart(2, "0")}:${String(local.minute).padStart(2, "0")}`;
+
+      const blockedSecrets = new Set<string>(this.deps.getProtectedSecretNames?.() ?? []);
+      for (const candidate of [
+        cfg.gateway.telegram.bot_token_env,
+        cfg.gateway.qq.client_secret_env,
+        cfg.web?.console?.auth_token_env,
+        cfg.memory?.memoryecho?.api_key_env,
+        cfg.web?.search?.api_key_env,
+      ]) {
+        if (typeof candidate === "string" && candidate.trim()) {
+          blockedSecrets.add(candidate.trim());
+        }
+      }
+
+      const toMinuteKey = (ms: number): string => {
+        const local = formatLocalDateTime(ms, tz);
+        return `${local.isoDate} ${String(local.hour).padStart(2, "0")}:${String(local.minute).padStart(2, "0")}`;
+      };
+
+      const startMs =
+        this.lastEvaluatedMs !== null && nowMs > this.lastEvaluatedMs
+          ? Math.max(this.lastEvaluatedMs + 60_000, nowMs - 5 * 60_000)
+          : nowMs;
+      const steps: Array<{ ms: number; minuteKey: string }> = [];
+      const seenMinutes = new Set<string>();
+      for (let t = startMs; t < nowMs; t += 60_000) {
+        const mk = toMinuteKey(t);
+        if (!seenMinutes.has(mk)) {
+          seenMinutes.add(mk);
+          steps.push({ ms: t, minuteKey: mk });
+        }
+      }
+      const nowKey = toMinuteKey(nowMs);
+      if (!seenMinutes.has(nowKey)) {
+        seenMinutes.add(nowKey);
+        steps.push({ ms: nowMs, minuteKey: nowKey });
+      }
+
+      this.lastEvaluatedMs = Math.max(this.lastEvaluatedMs ?? 0, nowMs);
 
       const scripts = this.deps.repo.listEnabledScripts(50);
-      const dueScripts = scripts.filter((script) => {
-        if (this.lastMinuteByScript.get(script.id) === minuteKey) return false;
-        if (!matchesCronExpression(script.cronExpr, nowMs, tz)) return false;
-        this.lastMinuteByScript.set(script.id, minuteKey);
-        return true;
-      });
+      const dueTasks: Array<{ script: (typeof scripts)[number]; stepMs: number }> = [];
+
+      for (const { ms: stepMs, minuteKey } of steps) {
+        for (const script of scripts) {
+          if (!this.lastMinuteByScript.has(script.id)) {
+            const latestRun = this.deps.repo.listJobRuns(script.id, 1)[0];
+            if (latestRun && toMinuteKey(latestRun.ranAt) === minuteKey) {
+              this.lastMinuteByScript.set(script.id, minuteKey);
+              continue;
+            }
+          }
+          if (this.lastMinuteByScript.get(script.id) === minuteKey) continue;
+          if (!matchesCronExpression(script.cronExpr, stepMs, tz)) continue;
+          this.lastMinuteByScript.set(script.id, minuteKey);
+          dueTasks.push({ script, stepMs });
+        }
+      }
 
       await Promise.allSettled(
-        dueScripts.map(async (script) => {
+        dueTasks.map(async ({ script, stepMs }) => {
           try {
             const requiredSecrets = parseRequiredSecrets(script.requiredSecretsJson);
             const execResult = this.deps.runScript
               ? await this.deps.runScript(script.scriptPath, requiredSecrets)
-              : await defaultExecuteScript(script.scriptPath, requiredSecrets);
+              : await defaultExecuteScript(script.scriptPath, requiredSecrets, blockedSecrets);
 
             this.deps.repo.recordScriptRun({
               scriptId: script.id,
               exitCode: execResult.exitCode,
               stdoutTail: execResult.stdoutTail,
               stderrTail: execResult.stderrTail,
-              ranAt: nowMs,
+              ranAt: stepMs,
             });
 
             if (
@@ -228,6 +345,7 @@ export class ScriptScheduler {
 async function defaultExecuteScript(
   scriptPath: string,
   requiredSecrets: readonly string[] = [],
+  blockedSecrets?: ReadonlySet<string>,
 ): Promise<ScriptExecutionResult> {
   if (!existsSync(scriptPath)) {
     return {
@@ -254,7 +372,7 @@ async function defaultExecuteScript(
       cwd: dirname(scriptPath),
       timeout: 60_000,
       maxBuffer: 1024 * 1024,
-      env: buildSanitizedScriptEnv(requiredSecrets),
+      env: buildSanitizedScriptEnv(requiredSecrets, process.env, blockedSecrets),
     });
     return {
       exitCode: 0,

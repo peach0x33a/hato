@@ -25,8 +25,10 @@ import {
 } from "./microtools-core.js";
 import {
   runSelfConfigAction,
+  validateSelfConfigInput,
   type SelfConfigAction,
   type SelfConfigDeps,
+  type SelfConfigInput,
 } from "./self-config.js";
 import { runWebFetch } from "./web-fetch.js";
 import { runTavilySearch } from "./web-search.js";
@@ -401,6 +403,15 @@ export function createPersonaReadOnlyTools(params: {
   }) => Promise<{
     ok: boolean;
     ticketId?: string;
+    message: string;
+  }>;
+  onRequestSelfConfigConfirm?: (input: {
+    action: SelfConfigInput;
+    summaryTitle: string;
+    promptText: string;
+  }) => Promise<{
+    ok: boolean;
+    ticketId: string;
     message: string;
   }>;
   onStickerSearch?: (input: {
@@ -1044,22 +1055,61 @@ export function createPersonaReadOnlyTools(params: {
           }
         }
 
+        const scInput: SelfConfigInput = {
+          action: input.action as SelfConfigAction,
+          config_patch: parsedPatch,
+          slot: input.slot,
+          target: input.target,
+          thinking_level: input.thinking_level,
+          content: input.content,
+          append_note: input.append_note,
+          block_name: input.block_name,
+          fact_key: input.fact_key,
+          fact_value: input.fact_value,
+        };
+
         try {
-          const out = await runSelfConfigAction(scDeps, {
-            action: input.action as SelfConfigAction,
-            config_patch: parsedPatch,
-            slot: input.slot,
-            target: input.target,
-            thinking_level: input.thinking_level,
-            content: input.content,
-            append_note: input.append_note,
-            block_name: input.block_name,
-            fact_key: input.fact_key,
-            fact_value: input.fact_value,
+          if (scInput.action === "inspect") {
+            const out = await runSelfConfigAction(scDeps, scInput);
+            return {
+              content: [{ type: "text", text: out.summary }],
+              details: out.details,
+            };
+          }
+
+          const validation = validateSelfConfigInput(scDeps, scInput);
+          if (!validation.ok) {
+            return {
+              content: [{ type: "text", text: validation.summary }],
+              details: validation.details,
+            };
+          }
+
+          if (!params.onRequestSelfConfigConfirm) {
+            return {
+              content: [
+                {
+                  type: "text",
+                  text: "修改设置需要主人点击按钮二次确认，当前未接入确认通道，已拒绝直接修改。",
+                },
+              ],
+              details: { ok: false, requiresConfirm: true, action: input.action },
+            };
+          }
+
+          const confirmRes = await params.onRequestSelfConfigConfirm({
+            action: scInput,
+            summaryTitle: validation.summaryTitle,
+            promptText: validation.promptText,
           });
           return {
-            content: [{ type: "text", text: out.summary }],
-            details: out.details,
+            content: [{ type: "text", text: confirmRes.message }],
+            details: {
+              ok: confirmRes.ok,
+              requiresConfirm: true,
+              ticketId: confirmRes.ticketId,
+              action: input.action,
+            },
           };
         } catch (err) {
           return {

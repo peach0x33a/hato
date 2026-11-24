@@ -16,6 +16,7 @@ import {
   resolveWebFetchConfig,
   resolveWorkerExecutionMode,
   resolveWorkerVmWorkdir,
+  validateHatoConfigObject,
   type HatoConfig,
 } from "../config/app.js";
 import type { ModelRegistry } from "../config/models.js";
@@ -129,6 +130,231 @@ export interface SelfConfigOutput {
   details: Record<string, unknown>;
 }
 
+const VALID_THINKING_LEVELS = new Set(["auto", "off", "minimal", "low", "medium", "high", "xhigh", "max"]);
+
+function truncateTitle(text: string, maxLen = 48): string {
+  return text.length <= maxLen ? text : `${text.slice(0, maxLen - 1)}…`;
+}
+
+/**
+ * Validate a mutating self-config action without mutating files or DB,
+ * and build a human-readable confirmation title + preview text.
+ */
+export function validateSelfConfigInput(
+  deps: SelfConfigDeps,
+  input: SelfConfigInput,
+): { ok: true; summaryTitle: string; promptText: string } | { ok: false; summary: string; details: Record<string, unknown> } {
+  const cfg = deps.getHatoConfig();
+  const registry = deps.getModelRegistry();
+
+  if (input.action === "patch_hato") {
+    if (!input.config_patch || typeof input.config_patch !== "object" || Array.isArray(input.config_patch)) {
+      return {
+        ok: false,
+        summary: "patch_hato 必须提供对象格式的 config_patch。",
+        details: { ok: false },
+      };
+    }
+    const leafPaths = collectPatchLeafPaths(input.config_patch);
+    if (leafPaths.length === 0) {
+      return {
+        ok: false,
+        summary: "config_patch 为空，未执行任何修改。",
+        details: { ok: false },
+      };
+    }
+    const disallowed = leafPaths.filter((p) => !ALLOWED_SELF_CONFIG_PATHS.has(p));
+    if (disallowed.length > 0) {
+      return {
+        ok: false,
+        summary: `拒绝修改受保护配置路径: ${disallowed.join(", ")}。仅允许调整白名单内的运行参数（可通过 action="inspect" 查看可改路径）。`,
+        details: { ok: false, disallowed },
+      };
+    }
+    const baseCfg = existsSync(resolve(deps.hatoConfigPath))
+      ? loadHatoConfig(deps.hatoConfigPath)
+      : cfg;
+    const merged = deepMergeAllowedConfig(baseCfg, input.config_patch);
+    try {
+      validateHatoConfigObject(merged, deps.hatoConfigPath);
+    } catch (err) {
+      return {
+        ok: false,
+        summary: `配置校验失败: ${err instanceof Error ? err.message : String(err)}`,
+        details: { ok: false },
+      };
+    }
+    const summaryTitle = truncateTitle(`修改配置 ${leafPaths.join(", ")}`);
+    const promptText = `请求修改 hato.toml 配置项：\n${leafPaths.join(", ")}\n\n变更预览：\n${JSON.stringify(input.config_patch, null, 2).slice(0, 600)}`;
+    return { ok: true, summaryTitle, promptText };
+  }
+
+  if (input.action === "set_model_slot") {
+    const slot = input.slot?.trim() ?? "";
+    const target = input.target?.trim() ?? "";
+    if (!slot || !target) {
+      return {
+        ok: false,
+        summary: "set_model_slot 需要同时提供 slot 与 target（格式: <provider>/<model_id>）。",
+        details: { ok: false },
+      };
+    }
+    const validSlots = new Set<string>(registry.listSlots().map((s) => s.slot));
+    if (!validSlots.has(slot)) {
+      return {
+        ok: false,
+        summary: `未知的模型槽位: ${slot}`,
+        details: { ok: false, slot },
+      };
+    }
+    const validTargets = new Set(registry.listTargets());
+    if (!validTargets.has(target)) {
+      return {
+        ok: false,
+        summary: `未知的模型目标: ${target}`,
+        details: { ok: false, target },
+      };
+    }
+    return {
+      ok: true,
+      summaryTitle: truncateTitle(`切换模型 ${slot} -> ${target}`),
+      promptText: `请求将模型槽位 ${slot} 切换为 ${target}。`,
+    };
+  }
+
+  if (input.action === "set_thinking_level") {
+    const slot = input.slot?.trim() || "persona";
+    const level = input.thinking_level?.trim() ?? "";
+    if (!level || !VALID_THINKING_LEVELS.has(level)) {
+      return {
+        ok: false,
+        summary: "set_thinking_level 需要提供 thinking_level（auto/off/minimal/low/medium/high/xhigh/max）。",
+        details: { ok: false },
+      };
+    }
+    const validSlots = new Set<string>(registry.listSlots().map((s) => s.slot));
+    if (!validSlots.has(slot)) {
+      return {
+        ok: false,
+        summary: `未知的模型槽位: ${slot}`,
+        details: { ok: false, slot },
+      };
+    }
+    return {
+      ok: true,
+      summaryTitle: truncateTitle(`调整思考强度 ${slot}=${level}`),
+      promptText: `请求将槽位 ${slot} 的思考强度设置为 ${level}。`,
+    };
+  }
+
+  if (input.action === "edit_soul") {
+    const hasContent = typeof input.content === "string" && input.content.trim().length > 0;
+    const hasAppend = typeof input.append_note === "string" && input.append_note.trim().length > 0;
+    if (!hasContent && !hasAppend) {
+      return {
+        ok: false,
+        summary: "edit_soul 需要提供 content（完整替换）或 append_note（追加一条设定）。",
+        details: { ok: false },
+      };
+    }
+    const preview = hasContent ? input.content!.trim() : `+ ${input.append_note!.trim()}`;
+    return {
+      ok: true,
+      summaryTitle: truncateTitle(hasContent ? "更新人设 soul.md" : "追加人设 soul.md 设定"),
+      promptText: `请求修改人设文件 soul.md：\n${preview.slice(0, 600)}`,
+    };
+  }
+
+  if (input.action === "upsert_prompt_block") {
+    const blockName = input.block_name?.trim() ?? "";
+    const content = input.content?.trim() ?? "";
+    if (!blockName || !content) {
+      return {
+        ok: false,
+        summary: "upsert_prompt_block 需要提供 block_name 与非空 content。",
+        details: { ok: false },
+      };
+    }
+    return {
+      ok: true,
+      summaryTitle: truncateTitle(`写入提示词块 ${blockName}`),
+      promptText: `请求写入提示词块 blocks/${blockName}：\n${content.slice(0, 600)}`,
+    };
+  }
+
+  if (input.action === "delete_prompt_block") {
+    const blockName = input.block_name?.trim() ?? "";
+    if (!blockName) {
+      return {
+        ok: false,
+        summary: "delete_prompt_block 需要提供 block_name。",
+        details: { ok: false },
+      };
+    }
+    const safeName = blockName.endsWith(".md") ? blockName : `${blockName}.md`;
+    const blockPath = resolve(cfg.paths.prompts_dir, "blocks", safeName);
+    if (!existsSync(blockPath)) {
+      return {
+        ok: false,
+        summary: `提示词块 blocks/${safeName} 不存在。`,
+        details: { ok: false, name: safeName },
+      };
+    }
+    return {
+      ok: true,
+      summaryTitle: truncateTitle(`删除提示词块 ${safeName}`),
+      promptText: `请求删除提示词块 blocks/${safeName}。`,
+    };
+  }
+
+  if (input.action === "set_relationship_fact") {
+    const key = input.fact_key?.trim() ?? "";
+    const value = input.fact_value?.trim() ?? "";
+    if (!key || !value) {
+      return {
+        ok: false,
+        summary: "set_relationship_fact 需要提供 fact_key 与 fact_value。",
+        details: { ok: false },
+      };
+    }
+    return {
+      ok: true,
+      summaryTitle: truncateTitle(`写入关系约定 ${key}`),
+      promptText: `请求写入固定关系约定：\n${key}: ${value}`,
+    };
+  }
+
+  if (input.action === "delete_relationship_fact") {
+    const key = input.fact_key?.trim() ?? "";
+    if (!key) {
+      return {
+        ok: false,
+        summary: "delete_relationship_fact 需要提供 fact_key。",
+        details: { ok: false },
+      };
+    }
+    const existing = deps.repo.listRelationshipFacts().some((f) => f.key === key);
+    if (!existing) {
+      return {
+        ok: false,
+        summary: `未找到固定关系约定 "${key}"。`,
+        details: { ok: false, key },
+      };
+    }
+    return {
+      ok: true,
+      summaryTitle: truncateTitle(`删除关系约定 ${key}`),
+      promptText: `请求删除固定关系约定 "${key}"。`,
+    };
+  }
+
+  return {
+    ok: false,
+    summary: `不支持的 self_config action: ${String(input.action)}`,
+    details: { ok: false },
+  };
+}
+
 /**
  * Execute a schema-validated, allowlist-guarded self-configuration inspection or edit.
  */
@@ -207,6 +433,15 @@ export async function runSelfConfigAction(
       ok: true,
       summary: JSON.stringify(snapshot, null, 2),
       details: snapshot,
+    };
+  }
+
+  const validation = validateSelfConfigInput(deps, input);
+  if (!validation.ok) {
+    return {
+      ok: false,
+      summary: validation.summary,
+      details: validation.details,
     };
   }
 
