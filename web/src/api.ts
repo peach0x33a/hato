@@ -66,9 +66,40 @@ export interface TicketSummary {
   briefTitle: string;
   originChannel: string;
   progressNote: string | null;
+  workspaceDir?: string;
   createdAt: number;
   updatedAt: number;
 }
+
+export type WorkerActivityKind =
+  | "lifecycle"
+  | "command"
+  | "tool"
+  | "assistant"
+  | "stderr"
+  | "error";
+
+export interface WorkerActivityItem {
+  id: string;
+  stepKey?: string;
+  ticketId: string;
+  seq: number;
+  timestamp: number;
+  updatedAt: number;
+  kind: WorkerActivityKind;
+  state: "running" | "done" | "error";
+  title: string;
+  command?: string;
+  output?: string;
+  exitCode?: number | null;
+  durationMs?: number;
+  text?: string;
+}
+
+export type TicketStreamEvent =
+  | { type: "snapshot"; ticket: TicketSummary; items: WorkerActivityItem[] }
+  | { type: "item"; item: WorkerActivityItem }
+  | { type: "ticket"; ticket: TicketSummary };
 
 export interface ChatSessionRecord {
   id: string;
@@ -1331,6 +1362,60 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ ticketId, approved }),
     }),
+  abortTicket: (ticketId: string) =>
+    requestJson<{ ok: boolean; message: string }>("/api/tickets/abort", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ticketId }),
+    }),
+  subscribeTicketStream(
+    ticketId: string,
+    onEvent: (event: TicketStreamEvent) => void,
+    onError?: (err: Error) => void,
+  ): () => void {
+    let closed = false;
+    let controller: AbortController | null = null;
+    let reconnectTimer: number | null = null;
+
+    const connect = async (attempt = 0) => {
+      if (closed) return;
+      controller = new AbortController();
+      try {
+        await consumeSseStream<TicketStreamEvent>(
+          `/api/tickets/stream?ticketId=${encodeURIComponent(ticketId)}`,
+          {
+            method: "GET",
+            headers: authHeaders(),
+            signal: controller.signal,
+          },
+          (ev) => {
+            attempt = 0;
+            onEvent(ev);
+          },
+        );
+        if (!closed) {
+          const delay = Math.min(8_000, 1200 * Math.pow(1.5, attempt));
+          reconnectTimer = window.setTimeout(() => void connect(attempt + 1), delay);
+        }
+      } catch (err) {
+        if (closed || controller.signal.aborted) return;
+        onError?.(err instanceof Error ? err : new Error(String(err)));
+        if (err instanceof ApiError && (err.status === 401 || err.status === 403 || err.status === 404)) {
+          return;
+        }
+        const delay = Math.min(10_000, 1800 * Math.pow(1.5, attempt));
+        reconnectTimer = window.setTimeout(() => void connect(attempt + 1), delay);
+      }
+    };
+
+    void connect(0);
+
+    return () => {
+      closed = true;
+      if (reconnectTimer !== null) window.clearTimeout(reconnectTimer);
+      controller?.abort();
+    };
+  },
   async sendChatStream(
     payload: { text: string; images?: Array<{ data: string; mimeType: string }> },
     onEvent: (event: ChatSseEvent) => void,

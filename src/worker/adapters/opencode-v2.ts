@@ -37,7 +37,11 @@ export const openCodeV2CliAdapter: ExternalCliAdapter = {
       if (type === "error") {
         const errObj = obj.error as { message?: string } | string | undefined;
         const msg = typeof errObj === "string" ? errObj : errObj?.message || "OpenCode V2 error";
-        return { sessionId, error: msg };
+        return {
+          sessionId,
+          error: msg,
+          activities: [{ kind: "error", state: "error", title: "OpenCode 错误", text: msg }],
+        };
       }
 
       if (type === "tool_use" || type === "tool") {
@@ -51,7 +55,55 @@ export const openCodeV2CliAdapter: ExternalCliAdapter = {
             : typeof part.name === "string"
               ? part.name
               : "工具";
-        return { sessionId, progressNote: `正在执行: ${toolName}` };
+        const rawId =
+          typeof part.callID === "string"
+            ? part.callID
+            : typeof part.id === "string"
+              ? part.id
+              : undefined;
+        const stepKey = rawId ? `oc_${rawId}` : undefined;
+        const stateObj =
+          part.state && typeof part.state === "object"
+            ? (part.state as Record<string, unknown>)
+            : undefined;
+        const statusStr = typeof stateObj?.status === "string" ? stateObj.status : "";
+        const inputObj =
+          stateObj?.input && typeof stateObj.input === "object"
+            ? (stateObj.input as Record<string, unknown>)
+            : undefined;
+        const outputText = typeof stateObj?.output === "string" ? stateObj.output : undefined;
+        const isBash = toolName === "bash" || toolName === "shell";
+        const cmdText = isBash && typeof inputObj?.command === "string" ? inputObj.command : undefined;
+        const actState =
+          statusStr === "error"
+            ? "error"
+            : statusStr === "completed" || outputText !== undefined
+              ? "done"
+              : "running";
+
+        return {
+          sessionId,
+          progressNote:
+            isBash && cmdText ? `正在执行: ${cmdText.slice(0, 72)}` : `正在执行: ${toolName}`,
+          activities: [
+            isBash
+              ? {
+                  stepKey,
+                  kind: "command",
+                  state: actState,
+                  title: "执行命令",
+                  ...(cmdText ? { command: cmdText } : {}),
+                  ...(outputText !== undefined ? { output: outputText } : {}),
+                }
+              : {
+                  stepKey,
+                  kind: "tool",
+                  state: actState,
+                  title: `调用工具 · ${toolName}`,
+                  ...(outputText !== undefined ? { output: outputText } : {}),
+                },
+          ],
+        };
       }
 
       if (type === "text" || type === "message") {
@@ -65,7 +117,24 @@ export const openCodeV2CliAdapter: ExternalCliAdapter = {
             : typeof obj.content === "string"
               ? obj.content
               : undefined;
-        return { sessionId, finalText: text, textDelta: text };
+        return {
+          sessionId,
+          finalText: text,
+          textDelta: text,
+          ...(text
+            ? {
+                activities: [
+                  {
+                    stepKey: typeof part.id === "string" ? `oc_txt_${part.id}` : undefined,
+                    kind: "assistant",
+                    state: "done",
+                    title: "Worker 进展",
+                    text,
+                  },
+                ],
+              }
+            : {}),
+        };
       }
 
       if (type === "step_finish" || type === "done") {

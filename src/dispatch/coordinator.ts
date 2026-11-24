@@ -15,6 +15,7 @@ import type { ChannelName, InboundBatch } from "../gateway/types.js";
 import type { LiveTraceTracker } from "../stats/live-trace.js";
 import { computeTurnMetrics } from "../stats/metrics.js";
 import { logError, logInfo, summarizeError } from "../utils/logger.js";
+import { workerActivityHub } from "../worker/activity-stream.js";
 import type { WorkerDispatcher } from "../worker/backend.js";
 import {
   generateOpenAiImage,
@@ -90,6 +91,40 @@ export class TicketCoordinator {
 
   async abortAll(): Promise<void> {
     await this.deps.dispatcher.abortAll();
+  }
+
+  private emitTicketLiveMeta(ticketId: string): void {
+    const row = this.deps.repo.getTicket(ticketId);
+    if (!row) return;
+    const mandate = parseWorkerMandate(row.mandateJson);
+    workerActivityHub.emitTicketUpdate({
+      id: row.id,
+      status: row.status,
+      backend: row.backend,
+      briefTitle: row.briefTitle,
+      originChannel: row.originChannel,
+      progressNote: row.progressNote,
+      ...(mandate?.workspace_dir ? { workspaceDir: mandate.workspace_dir } : {}),
+      createdAt: row.createdAt,
+      updatedAt: row.updatedAt,
+    });
+  }
+
+  async abortTicket(ticketId: string): Promise<string> {
+    const row = this.deps.repo.getTicket(ticketId);
+    if (!row) {
+      return `未找到工单 ${ticketId}`;
+    }
+    if (row.status === "done" || row.status === "failed" || row.status === "cancelled") {
+      return `工单 ${ticketId} 已结束（${row.status}）。`;
+    }
+    await this.deps.dispatcher.abort(ticketId);
+    this.deps.repo.updateTicket(ticketId, {
+      status: "cancelled",
+      progressNote: "已手动中止任务",
+    });
+    this.emitTicketLiveMeta(ticketId);
+    return `已中止工单 ${ticketId}`;
   }
 
   enqueueDelegation(params: {
@@ -854,8 +889,25 @@ export class TicketCoordinator {
       mandateJson: JSON.stringify(mandate),
       workspaceExpiresAt: Date.now() + cfg.worker.workspace_ttl_days * 24 * 60 * 60 * 1000,
     });
+    this.emitTicketLiveMeta(ticketId);
 
     logInfo("DISPATCH", `ticket=${ticketId} backend=${decision.backend} ctx=${contextId}`);
+
+    const extLiveTraceId =
+      decision.backend !== "builtin-pi" ? `live_worker_${ticketId}` : null;
+    if (extLiveTraceId) {
+      this.deps.liveTraceTracker?.start({
+        id: extLiveTraceId,
+        canonicalUserId,
+        slot: "worker",
+        provider: decision.backend,
+        modelId: decision.backend,
+        api: "worker-cli",
+        userPreview: `[工单 ${ticketId}] ${decision.brief_title}`,
+        startedAt: Date.now(),
+        progressNote: `已派发给 ${decision.backend} 执行`,
+      });
+    }
 
     let result: WorkerResult;
     const workerStartPerf = performance.now();
@@ -876,6 +928,10 @@ export class TicketCoordinator {
           },
           onProgress: (note) => {
             this.deps.repo.updateTicket(ticketId, { progressNote: note });
+            this.emitTicketLiveMeta(ticketId);
+            if (extLiveTraceId) {
+              this.deps.liveTraceTracker?.update(extLiveTraceId, { progressNote: note });
+            }
           },
         },
       );
@@ -889,6 +945,10 @@ export class TicketCoordinator {
         required_secrets: [],
         caveats: [summarizeError(err)],
       };
+    } finally {
+      if (extLiveTraceId) {
+        this.deps.liveTraceTracker?.finish(extLiveTraceId);
+      }
     }
 
     this.recordWorkerTrace({
@@ -911,6 +971,23 @@ export class TicketCoordinator {
     originChannel: ChannelName,
     userReply: string,
   ): Promise<void> {
+    this.emitTicketLiveMeta(ticket.ticketId);
+    const extLiveTraceId =
+      ticket.backend !== "builtin-pi" ? `live_worker_${ticket.ticketId}` : null;
+    if (extLiveTraceId) {
+      this.deps.liveTraceTracker?.start({
+        id: extLiveTraceId,
+        canonicalUserId: ticket.canonicalUserId,
+        slot: "worker",
+        provider: ticket.backend,
+        modelId: ticket.backend,
+        api: "worker-cli",
+        userPreview: `[工单 ${ticket.ticketId}] ${ticket.briefTitle}`,
+        startedAt: Date.now(),
+        progressNote: "正在续跑后台任务",
+      });
+    }
+
     let result: WorkerResult;
     const workerStartPerf = performance.now();
     try {
@@ -920,6 +997,10 @@ export class TicketCoordinator {
         },
         onProgress: (note) => {
           this.deps.repo.updateTicket(ticket.ticketId, { progressNote: note });
+          this.emitTicketLiveMeta(ticket.ticketId);
+          if (extLiveTraceId) {
+            this.deps.liveTraceTracker?.update(extLiveTraceId, { progressNote: note });
+          }
         },
       });
     } catch (err) {
@@ -932,6 +1013,10 @@ export class TicketCoordinator {
         required_secrets: [],
         caveats: [summarizeError(err)],
       };
+    } finally {
+      if (extLiveTraceId) {
+        this.deps.liveTraceTracker?.finish(extLiveTraceId);
+      }
     }
 
     this.recordWorkerTrace({
@@ -1044,12 +1129,17 @@ export class TicketCoordinator {
     briefTitle: string,
     result: WorkerResult,
   ): Promise<void> {
+    if (this.deps.repo.getTicket(ticketId)?.status === "cancelled") {
+      this.emitTicketLiveMeta(ticketId);
+      return;
+    }
     const { trace: _trace, ...persistedResult } = result;
     this.deps.repo.updateTicket(ticketId, {
       status: result.status,
       progressNote: result.narration_hint.slice(0, 120),
       resultJson: JSON.stringify(persistedResult),
     });
+    this.emitTicketLiveMeta(ticketId);
 
     if (result.status === "needs_input") {
       await this.deps.bus.emit({

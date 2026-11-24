@@ -1,6 +1,6 @@
 import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import http, { type IncomingMessage, type ServerResponse } from "node:http";
-import { dirname, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { getSupportedThinkingLevels, type ImageContent } from "@earendil-works/pi-ai";
 import type { BrowserRuntime } from "../browser/runtime.js";
 import type { ActorLock } from "../bus/actor-bus.js";
@@ -113,6 +113,8 @@ import type { NotebookService } from "../notebook/service.js";
 import type { NotebookEntryKind } from "../notebook/store.js";
 import type { StickerService } from "../stickers/service.js";
 import { getRuntimeLogs, logInfo, logWarn, subscribeRuntimeLogs, summarizeError } from "../utils/logger.js";
+import { parseWorkerMandate } from "../dispatch/schema.js";
+import { workerActivityHub } from "../worker/activity-stream.js";
 import {
   EXTERNAL_CLI_BACKENDS,
   probeAllExternalClis,
@@ -506,8 +508,16 @@ export class WebConsoleServer {
           this.handleListTickets(res);
           return;
         }
+        if (pathname === "/api/tickets/stream" && method === "GET") {
+          this.handleTicketActivityStream(parsedUrl, req, res);
+          return;
+        }
         if (pathname === "/api/tickets/confirm" && method === "POST") {
           await this.handleTicketConfirm(req, res);
+          return;
+        }
+        if (pathname === "/api/tickets/abort" && method === "POST") {
+          await this.handleTicketAbort(req, res);
           return;
         }
         if (pathname === "/api/browser/status" && method === "GET") {
@@ -1987,17 +1997,101 @@ export class WebConsoleServer {
   private handleListTickets(res: ServerResponse): void {
     const repo = this.deps.getRepo();
     const uid = this.deps.getConfig().owner.canonical_user_id;
-    const tickets = repo.listTickets(uid, 15).map((t) => ({
-      id: t.id,
-      status: t.status,
-      backend: t.backend,
-      briefTitle: t.briefTitle,
-      originChannel: t.originChannel,
-      progressNote: t.progressNote,
-      createdAt: t.createdAt,
-      updatedAt: t.updatedAt,
-    }));
+    const tickets = repo.listTickets(uid, 20).map((t) => {
+      const mandate = parseWorkerMandate(t.mandateJson);
+      return {
+        id: t.id,
+        status: t.status,
+        backend: t.backend,
+        briefTitle: t.briefTitle,
+        originChannel: t.originChannel,
+        progressNote: t.progressNote,
+        ...(mandate?.workspace_dir ? { workspaceDir: mandate.workspace_dir } : {}),
+        createdAt: t.createdAt,
+        updatedAt: t.updatedAt,
+      };
+    });
     sendJson(res, 200, { ok: true, tickets });
+  }
+
+  private handleTicketActivityStream(
+    url: URL,
+    req: IncomingMessage,
+    res: ServerResponse,
+  ): void {
+    const ticketId = url.searchParams.get("ticketId")?.trim() ?? "";
+    if (!ticketId) {
+      sendJson(res, 400, { ok: false, error: "ticketId 不能为空" });
+      return;
+    }
+
+    const repo = this.deps.getRepo();
+    const cfg = this.deps.getConfig();
+    const uid = cfg.owner.canonical_user_id;
+    const row = repo.getTicket(ticketId);
+    if (!row || row.canonicalUserId !== uid) {
+      sendJson(res, 404, { ok: false, error: `未找到工单 ${ticketId}` });
+      return;
+    }
+
+    const mandate = parseWorkerMandate(row.mandateJson);
+    const activityPersistDir = join(
+      resolve(dirname(cfg.paths.workspaces_dir), "worker-cli"),
+      "activity",
+    );
+
+    res.writeHead(200, {
+      "Content-Type": "text/event-stream; charset=utf-8",
+      "Cache-Control": "no-cache, no-transform",
+      Connection: "keep-alive",
+    });
+    res.write(": connected\n\n");
+
+    const writeEvent = (payload: Record<string, unknown>) => {
+      if (!res.writableEnded) {
+        res.write(`data: ${JSON.stringify(payload)}\n\n`);
+      }
+    };
+
+    writeEvent({
+      type: "snapshot",
+      ticket: {
+        id: row.id,
+        status: row.status,
+        backend: row.backend,
+        briefTitle: row.briefTitle,
+        originChannel: row.originChannel,
+        progressNote: row.progressNote,
+        ...(mandate?.workspace_dir ? { workspaceDir: mandate.workspace_dir } : {}),
+        createdAt: row.createdAt,
+        updatedAt: row.updatedAt,
+      },
+      items: workerActivityHub.getItems(ticketId, activityPersistDir),
+    });
+
+    const unsub = workerActivityHub.subscribe((ev) => {
+      if (ev.ticketId !== ticketId) return;
+      if (ev.type === "item") {
+        writeEvent({ type: "item", item: ev.item });
+      } else if (ev.type === "ticket") {
+        writeEvent({ type: "ticket", ticket: ev.ticket });
+      }
+    });
+
+    const keepAlive = setInterval(() => {
+      if (!res.writableEnded) {
+        res.write(": ping\n\n");
+      }
+    }, 15_000);
+    keepAlive.unref();
+
+    const cleanup = () => {
+      clearInterval(keepAlive);
+      unsub();
+      if (!res.writableEnded) res.end();
+    };
+    req.once("close", cleanup);
+    res.once("close", cleanup);
   }
 
   private async handleTicketConfirm(req: IncomingMessage, res: ServerResponse): Promise<void> {
@@ -2012,7 +2106,35 @@ export class WebConsoleServer {
       sendJson(res, 400, { ok: false, error: "ticketId 不能为空" });
       return;
     }
+    const row = this.deps.getRepo().getTicket(ticketId);
+    const uid = this.deps.getConfig().owner.canonical_user_id;
+    if (!row || row.canonicalUserId !== uid) {
+      sendJson(res, 404, { ok: false, error: `未找到工单 ${ticketId}` });
+      return;
+    }
     const message = await coordinator.handleConfirmAction(ticketId, Boolean(body.approved));
+    sendJson(res, 200, { ok: true, message });
+  }
+
+  private async handleTicketAbort(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    const coordinator = this.deps.getTicketCoordinator?.();
+    if (!coordinator) {
+      sendJson(res, 503, { ok: false, error: "当前实例未启用后台工单协调器" });
+      return;
+    }
+    const body = (await readJsonBody(req)) as { ticketId?: unknown };
+    const ticketId = typeof body.ticketId === "string" ? body.ticketId.trim() : "";
+    if (!ticketId) {
+      sendJson(res, 400, { ok: false, error: "ticketId 不能为空" });
+      return;
+    }
+    const row = this.deps.getRepo().getTicket(ticketId);
+    const uid = this.deps.getConfig().owner.canonical_user_id;
+    if (!row || row.canonicalUserId !== uid) {
+      sendJson(res, 404, { ok: false, error: `未找到工单 ${ticketId}` });
+      return;
+    }
+    const message = await coordinator.abortTicket(ticketId);
     sendJson(res, 200, { ok: true, message });
   }
 

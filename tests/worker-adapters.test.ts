@@ -6,8 +6,10 @@ import test from "node:test";
 import { ScopedProxyRouter } from "../src/config/proxy.js";
 import { createDefaultHatoConfig } from "../src/setup/presets.js";
 import { antigravityCliAdapter } from "../src/worker/adapters/antigravity-cli.js";
+import { claudeCodeCliAdapter } from "../src/worker/adapters/claude-code.js";
 import { codexCliAdapter } from "../src/worker/adapters/codex-cli.js";
 import { openCodeV2CliAdapter } from "../src/worker/adapters/opencode-v2.js";
+import { WorkerActivityHub } from "../src/worker/activity-stream.js";
 import { ExternalCliRunner } from "../src/worker/external-cli.js";
 import {
   normalizeExternalCliResult,
@@ -35,11 +37,16 @@ test("CLI adapters parse real NDJSON formats and build start/resume args", () =>
   const agyToolActive = antigravityCliAdapter.parseStreamLine(
     '{"event":"step_update","step_update":{"conversation_id":"conv_99","step_index":1,"state":"ACTIVE","step_type":"tool","tool_info":{"name":"run_command","parameters":{"CommandLine":"echo ok"}}}}',
   );
-  assert.match(agyToolActive?.progressNote ?? "", /run_command/);
+  assert.match(agyToolActive?.progressNote ?? "", /echo ok/);
+  assert.equal(agyToolActive?.activities?.[0]?.kind, "command");
+  assert.equal(agyToolActive?.activities?.[0]?.command, "echo ok");
+  assert.equal(agyToolActive?.activities?.[0]?.state, "running");
   const agyToolDone = antigravityCliAdapter.parseStreamLine(
-    '{"event":"step_update","step_update":{"conversation_id":"conv_99","step_index":1,"state":"DONE","step_type":"tool","tool_name":"run_command"}}',
+    '{"event":"step_update","step_update":{"conversation_id":"conv_99","step_index":1,"state":"DONE","step_type":"tool","tool_name":"run_command","duration_seconds":0.42,"tool_info":{"name":"run_command","parameters":{"CommandLine":"echo ok"},"output":"ok\\n"}}}',
   );
   assert.equal(agyToolDone?.progressNote, undefined);
+  assert.equal(agyToolDone?.activities?.[0]?.output, "ok\n");
+  assert.equal(agyToolDone?.activities?.[0]?.durationMs, 420);
   const agyDelta = antigravityCliAdapter.parseStreamLine(
     '{"event":"step_update","step_update":{"conversation_id":"conv_99","step_index":2,"state":"ACTIVE","step_type":"agent_response","text_delta":"2"}}',
   );
@@ -55,10 +62,84 @@ test("CLI adapters parse real NDJSON formats and build start/resume args", () =>
   assert.equal(agySchemaDone?.finalText, '{"status":"done","narration_hint":"ok"}');
 
   const ocTool = openCodeV2CliAdapter.parseStreamLine(
-    '{"type":"tool_use","sessionID":"ses_abc","part":{"tool":"bash"}}',
+    '{"type":"tool_use","sessionID":"ses_abc","part":{"tool":"bash","callID":"c1","state":{"status":"completed","input":{"command":"ls -la"},"output":"total 8\\n"}}}',
   );
   assert.equal(ocTool?.sessionId, "ses_abc");
-  assert.match(ocTool?.progressNote ?? "", /bash/);
+  assert.match(ocTool?.progressNote ?? "", /ls -la/);
+  assert.equal(ocTool?.activities?.[0]?.command, "ls -la");
+  assert.equal(ocTool?.activities?.[0]?.output, "total 8\n");
+
+  const ccAssist = claudeCodeCliAdapter.parseStreamLine(
+    '{"type":"assistant","session_id":"cc_1","message":{"id":"m1","content":[{"type":"tool_use","id":"tu_1","name":"Bash","input":{"command":"pwd"}}]}}',
+  );
+  assert.equal(ccAssist?.activities?.[0]?.command, "pwd");
+  const ccResult = claudeCodeCliAdapter.parseStreamLine(
+    '{"type":"user","session_id":"cc_1","message":{"content":[{"type":"tool_result","tool_use_id":"tu_1","content":"/tmp/work"}]}}',
+  );
+  assert.equal(ccResult?.activities?.[0]?.stepKey, "cc_tu_1");
+  assert.equal(ccResult?.activities?.[0]?.output, "/tmp/work");
+});
+
+test("WorkerActivityHub merges in-flight command steps by stepKey, streams live events, and reloads persisted snapshots", () => {
+  const tempDir = mkdtempSync(join(tmpdir(), "hato-act-hub-"));
+  try {
+    const hub = new WorkerActivityHub();
+    const seen: string[] = [];
+    const unsub = hub.subscribe((ev) => {
+      if (ev.type === "item") {
+        seen.push(`${ev.item.state}:${ev.item.command ?? ""}:${ev.item.output ?? ""}`);
+      }
+    });
+
+    hub.upsert(
+      "t_hub_1",
+      {
+        stepKey: "step_cmd_1",
+        kind: "command",
+        state: "running",
+        title: "执行命令",
+        command: "bun test",
+      },
+      { persistDir: tempDir },
+    );
+    hub.upsert(
+      "t_hub_1",
+      {
+        stepKey: "step_cmd_1",
+        kind: "command",
+        state: "running",
+        appendOutput: "line 1\n",
+      },
+      { persistDir: tempDir },
+    );
+    hub.upsert(
+      "t_hub_1",
+      {
+        stepKey: "step_cmd_1",
+        kind: "command",
+        state: "done",
+        appendOutput: "line 2\n",
+        exitCode: 0,
+        durationMs: 310,
+      },
+      { persistDir: tempDir, flushImmediate: true },
+    );
+    unsub();
+
+    const items = hub.getItems("t_hub_1", tempDir);
+    assert.equal(items.length, 1);
+    assert.equal(items[0]?.command, "bun test");
+    assert.equal(items[0]?.output, "line 1\nline 2\n");
+    assert.equal(items[0]?.exitCode, 0);
+    assert.equal(seen.length, 3);
+
+    const coldHub = new WorkerActivityHub();
+    const reloaded = coldHub.getItems("t_hub_1", tempDir);
+    assert.equal(reloaded.length, 1);
+    assert.equal(reloaded[0]?.output, "line 1\nline 2\n");
+  } finally {
+    rmSync(tempDir, { recursive: true, force: true });
+  }
 });
 
 test("normalizeExternalCliResult detects artifacts, needs_input questions, and _hato_result.json", () => {

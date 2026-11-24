@@ -2,6 +2,7 @@ import {
   Activity,
   Bot,
   Brain,
+  ChevronRight,
   Compass,
   Database,
   History,
@@ -42,6 +43,7 @@ import {
 } from "@/components/agents/message";
 import { PromptInput } from "@/components/agents/prompt-input";
 import { ApiBadge, ConsoleSelect, SlotBadge } from "@/components/console/ConsolePrimitives";
+import { TicketInspectorDrawer } from "@/components/console/TicketInspectorDrawer";
 import { useDismiss } from "@/lib/hooks/use-dismiss";
 import { MarkdownContent } from "@/components/console/MarkdownContent";
 import { StaticsPanel } from "@/components/console/StaticsPanel";
@@ -196,6 +198,7 @@ export function ChatPanel({
   const [slashBusy, setSlashBusy] = useState(false);
   const [savingThinking, setSavingThinking] = useState(false);
   const [activeTickets, setActiveTickets] = useState<TicketSummary[]>([]);
+  const [inspectedTicketId, setInspectedTicketId] = useState<string | null>(null);
   const [liveTraces, setLiveTraces] = useState<LiveTraceSnapshot[]>([]);
   const [ticketActionBusy, setTicketActionBusy] = useState<string | null>(null);
   const prevActiveCountRef = useRef(0);
@@ -932,14 +935,18 @@ export function ChatPanel({
 
       <TabsContent value="chat" className="mt-0 flex min-h-0 min-w-0 flex-1 flex-col gap-0 overflow-hidden">
         {activeTickets.length > 0 && !readonlySession && (
-          <div className="shrink-0 border-b border-border/80 bg-muted/25 px-3 py-2 sm:px-6">
+          <div className="shrink-0 border-b border-border/80 bg-muted/20 px-3 py-2 sm:px-6">
             <div className="mx-auto flex max-w-3xl flex-col gap-1.5">
               {activeTickets.map((tk) => (
                 <div
                   key={tk.id}
-                  className="flex flex-wrap items-center justify-between gap-2 text-xs"
+                  className="group flex items-center justify-between gap-2 rounded-lg border border-border/65 bg-card/75 px-2.5 py-1.5 text-xs transition-colors hover:border-primary/35 hover:bg-accent/45"
                 >
-                  <div className="flex min-w-0 items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setInspectedTicketId(tk.id)}
+                    className="flex min-w-0 flex-1 cursor-pointer items-center gap-2 text-left focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-primary rounded"
+                  >
                     <AnimatedBadge
                       status={
                         tk.status === "awaiting_confirm" || tk.status === "needs_input"
@@ -958,34 +965,47 @@ export function ChatPanel({
                       {tk.backend}
                     </span>
                     {tk.progressNote && (
-                      <span className="truncate text-[11px] text-muted-foreground">
+                      <span className="truncate font-mono text-[11px] text-muted-foreground">
                         · {tk.progressNote}
                       </span>
                     )}
+                  </button>
+
+                  <div className="flex shrink-0 items-center gap-1.5">
+                    {tk.status === "awaiting_confirm" && (
+                      <>
+                        <Button
+                          type="button"
+                          size="sm"
+                          className="h-6 px-2 text-[11px]"
+                          disabled={ticketActionBusy === tk.id}
+                          onClick={() => void handleConfirmTicket(tk.id, true)}
+                        >
+                          允许执行
+                        </Button>
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="sm"
+                          className="h-6 px-2 text-[11px]"
+                          disabled={ticketActionBusy === tk.id}
+                          onClick={() => void handleConfirmTicket(tk.id, false)}
+                        >
+                          取消
+                        </Button>
+                      </>
+                    )}
+                    <button
+                      type="button"
+                      aria-label={`查看工单 ${tk.briefTitle} 实时输出`}
+                      onClick={() => setInspectedTicketId(tk.id)}
+                      className="inline-flex cursor-pointer items-center gap-1 rounded px-1.5 py-0.5 text-[11px] text-muted-foreground transition-colors group-hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-primary"
+                    >
+                      <Terminal className="size-3 text-primary" />
+                      <span className="hidden sm:inline">实时输出</span>
+                      <ChevronRight className="size-3.5" />
+                    </button>
                   </div>
-                  {tk.status === "awaiting_confirm" && (
-                    <div className="flex shrink-0 items-center gap-1.5">
-                      <Button
-                        type="button"
-                        size="sm"
-                        className="h-6 px-2 text-[11px]"
-                        disabled={ticketActionBusy === tk.id}
-                        onClick={() => void handleConfirmTicket(tk.id, true)}
-                      >
-                        允许执行
-                      </Button>
-                      <Button
-                        type="button"
-                        variant="ghost"
-                        size="sm"
-                        className="h-6 px-2 text-[11px]"
-                        disabled={ticketActionBusy === tk.id}
-                        onClick={() => void handleConfirmTicket(tk.id, false)}
-                      >
-                        取消
-                      </Button>
-                    </div>
-                  )}
                 </div>
               ))}
             </div>
@@ -1366,6 +1386,15 @@ export function ChatPanel({
           </div>
         </div>
       )}
+      <TicketInspectorDrawer
+        ticketId={inspectedTicketId}
+        activeTickets={activeTickets}
+        onSelectTicket={setInspectedTicketId}
+        onClose={() => setInspectedTicketId(null)}
+        onConfirmTicket={handleConfirmTicket}
+        onTicketMutated={() => syncTicketsAndHistory(null, true)}
+        onToast={onToast}
+      />
     </Tabs>
   );
 }

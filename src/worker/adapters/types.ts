@@ -1,3 +1,4 @@
+import type { WorkerActivityPatch } from "../activity-stream.js";
 import type { ExternalCliBackend } from "../cli-probe.js";
 import type { PreparedExternalCliOverlay } from "../overlay.js";
 
@@ -9,6 +10,7 @@ export interface ExternalCliStreamEvent {
   error?: string;
   permissionDenied?: string;
   done?: boolean;
+  activities?: WorkerActivityPatch[];
 }
 
 export interface ExternalCliAdapter {

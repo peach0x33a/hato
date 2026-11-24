@@ -16,6 +16,7 @@ import { codexCliAdapter } from "./adapters/codex-cli.js";
 import { externalPiCliAdapter } from "./adapters/external-pi.js";
 import { openCodeV2CliAdapter } from "./adapters/opencode-v2.js";
 import type { ExternalCliAdapter } from "./adapters/types.js";
+import { workerActivityHub } from "./activity-stream.js";
 import {
   verifyExternalCliBackend,
   type ExternalCliBackend,
@@ -284,11 +285,29 @@ export class ExternalCliRunner implements ExecutionRunner {
           });
 
     const spawnFn = this.deps.spawnProcess ?? spawn;
+    const workerCliRoot = resolve(dirname(hatoConfig.paths.workspaces_dir), "worker-cli");
+    const activityPersistDir = join(workerCliRoot, "activity");
     const streamLogPath = join(
-      resolve(dirname(hatoConfig.paths.workspaces_dir), "worker-cli", "logs"),
+      workerCliRoot,
+      "logs",
       `${ticket.ticketId.replace(/[^A-Za-z0-9._-]+/g, "_")}.jsonl`,
     );
     mkdirSync(dirname(streamLogPath), { recursive: true });
+
+    const runEpoch = Date.now();
+    workerActivityHub.upsert(
+      ticket.ticketId,
+      {
+        kind: "lifecycle",
+        state: "done",
+        title:
+          params.mode === "resume"
+            ? `继续执行 ${backend} 会话`
+            : `已启动 ${backend} Worker`,
+        text: `工作目录: ${mandate.workspace_dir}`,
+      },
+      { persistDir: activityPersistDir },
+    );
 
     logInfo(
       "WORKER",
@@ -347,6 +366,12 @@ export class ExternalCliRunner implements ExecutionRunner {
         callbacks?.onSessionId?.(ev.sessionId);
       }
 
+      if (ev.activities) {
+        for (const act of ev.activities) {
+          workerActivityHub.upsert(ticket.ticketId, act, { persistDir: activityPersistDir });
+        }
+      }
+
       if (ev.progressNote) {
         const now = Date.now();
         if (now - lastProgressAt >= PROGRESS_THROTTLE_MS) {
@@ -371,6 +396,29 @@ export class ExternalCliRunner implements ExecutionRunner {
       const strChunk = String(chunk).slice(0, MAX_BUFFER_CHARS - stderrChars);
       stderrChunks.push(strChunk);
       stderrChars += strChunk.length;
+
+      const filteredLines = strChunk
+        .split(/\r?\n/)
+        .filter(
+          (l) =>
+            l.trim().length > 0 &&
+            !l.includes("UNDICI-EHPA") &&
+            !l.includes("--trace-warnings"),
+        )
+        .join("\n");
+      if (filteredLines) {
+        workerActivityHub.upsert(
+          ticket.ticketId,
+          {
+            stepKey: `stderr_${runEpoch}`,
+            kind: "stderr",
+            state: "done",
+            title: "CLI 诊断输出",
+            appendOutput: `${filteredLines}\n`,
+          },
+          { persistDir: activityPersistDir },
+        );
+      }
     });
 
     let closeDrainTimer: ReturnType<typeof setTimeout> | null = null;
@@ -410,6 +458,15 @@ export class ExternalCliRunner implements ExecutionRunner {
 
     const aborted = this.abortedTickets.delete(ticket.ticketId);
     if (aborted && !timedOut) {
+      workerActivityHub.upsert(
+        ticket.ticketId,
+        {
+          kind: "lifecycle",
+          state: "error",
+          title: "任务已手动中止",
+        },
+        { persistDir: activityPersistDir, flushImmediate: true },
+      );
       return {
         ticket_id: ticket.ticketId,
         status: "failed",
@@ -431,7 +488,7 @@ export class ExternalCliRunner implements ExecutionRunner {
       );
     }
 
-    return normalizeExternalCliResult({
+    const normalized = normalizeExternalCliResult({
       ticketId: ticket.ticketId,
       workspaceDir: mandate.workspace_dir,
       isHostRepo: mandate.is_host_repo,
@@ -444,6 +501,26 @@ export class ExternalCliRunner implements ExecutionRunner {
       permissionDeniedReason,
       timedOut,
     });
+
+    workerActivityHub.upsert(
+      ticket.ticketId,
+      {
+        kind: "lifecycle",
+        state: normalized.status === "failed" ? "error" : "done",
+        title:
+          normalized.status === "done"
+            ? "Worker 执行完成"
+            : normalized.status === "needs_input"
+              ? "等待补充信息"
+              : normalized.status === "awaiting_confirm"
+                ? "等待高危操作确认"
+                : "Worker 执行失败",
+        ...(normalized.narration_hint ? { text: normalized.narration_hint } : {}),
+      },
+      { persistDir: activityPersistDir, flushImmediate: true },
+    );
+
+    return normalized;
   }
 
   private async checkBackendCapabilitiesGate(

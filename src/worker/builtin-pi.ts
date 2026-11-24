@@ -1,7 +1,7 @@
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, realpathSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { basename, dirname, resolve, sep } from "node:path";
+import { basename, dirname, join, resolve, sep } from "node:path";
 import { promisify } from "node:util";
 import { Agent, type AgentMessage, type AgentTool } from "@earendil-works/pi-agent-core";
 import { type AssistantMessage, type Message, type TextContent } from "@earendil-works/pi-ai";
@@ -29,6 +29,7 @@ import {
   IMAGE_EXTENSIONS,
   snapshotWorkspaceFiles,
 } from "./result-normalizer.js";
+import { workerActivityHub } from "./activity-stream.js";
 import type {
   ExecutionProgressCallback,
   ExecutionRunner,
@@ -521,6 +522,24 @@ export class BuiltinPiRunner implements ExecutionRunner {
       },
     });
 
+    const activityPersistDir = join(
+      resolve(dirname(hatoConfig.paths.workspaces_dir), "worker-cli"),
+      "activity",
+    );
+    const runEpoch = Date.now();
+    let assistantTurnIdx = 0;
+
+    workerActivityHub.upsert(
+      ticket.ticketId,
+      {
+        kind: "lifecycle",
+        state: "done",
+        title: "已启动内置沙箱 Worker",
+        text: `工作目录: ${mandate.workspace_dir}`,
+      },
+      { persistDir: activityPersistDir },
+    );
+
     const liveTraceId = `live_worker_${ticket.ticketId}`;
     this.deps.liveTraceTracker?.start({
       id: liveTraceId,
@@ -551,6 +570,7 @@ export class BuiltinPiRunner implements ExecutionRunner {
       if (ev.type === "message_start" && ev.message.role === "assistant") {
         msgStartPerf = state.activeCallStartPerf ?? performance.now();
         msgFirstDeltaPerf = null;
+        assistantTurnIdx += 1;
         return;
       }
 
@@ -563,22 +583,88 @@ export class BuiltinPiRunner implements ExecutionRunner {
         ) {
           msgFirstDeltaPerf = performance.now();
         }
+        if (sub.type === "text_delta" && sub.delta.length > 0) {
+          workerActivityHub.upsert(
+            ticket.ticketId,
+            {
+              stepKey: `pi_assistant_${runEpoch}_${assistantTurnIdx}`,
+              kind: "assistant",
+              state: "running",
+              title: "Worker 进展",
+              appendText: sub.delta,
+            },
+            { persistDir: activityPersistDir },
+          );
+        }
         return;
       }
 
       if (ev.type === "tool_execution_start") {
-        const note = `正在执行: ${ev.toolName}`;
+        const anyEv = ev as { toolName: string; toolCallId?: string; args?: Record<string, unknown> };
+        const isCmd = anyEv.toolName === "run_command";
+        const cmdPreview =
+          isCmd && typeof anyEv.args?.command === "string"
+            ? anyEv.args.command.slice(0, 72)
+            : undefined;
+        const note = cmdPreview ? `正在执行: ${cmdPreview}` : `正在执行: ${ev.toolName}`;
         callbacks?.onProgress?.(note);
         syncLiveTrace(note);
+        if (!isCmd) {
+          const targetPath =
+            typeof anyEv.args?.path === "string" ? anyEv.args.path : undefined;
+          workerActivityHub.upsert(
+            ticket.ticketId,
+            {
+              stepKey: anyEv.toolCallId ? `pi_tool_${anyEv.toolCallId}` : undefined,
+              kind: "tool",
+              state: "running",
+              title: targetPath ? `${ev.toolName} · ${targetPath}` : `调用工具 · ${ev.toolName}`,
+            },
+            { persistDir: activityPersistDir },
+          );
+        }
         return;
       }
 
       if (ev.type === "tool_execution_end") {
+        const anyEv = ev as {
+          toolName: string;
+          toolCallId?: string;
+          isError?: boolean;
+          result?: { content?: Array<{ type?: string; text?: string }> };
+        };
+        if (anyEv.toolName !== "run_command" && anyEv.toolCallId) {
+          const outPreview = anyEv.result?.content
+            ?.map((c) => (typeof c?.text === "string" ? c.text : ""))
+            .filter(Boolean)
+            .join("\n");
+          workerActivityHub.upsert(
+            ticket.ticketId,
+            {
+              stepKey: `pi_tool_${anyEv.toolCallId}`,
+              kind: "tool",
+              state: anyEv.isError ? "error" : "done",
+              ...(outPreview && anyEv.toolName !== "read_task_context"
+                ? { output: outPreview.slice(0, 2000) }
+                : {}),
+            },
+            { persistDir: activityPersistDir },
+          );
+        }
         syncLiveTrace();
         return;
       }
 
       if (ev.type === "message_end" && ev.message.role === "assistant") {
+        workerActivityHub.upsert(
+          ticket.ticketId,
+          {
+            stepKey: `pi_assistant_${runEpoch}_${assistantTurnIdx}`,
+            kind: "assistant",
+            state: "done",
+          },
+          { persistDir: activityPersistDir },
+        );
         const msg = ev.message;
         if (msg.stopReason === "aborted" && outcome.result) {
           state.activeCallStartPerf = null;
@@ -653,15 +739,40 @@ export class BuiltinPiRunner implements ExecutionRunner {
       this.deps.liveTraceTracker?.finish(liveTraceId);
     }
 
-    return this.finalizeOutcome(ticket.ticketId, outcome.result, state.agent.state.messages, {
-      workspaceDir: mandate.workspace_dir,
-      workspaceMode: mandate.workspace_mode,
-      beforeFilesSnapshot,
-      timedOut,
-      promptError,
-      agentErrorMessage: state.agent.state.errorMessage,
-      modelMeta: state.modelMeta,
-    });
+    const finalRes = this.finalizeOutcome(
+      ticket.ticketId,
+      outcome.result,
+      state.agent.state.messages,
+      {
+        workspaceDir: mandate.workspace_dir,
+        workspaceMode: mandate.workspace_mode,
+        beforeFilesSnapshot,
+        timedOut,
+        promptError,
+        agentErrorMessage: state.agent.state.errorMessage,
+        modelMeta: state.modelMeta,
+      },
+    );
+
+    workerActivityHub.upsert(
+      ticket.ticketId,
+      {
+        kind: "lifecycle",
+        state: finalRes.status === "failed" ? "error" : "done",
+        title:
+          finalRes.status === "done"
+            ? "Worker 执行完成"
+            : finalRes.status === "needs_input"
+              ? "等待补充信息"
+              : finalRes.status === "awaiting_confirm"
+                ? "等待高危操作确认"
+                : "Worker 执行失败",
+        ...(finalRes.narration_hint ? { text: finalRes.narration_hint } : {}),
+      },
+      { persistDir: activityPersistDir, flushImmediate: true },
+    );
+
+    return finalRes;
   }
 
   async abort(ticketId: string): Promise<void> {
@@ -934,26 +1045,180 @@ export class BuiltinPiRunner implements ExecutionRunner {
           ? "Execute a shell command in the VM working directory with real HOME and PATH."
           : "Execute a shell command inside the ticket workspace.",
         parameters: RunCommandParams,
-        execute: async (_id, input) => {
+        execute: async (callId, input) => {
           if (isCommandReferencingProtectedEnv(input.command, workspaceRoot)) {
             throw new Error("安全策略禁止通过命令读取或修改 Hato 的 .env 密钥文件");
           }
           const proxyEnv =
             mandate.network === "egress" ? this.deps.proxyRouter.getWorkerProxyEnv() : {};
-          try {
-            const { stdout, stderr } = await execFileAsync("sh", ["-lc", input.command], {
+          const activityPersistDir = join(
+            resolve(dirname(params.hatoConfig.paths.workspaces_dir), "worker-cli"),
+            "activity",
+          );
+          const stepKey = `pi_cmd_${callId || Date.now()}`;
+          const cmdStartedAt = Date.now();
+          const cmdTimeoutMs = isVmUnrestricted
+            ? mandate.timeout_ms
+            : Math.min(mandate.timeout_ms, 60_000);
+          const maxBytes = 512 * 1024;
+
+          workerActivityHub.upsert(
+            params.ticket.ticketId,
+            {
+              stepKey,
+              kind: "command",
+              state: "running",
+              title: "执行命令",
+              command: input.command,
+            },
+            { persistDir: activityPersistDir },
+          );
+
+          const execOut = await new Promise<{
+            code: number | null;
+            stdout: string;
+            stderr: string;
+            killedByTimeout: boolean;
+            spawnError?: string;
+          }>((resolveCmd) => {
+            const child = spawn("sh", ["-lc", input.command], {
               cwd: workspaceRoot,
-              timeout: isVmUnrestricted ? mandate.timeout_ms : Math.min(mandate.timeout_ms, 60_000),
-              maxBuffer: 512 * 1024,
               env: {
                 PATH: process.env.PATH ?? "/usr/bin:/bin",
                 HOME: isVmUnrestricted ? homedir() : workspaceRoot,
                 ...proxyEnv,
               },
+              stdio: ["ignore", "pipe", "pipe"],
             });
-            const combined = [stdout.trim(), stderr.trim() ? `[stderr]\n${stderr.trim()}` : ""]
-              .filter(Boolean)
-              .join("\n");
+
+            let stdoutBuf = "";
+            let stderrBuf = "";
+            let totalBytes = 0;
+            let killedByTimeout = false;
+            let flushTimer: ReturnType<typeof setTimeout> | null = null;
+            let killTimer: ReturnType<typeof setTimeout> | null = null;
+            let drainTimer: ReturnType<typeof setTimeout> | null = null;
+            let settled = false;
+
+            const buildDisplayOutput = () =>
+              [stdoutBuf.trimEnd(), stderrBuf.trimEnd() ? `[stderr]\n${stderrBuf.trimEnd()}` : ""]
+                .filter(Boolean)
+                .join("\n");
+
+            const scheduleStreamPush = () => {
+              if (flushTimer) return;
+              flushTimer = setTimeout(() => {
+                flushTimer = null;
+                workerActivityHub.upsert(
+                  params.ticket.ticketId,
+                  {
+                    stepKey,
+                    kind: "command",
+                    state: "running",
+                    output: buildDisplayOutput(),
+                  },
+                  { persistDir: activityPersistDir },
+                );
+              }, 120);
+              flushTimer.unref();
+            };
+
+            const finishCmd = (res: {
+              code: number | null;
+              killedByTimeout: boolean;
+              spawnError?: string;
+            }) => {
+              if (settled) return;
+              settled = true;
+              if (flushTimer) clearTimeout(flushTimer);
+              if (timeoutHandle) clearTimeout(timeoutHandle);
+              if (killTimer) clearTimeout(killTimer);
+              if (drainTimer) clearTimeout(drainTimer);
+              resolveCmd({
+                code: res.code,
+                stdout: stdoutBuf,
+                stderr: stderrBuf,
+                killedByTimeout: res.killedByTimeout,
+                spawnError: res.spawnError,
+              });
+            };
+
+            const timeoutHandle = setTimeout(() => {
+              killedByTimeout = true;
+              child.kill("SIGTERM");
+              killTimer = setTimeout(() => {
+                if (!child.killed && child.exitCode === null) {
+                  child.kill("SIGKILL");
+                }
+                child.stdout?.destroy();
+                child.stderr?.destroy();
+              }, 2000);
+              killTimer.unref();
+            }, cmdTimeoutMs);
+            timeoutHandle.unref();
+
+            child.stdout?.on("data", (chunk: Buffer | string) => {
+              const s = String(chunk);
+              if (totalBytes < maxBytes) {
+                const slice = s.slice(0, maxBytes - totalBytes);
+                stdoutBuf += slice;
+                totalBytes += slice.length;
+                scheduleStreamPush();
+              }
+            });
+
+            child.stderr?.on("data", (chunk: Buffer | string) => {
+              const s = String(chunk);
+              if (totalBytes < maxBytes) {
+                const slice = s.slice(0, maxBytes - totalBytes);
+                stderrBuf += slice;
+                totalBytes += slice.length;
+                scheduleStreamPush();
+              }
+            });
+
+            child.once("error", (err) => {
+              finishCmd({
+                code: 1,
+                killedByTimeout: false,
+                spawnError: err instanceof Error ? err.message : String(err),
+              });
+            });
+
+            child.once("exit", (code) => {
+              drainTimer = setTimeout(() => {
+                child.stdout?.destroy();
+                child.stderr?.destroy();
+                finishCmd({ code, killedByTimeout });
+              }, 800);
+              drainTimer.unref();
+            });
+
+            child.once("close", (code) => {
+              finishCmd({ code, killedByTimeout });
+            });
+          });
+
+          const durationMs = Math.max(1, Date.now() - cmdStartedAt);
+          const outText = execOut.stdout.trim();
+          const errText = execOut.stderr.trim();
+          const combined = [outText, errText ? `[stderr]\n${errText}` : ""]
+            .filter(Boolean)
+            .join("\n");
+
+          if (execOut.code === 0 && !execOut.killedByTimeout && !execOut.spawnError) {
+            workerActivityHub.upsert(
+              params.ticket.ticketId,
+              {
+                stepKey,
+                kind: "command",
+                state: "done",
+                exitCode: 0,
+                durationMs,
+                output: combined || "(无输出)",
+              },
+              { persistDir: activityPersistDir },
+            );
             return {
               content: [
                 {
@@ -963,29 +1228,36 @@ export class BuiltinPiRunner implements ExecutionRunner {
               ],
               details: { ok: true },
             };
-          } catch (err) {
-            const execErr = err as {
-              code?: number | string;
-              stdout?: string;
-              stderr?: string;
-              message?: string;
-              killed?: boolean;
-            };
-            const outText = typeof execErr.stdout === "string" ? execErr.stdout.trim() : "";
-            const errText = typeof execErr.stderr === "string" ? execErr.stderr.trim() : "";
-            const detail = [
-              execErr.killed
-                ? "Command timed out."
-                : `Command failed (exit=${execErr.code ?? "unknown"}).`,
-              outText ? `[stdout]\n${truncateHeadTail(outText, 10_000)}` : "",
-              errText ? `[stderr]\n${truncateHeadTail(errText, 12_000)}` : "",
-              !outText && !errText && execErr.message ? execErr.message : "",
-              "Inspect the error above and adjust the command or files before retrying.",
-            ]
-              .filter(Boolean)
-              .join("\n");
-            throw new Error(detail);
           }
+
+          workerActivityHub.upsert(
+            params.ticket.ticketId,
+            {
+              stepKey,
+              kind: "command",
+              state: "error",
+              exitCode: execOut.code,
+              durationMs,
+              output:
+                combined ||
+                execOut.spawnError ||
+                (execOut.killedByTimeout ? "Command timed out." : `exit=${String(execOut.code)}`),
+            },
+            { persistDir: activityPersistDir },
+          );
+
+          const detail = [
+            execOut.killedByTimeout
+              ? "Command timed out."
+              : `Command failed (exit=${execOut.code ?? "unknown"}).`,
+            outText ? `[stdout]\n${truncateHeadTail(outText, 10_000)}` : "",
+            errText ? `[stderr]\n${truncateHeadTail(errText, 12_000)}` : "",
+            !outText && !errText && execOut.spawnError ? execOut.spawnError : "",
+            "Inspect the error above and adjust the command or files before retrying.",
+          ]
+            .filter(Boolean)
+            .join("\n");
+          throw new Error(detail);
         },
       },
       {
