@@ -83,6 +83,10 @@ import {
 import { WebConsoleServer } from "./web-console/server.js";
 import { WorkerDispatcher } from "./worker/backend.js";
 import { BuiltinPiRunner } from "./worker/builtin-pi.js";
+import {
+  getCachedExternalCliAvailability,
+  warmExternalCliCapabilities,
+} from "./worker/cli-probe.js";
 import { ExternalCliRunner } from "./worker/external-cli.js";
 import { resolveBackendCommand } from "./worker/overlay.js";
 
@@ -155,10 +159,16 @@ async function main(): Promise<void> {
       return backends.filter((backend) => {
         if (backend === "builtin-pi") return true;
         const cmd = resolveBackendCommand(backend, cfg);
-        return cmd.includes("/") ? existsSync(cmd) : Bun.which(cmd, { PATH: searchPath }) !== null;
+        const exists = cmd.includes("/")
+          ? existsSync(cmd)
+          : Bun.which(cmd, { PATH: searchPath }) !== null;
+        if (!exists) return false;
+        const cachedCap = getCachedExternalCliAvailability(backend, cmd);
+        return cachedCap ? cachedCap.available : true;
       });
     },
   });
+  void warmExternalCliCapabilities(hatoConfig);
   const builtinRunner = new BuiltinPiRunner({
     getHatoConfig: () => hatoConfig,
     modelRegistry,
@@ -722,6 +732,7 @@ async function main(): Promise<void> {
     modelRegistry.reload();
     proxyRouter.reload(nextConfig.network?.proxies ?? []);
     hatoConfig = nextConfig;
+    void warmExternalCliCapabilities(nextConfig);
     debouncer.updateDelay(nextConfig.gateway.debounce_ms);
     compactionManager.updateConfig(buildCompactionConfig(nextConfig));
     memoryStore = buildMemoryStore(nextConfig, proxyRouter, repo, memoryStore);

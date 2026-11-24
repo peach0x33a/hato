@@ -28,6 +28,8 @@ test("prepareExternalCliOverlay inherits host relay/auth while isolating persona
 
   try {
     mkdirSync(join(fakeHome, ".codex"), { recursive: true });
+    mkdirSync(join(fakeHome, ".gemini", "antigravity-cli"), { recursive: true });
+    mkdirSync(join(fakeHome, ".gemini", "config"), { recursive: true });
     mkdirSync(join(fakeHome, ".config", "opencode"), { recursive: true });
     mkdirSync(ticketWorkspace, { recursive: true });
     mkdirSync(hostRepoDir, { recursive: true });
@@ -62,6 +64,26 @@ args = ["-y", "@upstash/context7-mcp"]
 `;
     writeFileSync(join(fakeHome, ".codex", "config.toml"), origCodexToml, "utf8");
     writeFileSync(join(fakeHome, ".codex", "auth.json"), '{"token":"host-oauth"}\n', "utf8");
+    writeFileSync(
+      join(fakeHome, ".gemini", "antigravity-cli", "settings.json"),
+      JSON.stringify({ agentMode: "auto", model: "gemini-4-carbon-medium" }),
+      "utf8",
+    );
+    writeFileSync(
+      join(fakeHome, ".gemini", "config", "mcp_config.json"),
+      JSON.stringify({
+        mcpServers: {
+          personal_calendar: { command: "npx", args: ["-y", "personal-cal"] },
+          context7: { command: "npx", args: ["-y", "@upstash/context7-mcp"] },
+        },
+      }),
+      "utf8",
+    );
+    writeFileSync(
+      join(fakeHome, ".gemini", "config", "GEMINI.md"),
+      "Personal global rule that should not leak",
+      "utf8",
+    );
 
     writeFileSync(
       join(fakeHome, ".config", "opencode", "opencode.json"),
@@ -192,7 +214,68 @@ args = ["-y", "@upstash/context7-mcp"]
     assert.ok(agyOverlay.extraArgs.includes("--add-dir"));
     assert.deepEqual(agyOverlay.modeArgs, ["--mode", "auto", "--dangerously-skip-permissions"]);
 
-    // 3. opencode-v2 overlay: enforces --standalone and OPENCODE_CONFIG isolation
+    assert.notEqual(agyOverlay.env.HOME, fakeHome);
+    const shadowAgyCliDir = join(agyOverlay.env.HOME!, ".gemini", "antigravity-cli");
+    assert.equal(lstatSync(shadowAgyCliDir).isSymbolicLink(), true);
+    assert.equal(readlinkSync(shadowAgyCliDir), join(fakeHome, ".gemini", "antigravity-cli"));
+    assert.equal(
+      existsSync(join(agyOverlay.env.HOME!, ".gemini", "config", "GEMINI.md")),
+      false,
+    );
+
+    const shadowAgyMcp = JSON.parse(
+      readFileSync(join(agyOverlay.env.HOME!, ".gemini", "config", "mcp_config.json"), "utf8"),
+    ) as Record<string, any>;
+    assert.ok(shadowAgyMcp.mcpServers.hato_context);
+    assert.equal(shadowAgyMcp.mcpServers.hato_context.env.HATO_CTX_TOKEN, "ctx_tok_1");
+    assert.ok(shadowAgyMcp.mcpServers.worker_gh);
+    assert.equal(shadowAgyMcp.mcpServers.worker_gh.env.GH_TOKEN, "worker-mcp-secret-xyz");
+    assert.ok(shadowAgyMcp.mcpServers.context7);
+    assert.equal("personal_calendar" in shadowAgyMcp.mcpServers, false);
+    assert.equal("personal_weather" in shadowAgyMcp.mcpServers, false);
+
+    const shadowSkillsManifest = JSON.parse(
+      readFileSync(join(agyOverlay.env.HOME!, ".gemini", "config", "skills.json"), "utf8"),
+    ) as Record<string, any>;
+    assert.equal(shadowSkillsManifest.entries[0].path, agyOverlay.stagedSkillsDir);
+
+    const settingsFlagIdx = agyOverlay.extraArgs.indexOf("--settings");
+    const agySessionSettings = JSON.parse(
+      readFileSync(agyOverlay.extraArgs[settingsFlagIdx + 1]!, "utf8"),
+    ) as Record<string, any>;
+    assert.equal(agySessionSettings.toolPermission, "always-proceed");
+    assert.equal(agySessionSettings.artifactReviewPolicy, "always-proceed");
+    assert.equal(agySessionSettings.notifications, false);
+    assert.ok(agySessionSettings.trustedWorkspaces.includes(hostRepoDir));
+
+    // In plan mode, --disable-slash-commands must be omitted so `agy --mode plan` takes effect
+    const planCfg = structuredClone(hatoConfig);
+    planCfg.worker.external_cli.antigravity_cli = {
+      enabled: true,
+      mode: "plan",
+      skip_permissions: false,
+      sandbox: true,
+    };
+    const agyPlanOverlay = prepareExternalCliOverlay({
+      backend: "antigravity-cli",
+      ticketId: "t_0002_plan",
+      workspaceDir: hostRepoDir,
+      isHostRepo: true,
+      hatoConfig: planCfg,
+      mcpConfig,
+      allowedMcpServers: [],
+      selectedSkills: [],
+      hostHomeDir: fakeHome,
+      runtimeRootDir: runtimeRoot,
+      baseEnv,
+    });
+    assert.equal(agyPlanOverlay.extraArgs.includes("--disable-slash-commands"), false);
+
+    // 3. opencode-v2 overlay: enforces --standalone, OPENCODE_CONFIG isolation, and host model#effort
+    hatoConfig.worker.external_cli.opencode_v2 = {
+      enabled: true,
+      effort: "high",
+    };
     const ocOverlay = prepareExternalCliOverlay({
       backend: "opencode-v2",
       ticketId: "t_0003",
@@ -214,7 +297,7 @@ args = ["-y", "@upstash/context7-mcp"]
       string,
       any
     >;
-    assert.equal(ocJson.model, "my_relay/sonnet");
+    assert.equal(ocJson.model, "my_relay/sonnet#high");
     assert.ok(ocJson.mcp.hato_context);
     assert.ok(ocJson.mcp.worker_gh);
     assert.equal("personal_notes" in ocJson.mcp, false);

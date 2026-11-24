@@ -287,23 +287,28 @@ enabled = true
 # 留空时跟随 permission_preset 自动映射；手动设置时覆盖 preset（枚举由 CLI 动态探测）
 # sandbox = "workspace-write"       # read-only | workspace-write | danger-full-access
 # approval = "approve-for-me"       # host | approve-for-me | bypass
+# effort = "high"                   # 动态读取: low | medium | high | xhigh | max | ultra
 
 [worker.external_cli.antigravity_cli]
 enabled = true
 # mode = "auto"                     # 动态读取: accept-edits | auto | plan
 # skip_permissions = false
 # sandbox = true
+# effort = "medium"                 # 动态读取: low | medium | high | xhigh | max
 
 [worker.external_cli.opencode_v2]
 enabled = true                      # 仅支持 OpenCode V2（裸 opencode v1 不支持；需通过 v2 版本校验）
 # auto = true
 # agent = ""
+# effort = "high"                   # 自动拼接 provider/model#<effort>
 
 [worker.external_cli.external_pi]
 enabled = false                     # 第二梯队（单独安装的 pi CLI）
+# effort = "medium"                 # --thinking <level>
 
 [worker.external_cli.claude_code]
 enabled = false                     # 第三梯队（后续接入）
+# effort = "high"                   # 动态读取: low | medium | high | xhigh | max
 ```
 
 ### 4.1 作用域代理（Scoped Proxy）与聊天平台 `base_url`
@@ -554,7 +559,7 @@ Hato 在业务层定义统一的 `MemoryStore` 接口，支持 **MemoryEcho（�
 | 梯队 | 后端 | Headless 流式启动 | 会话续跑 | 本机配置继承与隔离覆写（Overlay） |
 |---|---|---|---|---|
 | **Tier 1** | **`codex-cli`** | `codex exec --json` | `codex exec resume <thread_id>` | 影子 `CODEX_HOME`：软链 `~/.codex/auth.json`，读取 `~/.codex/config.toml` 保留 `[model_providers.*]` 与模型配置，剔除个人 `[mcp_servers.*]` 后写入 `hato_context` 与授权 Worker MCP |
-| **Tier 1** | **`antigravity-cli`** | `agy -p "<prompt>" --output-format stream-json --json-schema <schema> --disable-slash-commands` | `agy --conversation <id> -p "<reply>"` | 继承 `~/.gemini/` 认证与模型设置；通过 `--settings <ticket_settings.json>` 临时会话覆写；后续可按需切换 `agy acp`（支持 `--gemini-dir` / `--app-data-dir` 彻底隔离） |
+| **Tier 1** | **`antigravity-cli`** | `agy -p="<prompt>" --output-format stream-json --json-schema <schema> --settings <ticket_settings.json>` | `agy --conversation <id> -p="<reply>"` | 影子 `HOME` 软链继承 `~/.gemini/antigravity-cli`（及 Keychain 认证），隔离重建 `.gemini/config/mcp_config.json`（与 `skills.json`）剥离个人 MCP/Skills，并通过 `--settings` 注入会话级 `trustedWorkspaces` / `toolPermission` |
 | **Tier 1** | **`opencode-v2`** | `opencode run --standalone --format json`（**强制校验 OpenCode V2**，裸 `opencode` v1 标记为不支持） | `opencode run --standalone -s <session_id>` | **强制 `--standalone`** 隔离后台共享 service；继承本机 auth/provider，覆写隔离个人 MCP 与 Skills；后续亦支持 `opencode acp` |
 | **Tier 2** | **`external-pi`** | 独立安装的 `pi` CLI（JSON/RPC 模式） | 按 `session` 参数续跑 | 预留同构 `ExternalCliAdapter` 槽位，独立于 Hato 内置 `pi-agent-core` |
 | **Tier 3** | **`claude-code`** | `claude -p "<prompt>" --output-format stream-json --strict-mcp-config --mcp-config <ticket_mcp.json>` | `claude -p "<reply>" --resume <session_id>` | 继承本机认证与 `settings.json` 中转环境；`--strict-mcp-config` 锁死仅加载工单 MCP，必要时辅以影子 `CLAUDE_CONFIG_DIR` |

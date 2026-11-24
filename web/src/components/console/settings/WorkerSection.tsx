@@ -404,11 +404,23 @@ export function WorkerSection({
                       opt.key,
                       backendCfg,
                     );
+                    const followLabel =
+                      opt.key === "effort"
+                        ? typeof opt.hostDefault === "string" && opt.hostDefault
+                          ? `跟随本机 (${opt.hostDefault})`
+                          : "跟随本机"
+                        : "跟随全局";
+                    const followIcon =
+                      opt.key === "effort" ? (
+                        <Laptop className="size-3.5 text-muted-foreground" />
+                      ) : (
+                        <Layers className="size-3.5 text-muted-foreground" />
+                      );
                     const selectOptions = [
                       {
                         value: FOLLOW_PRESET_VALUE,
-                        label: "跟随全局",
-                        icon: <Layers className="size-3.5 text-muted-foreground" />,
+                        label: followLabel,
+                        icon: followIcon,
                       },
                       ...(opt.choices ?? []).map((c) => ({
                         value: c,

@@ -16,8 +16,15 @@ import { codexCliAdapter } from "./adapters/codex-cli.js";
 import { externalPiCliAdapter } from "./adapters/external-pi.js";
 import { openCodeV2CliAdapter } from "./adapters/opencode-v2.js";
 import type { ExternalCliAdapter } from "./adapters/types.js";
-import { probeAllExternalClis, type ExternalCliBackend } from "./cli-probe.js";
-import { prepareExternalCliOverlay, type ContextMcpSpec } from "./overlay.js";
+import {
+  verifyExternalCliBackend,
+  type ExternalCliBackend,
+} from "./cli-probe.js";
+import {
+  prepareExternalCliOverlay,
+  resolveBackendCommand,
+  type ContextMcpSpec,
+} from "./overlay.js";
 import {
   normalizeExternalCliResult,
   snapshotWorkspaceFiles,
@@ -34,6 +41,10 @@ export interface ExternalCliRunnerDeps {
   proxyRouter: ScopedProxyRouter;
   spawnProcess?: typeof spawn;
   verifyOpenCodeV2?: (command: string) => Promise<{ ok: boolean; reason?: string }>;
+  verifyBackendCapabilities?: (
+    backend: ExternalCliBackend,
+    command: string,
+  ) => Promise<{ ok: boolean; reason?: string }>;
 }
 
 const ADAPTERS: Record<ExternalCliBackend, ExternalCliAdapter> = {
@@ -191,19 +202,19 @@ export class ExternalCliRunner implements ExecutionRunner {
       };
     }
 
-    if (backend === "opencode-v2") {
-      const check = await this.checkOpenCodeV2Gate(hatoConfig);
-      if (!check.ok) {
-        return {
-          ticket_id: ticket.ticketId,
-          status: "failed",
-          narration_hint: check.reason || "OpenCode V2 版本校验未通过，裸 opencode 不受支持。",
-          verbatim_blocks: [],
-          artifacts: [],
-          required_secrets: [],
-          caveats: [check.reason || "OpenCode V2 check failed"],
-        };
-      }
+    const capCheck = await this.checkBackendCapabilitiesGate(backend, hatoConfig);
+    if (!capCheck.ok) {
+      const reason =
+        capCheck.reason || `外部 CLI 后端 "${backend}" 未通过基础能力或版本兼容性校验。`;
+      return {
+        ticket_id: ticket.ticketId,
+        status: "failed",
+        narration_hint: reason,
+        verbatim_blocks: [],
+        artifacts: [],
+        required_secrets: [],
+        caveats: [reason],
+      };
     }
 
     const isVmUnrestricted = mandate.execution_mode === "vm_unrestricted";
@@ -214,7 +225,9 @@ export class ExternalCliRunner implements ExecutionRunner {
 
     const selectedSkills = selectWorkerSkills(resolveSkillsDir(hatoConfig), mandate.skills);
     const workerProxyEnv =
-      mandate.network === "egress" ? this.deps.proxyRouter.getWorkerProxyEnv() : {};
+      mandate.network === "egress"
+        ? this.deps.proxyRouter.getWorkerProxyEnv("worker")
+        : this.deps.proxyRouter.getWorkerProxyEnv("llm-calling");
 
     const contextMcp = buildContextMcpSpec({
       hatoConfig,
@@ -313,6 +326,8 @@ export class ExternalCliRunner implements ExecutionRunner {
         if (!child.killed && child.exitCode === null) {
           child.kill("SIGKILL");
         }
+        child.stdout?.destroy();
+        child.stderr?.destroy();
       }, 3000);
       killFallbackTimer.unref();
     }, mandate.timeout_ms);
@@ -358,16 +373,32 @@ export class ExternalCliRunner implements ExecutionRunner {
       stderrChars += strChunk.length;
     });
 
+    let closeDrainTimer: ReturnType<typeof setTimeout> | null = null;
     const { exitCode, signal } = await new Promise<{
       exitCode: number | null;
       signal: NodeJS.Signals | null;
     }>((resolveExit) => {
+      let settled = false;
+      const finish = (res: { exitCode: number | null; signal: NodeJS.Signals | null }) => {
+        if (settled) return;
+        settled = true;
+        if (closeDrainTimer) clearTimeout(closeDrainTimer);
+        resolveExit(res);
+      };
       child.once("error", (err) => {
         structuredError = summarizeError(err);
-        resolveExit({ exitCode: 1, signal: null });
+        finish({ exitCode: 1, signal: null });
+      });
+      child.once("exit", (code, sig) => {
+        closeDrainTimer = setTimeout(() => {
+          child.stdout?.destroy();
+          child.stderr?.destroy();
+          finish({ exitCode: code, signal: sig });
+        }, 1500);
+        closeDrainTimer.unref();
       });
       child.once("close", (code, sig) => {
-        resolveExit({ exitCode: code, signal: sig });
+        finish({ exitCode: code, signal: sig });
       });
     });
 
@@ -415,22 +446,21 @@ export class ExternalCliRunner implements ExecutionRunner {
     });
   }
 
-  private async checkOpenCodeV2Gate(
+  private async checkBackendCapabilitiesGate(
+    backend: ExternalCliBackend,
     config: HatoConfig,
   ): Promise<{ ok: boolean; reason?: string }> {
-    const command = config.worker.external_cli.opencode_v2?.command?.trim() || "opencode";
-    if (this.deps.verifyOpenCodeV2) {
+    const command = resolveBackendCommand(backend, config);
+    if (this.deps.verifyBackendCapabilities) {
+      return this.deps.verifyBackendCapabilities(backend, command);
+    }
+    if (backend === "opencode-v2" && this.deps.verifyOpenCodeV2) {
       return this.deps.verifyOpenCodeV2(command);
     }
-    const probes = await probeAllExternalClis(config);
-    const oc = probes.find((p) => p.backend === "opencode-v2");
-    if (!oc || !oc.available || !oc.v2Verified) {
-      return {
-        ok: false,
-        reason: oc?.reason || "OpenCode V2 未通过校验（裸 opencode v1 不受支持）。",
-      };
+    if (this.deps.spawnProcess) {
+      return { ok: true };
     }
-    return { ok: true };
+    return verifyExternalCliBackend(backend, config);
   }
 }
 

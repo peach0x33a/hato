@@ -303,6 +303,7 @@ export interface HatoConfig {
         command?: string;
         sandbox?: string;
         approval?: string;
+        effort?: string;
         model?: string;
       };
       antigravity_cli?: {
@@ -311,6 +312,7 @@ export interface HatoConfig {
         mode?: string;
         skip_permissions?: boolean;
         sandbox?: boolean;
+        effort?: string;
         model?: string;
       };
       opencode_v2?: {
@@ -319,11 +321,13 @@ export interface HatoConfig {
         permission_mode?: string;
         auto?: boolean;
         agent?: string;
+        effort?: string;
         model?: string;
       };
       external_pi?: {
         enabled?: boolean;
         command?: string;
+        effort?: string;
         model?: string;
       };
       claude_code?: {
@@ -331,6 +335,7 @@ export interface HatoConfig {
         command?: string;
         permission_mode?: string;
         skip_permissions?: boolean;
+        effort?: string;
         model?: string;
       };
     };

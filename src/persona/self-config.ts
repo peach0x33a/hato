@@ -384,26 +384,31 @@ export async function runSelfConfigAction(
           "codex-cli": {
             enabled: isWorkerBackendEnabled(cfg, "codex-cli"),
             command: cfg.worker.external_cli.codex_cli?.command ?? "codex",
+            effort: cfg.worker.external_cli.codex_cli?.effort ?? null,
             model: cfg.worker.external_cli.codex_cli?.model ?? null,
           },
           "antigravity-cli": {
             enabled: isWorkerBackendEnabled(cfg, "antigravity-cli"),
             command: cfg.worker.external_cli.antigravity_cli?.command ?? "agy",
+            effort: cfg.worker.external_cli.antigravity_cli?.effort ?? null,
             model: cfg.worker.external_cli.antigravity_cli?.model ?? null,
           },
           "opencode-v2": {
             enabled: isWorkerBackendEnabled(cfg, "opencode-v2"),
             command: cfg.worker.external_cli.opencode_v2?.command ?? "opencode",
+            effort: cfg.worker.external_cli.opencode_v2?.effort ?? null,
             model: cfg.worker.external_cli.opencode_v2?.model ?? null,
           },
           "external-pi": {
             enabled: isWorkerBackendEnabled(cfg, "external-pi"),
             command: cfg.worker.external_cli.external_pi?.command ?? "pi",
+            effort: cfg.worker.external_cli.external_pi?.effort ?? null,
             model: cfg.worker.external_cli.external_pi?.model ?? null,
           },
           "claude-code": {
             enabled: isWorkerBackendEnabled(cfg, "claude-code"),
             command: cfg.worker.external_cli.claude_code?.command ?? "claude",
+            effort: cfg.worker.external_cli.claude_code?.effort ?? null,
             model: cfg.worker.external_cli.claude_code?.model ?? null,
           },
         },

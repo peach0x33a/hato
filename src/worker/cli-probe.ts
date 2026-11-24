@@ -90,6 +90,28 @@ async function defaultExecCommand(
   }
 }
 
+export interface CliCapabilityVerification {
+  verified: boolean;
+  missing: string[];
+  reason?: string;
+}
+
+/**
+ * Verify that `codex exec --help` supports Hato's required headless flags.
+ */
+export function verifyCodexCapabilities(execHelpText: string): CliCapabilityVerification {
+  const required = ["--json", "--skip-git-repo-check", "--output-schema"];
+  const missing = required.filter((flag) => !execHelpText.includes(flag));
+  if (missing.length > 0) {
+    return {
+      verified: false,
+      missing,
+      reason: `当前 Codex CLI 版本过旧，缺少必需能力（缺少: ${missing.join(", ")}）。`,
+    };
+  }
+  return { verified: true, missing: [] };
+}
+
 /**
  * Parse `codex exec --help` for dynamically supported sandbox & approval options.
  */
@@ -114,10 +136,33 @@ export function parseCodexHelpModes(helpText: string): {
 }
 
 /**
- * Parse `agy --help` for dynamically supported `--mode`, `--sandbox`, and skip-permissions flags.
+ * Verify that `agy --help` supports Hato's required headless streaming, schema, resume, and settings flags.
+ */
+export function verifyAgyCapabilities(helpText: string): CliCapabilityVerification {
+  const required = [
+    "--output-format",
+    "stream-json",
+    "--conversation",
+    "--json-schema",
+    "--settings",
+  ];
+  const missing = required.filter((token) => !helpText.includes(token));
+  if (missing.length > 0) {
+    return {
+      verified: false,
+      missing,
+      reason: `当前 Antigravity CLI 版本过旧，缺少必需能力（缺少: ${missing.join(", ")}）。`,
+    };
+  }
+  return { verified: true, missing: [] };
+}
+
+/**
+ * Parse `agy --help` for dynamically supported `--mode`, `--effort`, `--sandbox`, and skip-permissions flags.
  */
 export function parseAgyHelpModes(helpText: string): {
   modeChoices: string[];
+  effortChoices: string[];
   supportsSandbox: boolean;
   supportsSkipPermissions: boolean;
 } {
@@ -129,8 +174,17 @@ export function parseAgyHelpModes(helpText: string): {
         .filter(Boolean)
     : ["accept-edits", "auto", "plan"];
 
+  const effortMatch = /--effort[^\n]*\(([^)]+)\)/.exec(helpText);
+  const effortChoices = effortMatch
+    ? effortMatch[1]!
+        .split(/[,|]/)
+        .map((s) => s.trim())
+        .filter(Boolean)
+    : [];
+
   return {
     modeChoices,
+    effortChoices,
     supportsSandbox: helpText.includes("--sandbox"),
     supportsSkipPermissions: helpText.includes("--dangerously-skip-permissions"),
   };
@@ -151,6 +205,7 @@ export function verifyOpenCodeV2(params: {
   supportsAuto: boolean;
   supportsStandalone: boolean;
   supportsAgent: boolean;
+  supportsModelVariant: boolean;
 } {
   const rawVer = params.versionText.trim();
   const verMatch = /(?:opencode\s+)?v?(\d+)\.(\d+)\.(\d+)/i.exec(rawVer);
@@ -161,6 +216,7 @@ export function verifyOpenCodeV2(params: {
   const supportsStandalone = combinedHelp.includes("--standalone");
   const supportsAuto = combinedHelp.includes("--auto");
   const supportsAgent = combinedHelp.includes("--agent");
+  const supportsModelVariant = /--model[^\n]*#variant/i.test(combinedHelp);
   const mentionsV2Api = /\bv2\b/i.test(params.rootHelpText);
 
   if (major === null || Number.isNaN(major)) {
@@ -171,6 +227,7 @@ export function verifyOpenCodeV2(params: {
       supportsAuto,
       supportsStandalone,
       supportsAgent,
+      supportsModelVariant,
     };
   }
 
@@ -182,6 +239,19 @@ export function verifyOpenCodeV2(params: {
       supportsAuto,
       supportsStandalone,
       supportsAgent,
+      supportsModelVariant,
+    };
+  }
+
+  if (params.runHelpText.trim() && !params.runHelpText.includes("--format")) {
+    return {
+      v2Verified: false,
+      version,
+      reason: `当前 OpenCode (${version ?? "v2"}) 缺少必需能力（缺少: --format）。`,
+      supportsAuto,
+      supportsStandalone,
+      supportsAgent,
+      supportsModelVariant,
     };
   }
 
@@ -191,14 +261,56 @@ export function verifyOpenCodeV2(params: {
     supportsAuto,
     supportsStandalone,
     supportsAgent,
+    supportsModelVariant,
   };
 }
 
 /**
- * Parse `claude --help` for permission mode options.
+ * Verify that `claude --help` supports Hato's required headless flags and strict MCP isolation.
+ */
+export function verifyClaudeCapabilities(helpText: string): CliCapabilityVerification {
+  const required = [
+    "--print",
+    "--output-format",
+    "stream-json",
+    "--resume",
+    "--mcp-config",
+    "--strict-mcp-config",
+    "--json-schema",
+  ];
+  const missing = required.filter((token) => !helpText.includes(token));
+  if (missing.length > 0) {
+    return {
+      verified: false,
+      missing,
+      reason: `当前 Claude Code 版本过旧，缺少必需能力（缺少: ${missing.join(", ")}）。`,
+    };
+  }
+  return { verified: true, missing: [] };
+}
+
+/**
+ * Verify that `pi --help` supports Hato's required JSON stream and session flags.
+ */
+export function verifyPiCapabilities(helpText: string): CliCapabilityVerification {
+  const required = ["--mode", "--session"];
+  const missing = required.filter((token) => !helpText.includes(token));
+  if (missing.length > 0) {
+    return {
+      verified: false,
+      missing,
+      reason: `当前 Pi CLI 版本过旧，缺少必需能力（缺少: ${missing.join(", ")}）。`,
+    };
+  }
+  return { verified: true, missing: [] };
+}
+
+/**
+ * Parse `claude --help` for permission mode and `--effort` options.
  */
 export function parseClaudeHelpModes(helpText: string): {
   permissionModes: string[];
+  effortChoices: string[];
   supportsSkipPermissions: boolean;
 } {
   const modeMatch = /--permission-mode[\s\S]{0,160}?\(([^)]+)\)/.exec(helpText);
@@ -209,10 +321,42 @@ export function parseClaudeHelpModes(helpText: string): {
         .map((s) => s.trim().replace(/^["']|["']$/g, ""))
         .filter(Boolean)
     : ["default", "acceptEdits", "plan", "bypassPermissions"];
+
+  const effortMatch = /--effort[\s\S]{0,160}?\(([^)]+)\)/.exec(helpText);
+  const effortChoices = effortMatch
+    ? effortMatch[1]!
+        .replace(/^choices\s*:\s*/i, "")
+        .split(/[,|]/)
+        .map((s) => s.trim().replace(/^["']|["']$/g, ""))
+        .filter(Boolean)
+    : helpText.includes("--effort")
+      ? ["low", "medium", "high", "max"]
+      : [];
+
   return {
     permissionModes,
+    effortChoices,
     supportsSkipPermissions: helpText.includes("--dangerously-skip-permissions"),
   };
+}
+
+/**
+ * Parse `pi --help` for `--thinking` effort levels.
+ */
+export function parsePiHelpModes(helpText: string): {
+  thinkingChoices: string[];
+} {
+  const thinkingMatch = /--thinking[\s\S]{0,160}?\(([^)]+)\)/.exec(helpText);
+  const thinkingChoices = thinkingMatch
+    ? thinkingMatch[1]!
+        .replace(/^choices\s*:\s*/i, "")
+        .split(/[,|]/)
+        .map((s) => s.trim().replace(/^["']|["']$/g, ""))
+        .filter(Boolean)
+    : helpText.includes("--thinking")
+      ? ["off", "minimal", "low", "medium", "high", "xhigh"]
+      : [];
+  return { thinkingChoices };
 }
 
 export interface HostCliDefaultsSnapshot {
@@ -241,6 +385,13 @@ export function readHostCliDefaults(
 
       if (typeof parsed.model === "string") summary.model = parsed.model;
       if (typeof parsed.model_provider === "string") summary.model_provider = parsed.model_provider;
+      if (
+        typeof parsed.model_reasoning_effort === "string" &&
+        parsed.model_reasoning_effort.trim()
+      ) {
+        summary.model_reasoning_effort = parsed.model_reasoning_effort.trim();
+        defaults.effort = parsed.model_reasoning_effort.trim();
+      }
       if (typeof parsed.sandbox_mode === "string") {
         summary.sandbox_mode = parsed.sandbox_mode;
         defaults.sandbox = parsed.sandbox_mode;
@@ -263,26 +414,50 @@ export function readHostCliDefaults(
 
   if (backend === "antigravity-cli") {
     const cfgPath = join(homeDir, ".gemini", "antigravity-cli", "settings.json");
-    if (!existsSync(cfgPath)) {
-      return { configPath: cfgPath, summary: {}, defaults: {} };
-    }
-    try {
-      const parsed = JSON.parse(readFileSync(cfgPath, "utf8")) as Record<string, unknown>;
-      const summary: Record<string, string | boolean | string[]> = {};
-      const defaults: Record<string, string | boolean> = {};
-      if (typeof parsed.mode === "string") {
-        summary.mode = parsed.mode;
-        defaults.mode = parsed.mode;
+    const mcpPath = join(homeDir, ".gemini", "config", "mcp_config.json");
+    const summary: Record<string, string | boolean | string[]> = {};
+    const defaults: Record<string, string | boolean> = {};
+
+    if (existsSync(cfgPath)) {
+      try {
+        const parsed = JSON.parse(readFileSync(cfgPath, "utf8")) as Record<string, unknown>;
+        if (typeof parsed.agentMode === "string" && parsed.agentMode.trim()) {
+          summary.agentMode = parsed.agentMode;
+          defaults.mode = parsed.agentMode;
+        }
+        if (typeof parsed.model === "string" && parsed.model.trim()) {
+          summary.model = parsed.model;
+        }
+        if (typeof parsed.modelProvider === "string" && parsed.modelProvider.trim()) {
+          summary.modelProvider = parsed.modelProvider;
+        }
+        if (typeof parsed.enableTerminalSandbox === "boolean") {
+          summary.enableTerminalSandbox = parsed.enableTerminalSandbox;
+          defaults.sandbox = parsed.enableTerminalSandbox;
+        }
+        if (typeof parsed.toolPermission === "string" && parsed.toolPermission.trim()) {
+          summary.toolPermission = parsed.toolPermission;
+        }
+      } catch {
+        // ignore malformed host settings.json
       }
-      if (typeof parsed.model === "string") summary.model = parsed.model;
-      if (typeof parsed.sandbox === "boolean") {
-        summary.sandbox = parsed.sandbox;
-        defaults.sandbox = parsed.sandbox;
-      }
-      return { configPath: cfgPath, summary, defaults };
-    } catch {
-      return { configPath: cfgPath, summary: {}, defaults: {} };
     }
+
+    if (existsSync(mcpPath)) {
+      try {
+        const mcpParsed = JSON.parse(readFileSync(mcpPath, "utf8")) as Record<string, unknown>;
+        if (mcpParsed.mcpServers && typeof mcpParsed.mcpServers === "object") {
+          const names = Object.keys(mcpParsed.mcpServers as Record<string, unknown>);
+          if (names.length > 0) {
+            summary.host_mcp_servers = names;
+          }
+        }
+      } catch {
+        // ignore empty or malformed host mcp_config.json
+      }
+    }
+
+    return { configPath: cfgPath, summary, defaults };
   }
 
   if (backend === "opencode-v2") {
@@ -296,7 +471,13 @@ export function readHostCliDefaults(
         const parsed = JSON.parse(readFileSync(cfgPath, "utf8")) as Record<string, unknown>;
         const summary: Record<string, string | boolean | string[]> = {};
         const defaults: Record<string, string | boolean> = {};
-        if (typeof parsed.model === "string") summary.model = parsed.model;
+        if (typeof parsed.model === "string") {
+          summary.model = parsed.model;
+          const hashIdx = parsed.model.indexOf("#");
+          if (hashIdx > 0 && hashIdx < parsed.model.length - 1) {
+            defaults.effort = parsed.model.slice(hashIdx + 1).trim();
+          }
+        }
         if (typeof parsed.default_agent === "string") {
           summary.default_agent = parsed.default_agent;
           defaults.agent = parsed.default_agent;
@@ -320,10 +501,15 @@ export function readHostCliDefaults(
     try {
       const parsed = JSON.parse(readFileSync(cfgPath, "utf8")) as Record<string, unknown>;
       const summary: Record<string, string | boolean | string[]> = {};
+      const defaults: Record<string, string | boolean> = {};
       if (typeof parsed.model === "string" && parsed.model.trim()) {
         summary.model = parsed.model.trim();
       }
-      return { configPath: cfgPath, summary, defaults: {} };
+      if (typeof parsed.effortLevel === "string" && parsed.effortLevel.trim()) {
+        summary.effortLevel = parsed.effortLevel.trim();
+        defaults.effort = parsed.effortLevel.trim();
+      }
+      return { configPath: cfgPath, summary, defaults };
     } catch {
       return { configPath: cfgPath, summary: {}, defaults: {} };
     }
@@ -449,6 +635,64 @@ export function readCodexCachedModels(homeDir = homedir()): ExternalCliModelOpti
   }
 }
 
+/**
+ * Read supported reasoning effort levels from Codex's `~/.codex/models_cache.json`.
+ */
+export function readCodexSupportedEfforts(
+  homeDir = homedir(),
+  preferredModel?: string,
+  hostDefaultEffort?: string,
+): string[] {
+  const fallback = ["low", "medium", "high", "xhigh"];
+  const cachePath = join(homeDir, ".codex", "models_cache.json");
+  const seen = new Set<string>();
+  const push = (val: unknown) => {
+    if (typeof val === "string" && val.trim()) seen.add(val.trim());
+  };
+
+  if (existsSync(cachePath)) {
+    try {
+      const parsed = JSON.parse(readFileSync(cachePath, "utf8")) as {
+        models?: Array<{
+          slug?: unknown;
+          visibility?: unknown;
+          supported_reasoning_levels?: Array<{ effort?: unknown }>;
+        }>;
+      };
+      if (Array.isArray(parsed.models)) {
+        const cleanPreferred = preferredModel?.trim();
+        const exactModel = cleanPreferred
+          ? parsed.models.find(
+              (m) => typeof m?.slug === "string" && m.slug.trim() === cleanPreferred,
+            )
+          : undefined;
+        if (exactModel && Array.isArray(exactModel.supported_reasoning_levels)) {
+          for (const lvl of exactModel.supported_reasoning_levels) {
+            push(lvl?.effort);
+          }
+        } else {
+          for (const m of parsed.models) {
+            if (m?.visibility === "hide" || !Array.isArray(m?.supported_reasoning_levels)) continue;
+            for (const lvl of m.supported_reasoning_levels) {
+              push(lvl?.effort);
+            }
+          }
+        }
+      }
+    } catch {
+      // fall back to standard reasoning levels
+    }
+  }
+
+  if (seen.size === 0) {
+    for (const item of fallback) push(item);
+  }
+  if (hostDefaultEffort?.trim()) {
+    push(hostDefaultEffort.trim());
+  }
+  return [...seen];
+}
+
 const MODEL_PROBE_TIMEOUT_MS = 6000;
 
 /**
@@ -528,6 +772,7 @@ export function resolveEffectiveCliModeArgs(
       }
     }
 
+    const effort = c?.effort?.trim() || undefined;
     const args: string[] = [];
     if (approval === "bypass" || (sandbox === "danger-full-access" && approval !== "host")) {
       args.push("--dangerously-bypass-approvals-and-sandbox");
@@ -535,6 +780,7 @@ export function resolveEffectiveCliModeArgs(
       if (sandbox) args.push("--sandbox", sandbox);
       if (approval === "approve-for-me") args.push("--approve-for-me");
     }
+    if (effort) args.push("-c", `model_reasoning_effort=${JSON.stringify(effort)}`);
     if (c?.model) args.push("-m", c.model);
 
     return {
@@ -542,6 +788,7 @@ export function resolveEffectiveCliModeArgs(
       effectiveOptions: {
         ...(sandbox ? { sandbox } : {}),
         ...(approval ? { approval } : {}),
+        ...(effort ? { effort } : {}),
       },
       preset,
     };
@@ -552,6 +799,7 @@ export function resolveEffectiveCliModeArgs(
     let mode = a?.mode;
     let skipPermissions = a?.skip_permissions;
     let sandbox = a?.sandbox;
+    const effort = a?.effort?.trim() || undefined;
 
     if (mode === undefined && skipPermissions === undefined && sandbox === undefined) {
       if (preset === "yolo") {
@@ -569,10 +817,16 @@ export function resolveEffectiveCliModeArgs(
       }
     }
 
+    const modelHasTierSuffix = Boolean(
+      a?.model && /-(low|medium|high|xhigh|max)$/i.test(a.model.trim()),
+    );
+    const effectiveEffort = !modelHasTierSuffix ? effort : undefined;
+
     const args: string[] = [];
     if (mode) args.push("--mode", mode);
     if (skipPermissions) args.push("--dangerously-skip-permissions");
     if (sandbox) args.push("--sandbox");
+    if (effectiveEffort) args.push("--effort", effectiveEffort);
     if (a?.model) args.push("--model", a.model);
 
     return {
@@ -581,6 +835,7 @@ export function resolveEffectiveCliModeArgs(
         ...(mode !== undefined ? { mode } : {}),
         ...(skipPermissions !== undefined ? { skip_permissions: skipPermissions } : {}),
         ...(sandbox !== undefined ? { sandbox } : {}),
+        ...(effectiveEffort !== undefined ? { effort: effectiveEffort } : {}),
       },
       preset,
     };
@@ -609,10 +864,15 @@ export function resolveEffectiveCliModeArgs(
       auto = permissionMode === "auto" || permissionMode === "full_access";
     }
 
+    const effort = o?.effort?.trim() || undefined;
     const args = ["--standalone"];
     if (auto) args.push("--auto");
     if (agent?.trim()) args.push("--agent", agent.trim());
-    if (o?.model) args.push("-m", o.model);
+    if (o?.model) {
+      const modelArg =
+        o.model.includes("#") || !effort ? o.model : `${o.model}#${effort}`;
+      args.push("-m", modelArg);
+    }
 
     return {
       args,
@@ -620,6 +880,7 @@ export function resolveEffectiveCliModeArgs(
         auto,
         permission_mode: permissionMode,
         ...(agent?.trim() ? { agent: agent.trim() } : {}),
+        ...(effort ? { effort } : {}),
       },
       preset,
     };
@@ -629,6 +890,7 @@ export function resolveEffectiveCliModeArgs(
     const cc = ext.claude_code;
     let permissionMode = cc?.permission_mode;
     let skipPermissions = cc?.skip_permissions;
+    const effort = cc?.effort?.trim() || undefined;
 
     if (permissionMode === undefined && skipPermissions === undefined) {
       if (preset === "yolo") {
@@ -648,6 +910,7 @@ export function resolveEffectiveCliModeArgs(
     const args: string[] = [];
     if (permissionMode) args.push("--permission-mode", permissionMode);
     if (skipPermissions) args.push("--dangerously-skip-permissions");
+    if (effort) args.push("--effort", effort);
     if (cc?.model) args.push("--model", cc.model);
 
     return {
@@ -655,19 +918,151 @@ export function resolveEffectiveCliModeArgs(
       effectiveOptions: {
         ...(permissionMode ? { permission_mode: permissionMode } : {}),
         ...(skipPermissions !== undefined ? { skip_permissions: skipPermissions } : {}),
+        ...(effort ? { effort } : {}),
       },
       preset,
     };
   }
 
   const ep = ext.external_pi;
+  const piEffort = ep?.effort?.trim() || undefined;
   const args: string[] = [];
+  if (piEffort) args.push("--thinking", piEffort);
   if (ep?.model) args.push("--model", ep.model);
   return {
     args,
-    effectiveOptions: {},
+    effectiveOptions: {
+      ...(piEffort ? { effort: piEffort } : {}),
+    },
     preset,
   };
+}
+
+const cliCapabilityCache = new Map<
+  string,
+  { available: boolean; reason?: string; checkedAtMs: number }
+>();
+
+function recordCapabilityCache(
+  backend: ExternalCliBackend,
+  command: string,
+  available: boolean,
+  reason?: string,
+): void {
+  cliCapabilityCache.set(`${backend}::${command.trim()}`, {
+    available,
+    ...(reason ? { reason } : {}),
+    checkedAtMs: Date.now(),
+  });
+}
+
+export function getCachedExternalCliAvailability(
+  backend: ExternalCliBackend,
+  command: string,
+): { available: boolean; reason?: string } | undefined {
+  const hit = cliCapabilityCache.get(`${backend}::${command.trim()}`);
+  return hit ? { available: hit.available, reason: hit.reason } : undefined;
+}
+
+/**
+ * Lightweight local capability check (`--version` + `--help` only, skipping slow `models` network queries)
+ * used at startup/reload and before launching an external CLI worker.
+ */
+export async function verifyExternalCliBackend(
+  backend: ExternalCliBackend,
+  config: HatoConfig,
+  deps?: { exec?: ExecCommandFn; force?: boolean },
+): Promise<{ ok: boolean; reason?: string }> {
+  const ext = config.worker.external_cli;
+  const command =
+    backend === "codex-cli"
+      ? ext.codex_cli?.command?.trim() || "codex"
+      : backend === "antigravity-cli"
+        ? ext.antigravity_cli?.command?.trim() || "agy"
+        : backend === "opencode-v2"
+          ? ext.opencode_v2?.command?.trim() || "opencode"
+          : backend === "claude-code"
+            ? ext.claude_code?.command?.trim() || "claude"
+            : ext.external_pi?.command?.trim() || "pi";
+
+  if (!deps?.exec && !deps?.force) {
+    const cached = getCachedExternalCliAvailability(backend, command);
+    if (cached) {
+      return { ok: cached.available, reason: cached.reason };
+    }
+  }
+
+  const exec = deps?.exec ?? defaultExecCommand;
+  let ok = false;
+  let reason: string | undefined;
+
+  if (backend === "codex-cli") {
+    const helpRes = await exec(command, ["exec", "--help"]);
+    if (!helpRes.ok) {
+      reason = helpRes.error || "Codex CLI 未安装或不可执行";
+    } else {
+      const cap = verifyCodexCapabilities(helpRes.stdout || helpRes.stderr);
+      ok = cap.verified;
+      reason = cap.reason;
+    }
+  } else if (backend === "antigravity-cli") {
+    const helpRes = await exec(command, ["--help"]);
+    if (!helpRes.ok) {
+      reason = helpRes.error || "Antigravity CLI 未安装或不可执行";
+    } else {
+      const cap = verifyAgyCapabilities(helpRes.stdout || helpRes.stderr);
+      ok = cap.verified;
+      reason = cap.reason;
+    }
+  } else if (backend === "opencode-v2") {
+    const [verRes, rootHelpRes, runHelpRes] = await Promise.all([
+      exec(command, ["--version"]),
+      exec(command, ["--help"]),
+      exec(command, ["run", "--help"]),
+    ]);
+    if (!verRes.ok && !rootHelpRes.ok) {
+      reason = verRes.error || rootHelpRes.error || "OpenCode V2 未安装或不可执行";
+    } else {
+      const v2 = verifyOpenCodeV2({
+        versionText: verRes.stdout || verRes.stderr,
+        rootHelpText: rootHelpRes.stdout || rootHelpRes.stderr,
+        runHelpText: runHelpRes.stdout || runHelpRes.stderr,
+      });
+      ok = v2.v2Verified;
+      reason = v2.reason;
+    }
+  } else if (backend === "claude-code") {
+    const helpRes = await exec(command, ["--help"]);
+    if (!helpRes.ok) {
+      reason = helpRes.error || "Claude Code 未安装或不可执行";
+    } else {
+      const cap = verifyClaudeCapabilities(helpRes.stdout || helpRes.stderr);
+      ok = cap.verified;
+      reason = cap.reason;
+    }
+  } else {
+    const helpRes = await exec(command, ["--help"]);
+    if (!helpRes.ok) {
+      reason = helpRes.error || "Pi CLI 未安装或不可执行";
+    } else {
+      const cap = verifyPiCapabilities(helpRes.stdout || helpRes.stderr);
+      ok = cap.verified;
+      reason = cap.reason;
+    }
+  }
+
+  if (!deps?.exec) {
+    recordCapabilityCache(backend, command, ok, reason);
+  }
+  return { ok, reason };
+}
+
+export async function warmExternalCliCapabilities(config: HatoConfig): Promise<void> {
+  await Promise.all(
+    EXTERNAL_CLI_BACKENDS.map((backend) =>
+      verifyExternalCliBackend(backend, config, { force: true }).catch(() => undefined),
+    ),
+  );
 }
 
 /**
@@ -729,6 +1124,9 @@ export async function probeAllExternalClis(
   return Promise.all(
     specs.map(async (spec) => {
       const entry = await probeSingleCli(spec, config, { exec, homeDir, now });
+      if (resolveBinaryPath) {
+        recordCapabilityCache(spec.backend, spec.command, entry.available, entry.reason);
+      }
       const resolvedPath =
         resolveBinaryPath && entry.installed
           ? await resolveBinaryLocation(spec.command)
@@ -779,7 +1177,9 @@ async function probeSingleCli(
       ctx.exec(spec.command, ["exec", "--help"]),
     ]);
     const installed = verRes.ok || helpRes.ok;
-    const parsed = parseCodexHelpModes(helpRes.stdout || helpRes.stderr);
+    const helpText = helpRes.stdout || helpRes.stderr;
+    const parsed = parseCodexHelpModes(helpText);
+    const cap = installed ? verifyCodexCapabilities(helpText) : { verified: false, missing: [] };
 
     const codexModeChoices = [
       ...parsed.sandboxChoices.filter((c) => c !== "danger-full-access"),
@@ -797,6 +1197,13 @@ async function probeSingleCli(
           ? "approve-for-me"
           : (resolvedMode.effectiveOptions.sandbox ?? resolvedMode.effectiveOptions.approval);
 
+    const codexEffortChoices = readCodexSupportedEfforts(
+      ctx.homeDir,
+      config.worker.external_cli.codex_cli?.model ??
+        (typeof hostDefaults.summary.model === "string" ? hostDefaults.summary.model : undefined),
+      typeof hostDefaults.defaults.effort === "string" ? hostDefaults.defaults.effort : undefined,
+    );
+
     const options: CliOptionChoice[] = [
       {
         key: "codex_mode",
@@ -805,6 +1212,14 @@ async function probeSingleCli(
         choices: codexModeChoices,
         hostDefault: hostDefaults.defaults.sandbox,
         effectiveHatoValue: effectiveCodexMode,
+      },
+      {
+        key: "effort",
+        label: "思考强度",
+        kind: "enum",
+        choices: codexEffortChoices,
+        hostDefault: hostDefaults.defaults.effort,
+        effectiveHatoValue: resolvedMode.effectiveOptions.effort,
       },
     ];
 
@@ -817,9 +1232,9 @@ async function probeSingleCli(
       enabled: spec.enabled,
       command: spec.command,
       installed,
-      available: installed,
+      available: installed && cap.verified,
       version: extractVersionLine(verRes.stdout || verRes.stderr),
-      reason: installed ? undefined : verRes.error || helpRes.error,
+      reason: !installed ? verRes.error || helpRes.error : cap.reason,
       hostConfigPath: hostDefaults.configPath,
       hostSummary: hostDefaults.summary,
       options,
@@ -836,7 +1251,9 @@ async function probeSingleCli(
       ctx.exec(spec.command, ["models"], MODEL_PROBE_TIMEOUT_MS),
     ]);
     const installed = verRes.ok || helpRes.ok;
-    const parsed = parseAgyHelpModes(helpRes.stdout || helpRes.stderr);
+    const helpText = helpRes.stdout || helpRes.stderr;
+    const parsed = parseAgyHelpModes(helpText);
+    const cap = installed ? verifyAgyCapabilities(helpText) : { verified: false, missing: [] };
     const models = installed
       ? mergeModelOptions(
           modelsRes.ok ? parseAgyModelsOutput(modelsRes.stdout || modelsRes.stderr) : [],
@@ -873,6 +1290,17 @@ async function probeSingleCli(
             },
           ]
         : []),
+      ...(parsed.effortChoices.length > 0
+        ? [
+            {
+              key: "effort",
+              label: "思考强度",
+              kind: "enum" as const,
+              choices: parsed.effortChoices,
+              effectiveHatoValue: resolvedMode.effectiveOptions.effort,
+            },
+          ]
+        : []),
     ];
 
     return {
@@ -880,9 +1308,9 @@ async function probeSingleCli(
       enabled: spec.enabled,
       command: spec.command,
       installed,
-      available: installed,
+      available: installed && cap.verified,
       version: extractVersionLine(verRes.stdout || verRes.stderr),
-      reason: installed ? undefined : helpRes.error || verRes.error,
+      reason: !installed ? helpRes.error || verRes.error : cap.reason,
       hostConfigPath: hostDefaults.configPath,
       hostSummary: hostDefaults.summary,
       options,
@@ -942,6 +1370,18 @@ async function probeSingleCli(
         hostDefault: "ask",
         effectiveHatoValue: resolvedMode.effectiveOptions.permission_mode ?? "ask",
       },
+      ...(v2.supportsModelVariant || v2.v2Verified
+        ? [
+            {
+              key: "effort",
+              label: "思考强度",
+              kind: "enum" as const,
+              choices: ["low", "medium", "high", "xhigh", "max"],
+              hostDefault: hostDefaults.defaults.effort,
+              effectiveHatoValue: resolvedMode.effectiveOptions.effort,
+            },
+          ]
+        : []),
     ];
 
     const models = mergeModelOptions(
@@ -973,7 +1413,9 @@ async function probeSingleCli(
       ctx.exec(spec.command, ["--help"]),
     ]);
     const installed = verRes.ok || helpRes.ok;
-    const parsed = parseClaudeHelpModes(helpRes.stdout || helpRes.stderr);
+    const helpText = helpRes.stdout || helpRes.stderr;
+    const parsed = parseClaudeHelpModes(helpText);
+    const cap = installed ? verifyClaudeCapabilities(helpText) : { verified: false, missing: [] };
     const models = installed
       ? mergeModelOptions(
           [
@@ -990,9 +1432,9 @@ async function probeSingleCli(
       enabled: spec.enabled,
       command: spec.command,
       installed,
-      available: installed,
+      available: installed && cap.verified,
       version: extractVersionLine(verRes.stdout || verRes.stderr),
-      reason: installed ? undefined : verRes.error || helpRes.error,
+      reason: !installed ? verRes.error || helpRes.error : cap.reason,
       hostConfigPath: hostDefaults.configPath,
       hostSummary: hostDefaults.summary,
       options: [
@@ -1005,6 +1447,18 @@ async function probeSingleCli(
             ? "bypassPermissions"
             : resolvedMode.effectiveOptions.permission_mode,
         },
+        ...(parsed.effortChoices.length > 0
+          ? [
+              {
+                key: "effort",
+                label: "思考强度",
+                kind: "enum" as const,
+                choices: parsed.effortChoices,
+                hostDefault: hostDefaults.defaults.effort,
+                effectiveHatoValue: resolvedMode.effectiveOptions.effort,
+              },
+            ]
+          : []),
       ],
       models,
       effectiveArgsPreview: resolvedMode.args,
@@ -1012,11 +1466,15 @@ async function probeSingleCli(
     };
   }
 
-  const [verRes, modelsRes] = await Promise.all([
+  const [verRes, helpRes, modelsRes] = await Promise.all([
     ctx.exec(spec.command, ["--version"]),
+    ctx.exec(spec.command, ["--help"]),
     ctx.exec(spec.command, ["--list-models"], MODEL_PROBE_TIMEOUT_MS),
   ]);
-  const installed = verRes.ok;
+  const installed = verRes.ok || helpRes.ok;
+  const piHelpText = helpRes.stdout || helpRes.stderr;
+  const parsedPi = parsePiHelpModes(piHelpText);
+  const piCap = installed ? verifyPiCapabilities(piHelpText) : { verified: false, missing: [] };
   const models = installed
     ? mergeModelOptions(
         modelsRes.ok ? parsePiListModelsOutput(modelsRes.stdout || modelsRes.stderr) : [],
@@ -1028,12 +1486,23 @@ async function probeSingleCli(
     enabled: spec.enabled,
     command: spec.command,
     installed,
-    available: installed,
+    available: installed && piCap.verified,
     version: extractVersionLine(verRes.stdout || verRes.stderr),
-    reason: installed ? undefined : verRes.error,
+    reason: !installed ? verRes.error || helpRes.error : piCap.reason,
     hostConfigPath: hostDefaults.configPath,
     hostSummary: hostDefaults.summary,
-    options: [],
+    options:
+      parsedPi.thinkingChoices.length > 0
+        ? [
+            {
+              key: "effort",
+              label: "思考强度",
+              kind: "enum",
+              choices: parsedPi.thinkingChoices,
+              effectiveHatoValue: resolvedMode.effectiveOptions.effort,
+            },
+          ]
+        : [],
     models,
     effectiveArgsPreview: resolvedMode.args,
     probedAtMs: ctx.now,

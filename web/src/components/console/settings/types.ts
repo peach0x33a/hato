@@ -281,6 +281,14 @@ export const CLI_CHOICE_LABELS: Record<string, string> = {
   dontAsk: "跳过询问",
   manual: "手动审批",
   bypassPermissions: "完全访问",
+  off: "关闭",
+  minimal: "极低",
+  low: "低",
+  medium: "中",
+  high: "高",
+  xhigh: "超高",
+  max: "Max",
+  ultra: "Ultra",
 };
 
 export const MODE_OPTIONS = [

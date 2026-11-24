@@ -32,8 +32,16 @@ test("CLI adapters parse real NDJSON formats and build start/resume args", () =>
     '{"event":"init","conversation_id":"conv_99","init":{"cwd":"/tmp"}}',
   );
   assert.equal(agyInit?.sessionId, "conv_99");
+  const agyToolActive = antigravityCliAdapter.parseStreamLine(
+    '{"event":"step_update","step_update":{"conversation_id":"conv_99","step_index":1,"state":"ACTIVE","step_type":"tool","tool_info":{"name":"run_command","parameters":{"CommandLine":"echo ok"}}}}',
+  );
+  assert.match(agyToolActive?.progressNote ?? "", /run_command/);
+  const agyToolDone = antigravityCliAdapter.parseStreamLine(
+    '{"event":"step_update","step_update":{"conversation_id":"conv_99","step_index":1,"state":"DONE","step_type":"tool","tool_name":"run_command"}}',
+  );
+  assert.equal(agyToolDone?.progressNote, undefined);
   const agyDelta = antigravityCliAdapter.parseStreamLine(
-    '{"event":"step_update","step_update":{"conversation_id":"conv_99","step_index":1,"state":"ACTIVE","step_type":"agent_response","text_delta":"2"}}',
+    '{"event":"step_update","step_update":{"conversation_id":"conv_99","step_index":2,"state":"ACTIVE","step_type":"agent_response","text_delta":"2"}}',
   );
   assert.equal(agyDelta?.textDelta, "2");
   const agyDone = antigravityCliAdapter.parseStreamLine(
@@ -41,6 +49,10 @@ test("CLI adapters parse real NDJSON formats and build start/resume args", () =>
   );
   assert.equal(agyDone?.finalText, "2\n");
   assert.equal(agyDone?.done, true);
+  const agySchemaDone = antigravityCliAdapter.parseStreamLine(
+    '{"event":"result","result":{"conversation_id":"conv_99","status":"SUCCESS","response":"draft\\n{\\"status\\":\\"done\\"}","structured_output":{"status":"done","narration_hint":"ok"}}}',
+  );
+  assert.equal(agySchemaDone?.finalText, '{"status":"done","narration_hint":"ok"}');
 
   const ocTool = openCodeV2CliAdapter.parseStreamLine(
     '{"type":"tool_use","sessionID":"ses_abc","part":{"tool":"bash"}}',
@@ -154,6 +166,38 @@ console.log(JSON.stringify({ event: "result", result: { conversation_id: "agy_co
     );
     assert.equal(ocFail.status, "failed");
     assert.match(ocFail.narration_hint, /OpenCode V2/);
+
+    const agyCapFailRunner = new ExternalCliRunner({
+      getHatoConfig: () => cfg,
+      getMcpConfig: () => ({ servers: {} }),
+      proxyRouter,
+      verifyBackendCapabilities: async (backend) => ({
+        ok: false,
+        reason: `${backend} 缺少必需能力（缺少: --settings）`,
+      }),
+    });
+    const agyCapFail = await agyCapFailRunner.execute(
+      {
+        ticketId: "t_agy_cap_fail",
+        canonicalUserId: "owner",
+        backend: "antigravity-cli",
+        briefTitle: "test agy capability gate",
+        contextId: "ctx_t_agy_cap_fail",
+        externalSessionId: null,
+      },
+      {
+        workspace_mode: "isolated",
+        workspace_dir: join(tempDir, "workspaces", "t_agy_cap_fail"),
+        is_host_repo: false,
+        network: "none",
+        timeout_ms: 10_000,
+        skills: [],
+        allowed_mcp_servers: [],
+        confirm_before: [],
+      },
+    );
+    assert.equal(agyCapFail.status, "failed");
+    assert.match(agyCapFail.narration_hint, /--settings/);
 
     // 2. Real child process execution using node mock script via spawn wrapper
     const { spawn } = await import("node:child_process");

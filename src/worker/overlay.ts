@@ -3,6 +3,7 @@ import {
   existsSync,
   lstatSync,
   mkdirSync,
+  readdirSync,
   readFileSync,
   symlinkSync,
   unlinkSync,
@@ -270,25 +271,134 @@ export function prepareExternalCliOverlay(
 
   if (params.backend === "antigravity-cli") {
     const agyOverlayDir = resolve(runtimeRootDir, "antigravity-cli", ticketToken);
-    mkdirSync(agyOverlayDir, { recursive: true });
+    const shadowHomeDir = join(agyOverlayDir, "home");
+    const shadowGeminiDir = join(shadowHomeDir, ".gemini");
+    const shadowGeminiConfigDir = join(shadowGeminiDir, "config");
+    mkdirSync(shadowGeminiConfigDir, { recursive: true });
 
-    const mcpServersMap = buildStandardMcpServersMap({
-      contextMcp: params.contextMcp,
-      workerServers: authorizedWorkerServers,
-    });
-    const mcpConfigPath = join(agyOverlayDir, "mcp_config.json");
-    writeFileSync(mcpConfigPath, `${JSON.stringify({ mcpServers: mcpServersMap }, null, 2)}\n`, "utf8");
+    if (existsSync(hostHomeDir)) {
+      for (const entry of readdirSync(hostHomeDir)) {
+        if (entry === ".gemini" || entry === ".hato" || entry === ".DS_Store") continue;
+        ensureSymlink(join(hostHomeDir, entry), join(shadowHomeDir, entry));
+      }
+    }
+
+    if (extCfg.reuseHostAuthAndProvider) {
+      for (const sub of ["antigravity-cli", "antigravity", "sandbox"]) {
+        const hostSubPath = join(hostHomeDir, ".gemini", sub);
+        if (existsSync(hostSubPath)) {
+          const linkPath = join(shadowGeminiDir, sub);
+          ensureSymlink(hostSubPath, linkPath);
+          generatedFiles.push(linkPath);
+        }
+      }
+    } else {
+      mkdirSync(join(shadowGeminiDir, "antigravity-cli"), { recursive: true });
+    }
+
+    const hostMcpPath = join(hostHomeDir, ".gemini", "config", "mcp_config.json");
+    let hostMcpObj: Record<string, unknown> = {};
+    if (
+      (extCfg.inheritHostMcp || extCfg.hostMcpAllowlist.length > 0) &&
+      existsSync(hostMcpPath)
+    ) {
+      try {
+        const parsed = JSON.parse(readFileSync(hostMcpPath, "utf8")) as Record<string, unknown>;
+        if (parsed.mcpServers && typeof parsed.mcpServers === "object") {
+          hostMcpObj = parsed.mcpServers as Record<string, unknown>;
+        }
+      } catch {
+        hostMcpObj = {};
+      }
+    }
+
+    const nextMcpServers: Record<string, unknown> = {};
+    if (extCfg.inheritHostMcp) {
+      Object.assign(nextMcpServers, hostMcpObj);
+    } else if (extCfg.hostMcpAllowlist.length > 0) {
+      for (const allowedName of extCfg.hostMcpAllowlist) {
+        if (allowedName in hostMcpObj) {
+          nextMcpServers[allowedName] = hostMcpObj[allowedName];
+        }
+      }
+    }
+
+    if (params.contextMcp) {
+      nextMcpServers.hato_context = {
+        command: params.contextMcp.command,
+        args: params.contextMcp.args,
+        env: params.contextMcp.env,
+      };
+    }
+
+    for (const srv of authorizedWorkerServers) {
+      if (srv.transport === "stdio" && srv.command) {
+        const env = resolveMcpServerEnv(srv);
+        nextMcpServers[srv.name] = {
+          command: srv.command,
+          args: srv.args,
+          ...(srv.cwd ? { cwd: srv.cwd } : {}),
+          ...(Object.keys(env).length > 0 ? { env } : {}),
+        };
+      } else if (srv.transport === "http" && srv.url) {
+        const headers = resolveMcpHttpHeaders(srv);
+        nextMcpServers[srv.name] = {
+          url: srv.url,
+          ...(Object.keys(headers).length > 0 ? { headers } : {}),
+        };
+      }
+    }
+
+    const mcpConfigPath = join(shadowGeminiConfigDir, "mcp_config.json");
+    writeFileSync(
+      mcpConfigPath,
+      `${JSON.stringify({ mcpServers: nextMcpServers }, null, 2)}\n`,
+      "utf8",
+    );
     generatedFiles.push(mcpConfigPath);
 
+    if (params.isHostRepo && stagedSkillsDir) {
+      const skillsManifestPath = join(shadowGeminiConfigDir, "skills.json");
+      writeFileSync(
+        skillsManifestPath,
+        `${JSON.stringify({ entries: [{ path: resolve(stagedSkillsDir) }] }, null, 2)}\n`,
+        "utf8",
+      );
+      generatedFiles.push(skillsManifestPath);
+    }
+
+    const trustedWorkspaces = [
+      resolve(params.workspaceDir),
+      ...(stagedSkillsDir ? [resolve(stagedSkillsDir)] : []),
+    ];
+    const disableSlash = resolvedMode.effectiveOptions.mode !== "plan";
+    const toolPermission = resolvedMode.effectiveOptions.skip_permissions
+      ? "always-proceed"
+      : resolvedMode.effectiveOptions.sandbox
+        ? "proceed-in-sandbox"
+        : undefined;
+
     const sessionSettings: Record<string, unknown> = {
-      mcpConfigPath,
-      mcpServers: mcpServersMap,
+      trustedWorkspaces,
+      artifactReviewPolicy: "always-proceed",
+      notifications: false,
+      ...(disableSlash ? { disableSlashCommands: true } : {}),
+      ...(typeof resolvedMode.effectiveOptions.mode === "string"
+        ? { agentMode: resolvedMode.effectiveOptions.mode }
+        : {}),
+      ...(typeof resolvedMode.effectiveOptions.sandbox === "boolean"
+        ? { enableTerminalSandbox: resolvedMode.effectiveOptions.sandbox }
+        : {}),
+      ...(toolPermission ? { toolPermission } : {}),
     };
     const settingsPath = join(agyOverlayDir, "settings.json");
     writeFileSync(settingsPath, `${JSON.stringify(sessionSettings, null, 2)}\n`, "utf8");
     generatedFiles.push(settingsPath);
 
-    const extraArgs = ["--settings", settingsPath, "--disable-slash-commands"];
+    const extraArgs = ["--settings", settingsPath];
+    if (disableSlash) {
+      extraArgs.push("--disable-slash-commands");
+    }
     if (params.isHostRepo && stagedSkillsDir) {
       extraArgs.push("--add-dir", stagedSkillsDir);
     }
@@ -303,6 +413,7 @@ export function prepareExternalCliOverlay(
         workerProxyEnv: params.workerProxyEnv,
         extraEnv: {
           ...customEnv,
+          HOME: shadowHomeDir,
         },
       }),
       stagedSkillsDir,
@@ -374,8 +485,21 @@ export function prepareExternalCliOverlay(
       }
     }
 
+    const configuredOcModel = params.hatoConfig.worker.external_cli.opencode_v2?.model?.trim();
+    const ocEffort =
+      typeof resolvedMode.effectiveOptions.effort === "string"
+        ? resolvedMode.effectiveOptions.effort.trim()
+        : "";
+    const hostOcModel =
+      typeof baseOpenCodeObj.model === "string" ? baseOpenCodeObj.model.trim() : "";
+    const patchedHostOcModel =
+      !configuredOcModel && ocEffort && hostOcModel && !hostOcModel.includes("#")
+        ? `${hostOcModel}#${ocEffort}`
+        : undefined;
+
     const nextOpenCodeObj: Record<string, unknown> = {
       ...baseOpenCodeObj,
+      ...(patchedHostOcModel ? { model: patchedHostOcModel } : {}),
       mcp: nextMcp,
       ...(resolvedMode.effectiveOptions.permission_mode === "full_access"
         ? { permissions: [{ action: "*", resource: "*", effect: "allow" }] }
@@ -519,6 +643,8 @@ function ensureSymlink(targetPath: string, linkPath: string): void {
     const stat = lstatSync(linkPath);
     if (stat.isSymbolicLink() || stat.isFile()) {
       unlinkSync(linkPath);
+    } else if (stat.isDirectory()) {
+      return;
     }
   } catch {
     // linkPath does not exist
