@@ -65,7 +65,7 @@ import { MemoryCurator } from "./memory/curator.js";
 import { HindsightStore } from "./memory/hindsight.js";
 import { MemoryEchoStore } from "./memory/memoryecho.js";
 import type { MemoryStore } from "./memory/store.js";
-import { PersonaRuntime } from "./persona/agent.js";
+import { PersonaRuntime, isNoReplyOutput } from "./persona/agent.js";
 import { NotebookService } from "./notebook/service.js";
 import { NotebookStore } from "./notebook/store.js";
 import { probeTelegramGateway, updateTelegramBotProfile } from "./setup/probe.js";
@@ -194,6 +194,7 @@ async function main(): Promise<void> {
     getModelRegistry: () => modelRegistry,
     proxyRouter,
     liveTraceTracker,
+    runDetached: (fn) => actorLock.runDetached(fn),
     executeSelfConfigConfirm: async (_canonicalUserId, payload) => {
       const out = await runSelfConfigAction(
         {
@@ -978,9 +979,11 @@ async function main(): Promise<void> {
         }
         compactionManager.recordInteraction(uid);
         memoryCurator.recordInteraction(uid);
-        void compactionManager.checkHighWatermark(uid).catch((err) => {
-          logError("COMPACTION", "high-watermark check failed", err);
-        });
+        void actorLock.runDetached(() =>
+          compactionManager.checkHighWatermark(uid).catch((err) => {
+            logError("COMPACTION", "high-watermark check failed", err);
+          }),
+        );
       } catch (err) {
         logError(mergedBatch.originChannel.toUpperCase(), "outbound send failed after retries", err);
       }
@@ -1081,12 +1084,17 @@ async function main(): Promise<void> {
       if (narrationKey) {
         narrationSentFilesByTarget.set(narrationKey, sentDuringNarration);
       }
+      const cleanFallbackMessage =
+        result.status === "done"
+          ? `${result.narration_hint}${caveatText}${secretsNote}`.trim() || `后台任务“${briefTitle}”已完成。`
+          : `后台任务“${briefTitle}”未完成（${result.status}）：${result.narration_hint}${caveatText}${secretsNote}`;
       let bubbles: string[];
       try {
         bubbles = await personaRuntime.narrateBackgroundEvent({
           canonicalUserId,
           channel: deliveryChannel,
           eventSummary: summary,
+          fallbackMessage: cleanFallbackMessage,
           promptInstruction: `[系统事件：后台任务 "${briefTitle}" (${result.ticket_id}) 已结束，状态=${result.status}。请用自然日常口吻直接告诉用户结果要点（除非出错或用户要求，不要主动报工单号，也不要倾倒冗长执行日志）：${result.narration_hint}${artifactNames}${caveatText}${secretsNote}]`,
           images: artifactImages,
         });
@@ -1095,9 +1103,10 @@ async function main(): Promise<void> {
           narrationSentFilesByTarget.delete(narrationKey);
         }
       }
-      if (outbound) {
+      const outboundBubbles = bubbles.filter((b) => b.trim() && !isNoReplyOutput(b));
+      if (outbound && outboundBubbles.length > 0) {
         await outbound.adapter
-          .sendBubbles(outbound.targetId, bubbles, hatoConfig.gateway.bubbles.delay_ms_range)
+          .sendBubbles(outbound.targetId, outboundBubbles, hatoConfig.gateway.bubbles.delay_ms_range)
           .catch((err) => {
             logWarn(
               outbound.channel.toUpperCase(),
@@ -1168,12 +1177,14 @@ async function main(): Promise<void> {
         canonicalUserId,
         channel: deliveryChannel,
         eventSummary: `工单 ${ticketId} (${briefTitle}) 需要补充信息: ${question}`,
+        fallbackMessage: question,
         promptInstruction: `[系统事件：后台工单 "${briefTitle}" (${ticketId}) 需要用户补充以下信息后继续：${question}。请自然转达给用户。]`,
       });
-      if (outbound) {
+      const outboundBubbles = bubbles.filter((b) => b.trim() && !isNoReplyOutput(b));
+      if (outbound && outboundBubbles.length > 0) {
         await outbound.adapter.sendBubbles(
           outbound.targetId,
-          bubbles,
+          outboundBubbles,
           hatoConfig.gateway.bubbles.delay_ms_range,
         );
       }

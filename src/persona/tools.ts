@@ -368,6 +368,7 @@ export function createPersonaReadOnlyTools(params: {
   selfConfigDeps?: SelfConfigDeps;
   enableReadSkillTool?: boolean;
   extraTools?: readonly AgentTool<any>[];
+  onBeforeInspectTickets?: (input: { ticketId?: string; includeDetails: boolean }) => string | null;
   onDelegate?: (input: { hint: string; urgency?: "normal" | "high"; deliverFiles?: boolean }) => {
     ticketId: string;
     status: string;
@@ -527,9 +528,19 @@ export function createPersonaReadOnlyTools(params: {
     name: "inspect_tickets",
     label: "Inspect Background Tickets",
     description:
-      "Read-only lookup of background ticket status and execution details. Call only when the user asks about task progress, reports, logs, or generated artifacts (set include_details: true when details are requested).",
+      "Read-only lookup of existing/past background ticket status and execution details. Call only when the user asks about task progress, reports, logs, or generated artifacts (set include_details: true when details are requested). Never call to poll or wait for a ticket just dispatched in the current turn.",
     parameters: InspectTicketsParams,
     async execute(_toolCallId, input) {
+      const blockedMsg = params.onBeforeInspectTickets?.({
+        ticketId: input.ticket_id,
+        includeDetails: Boolean(input.include_details),
+      });
+      if (blockedMsg) {
+        return {
+          content: [{ type: "text", text: blockedMsg }],
+          details: { blocked: true, text: blockedMsg },
+        };
+      }
       const text = runInspectTickets(
         params.repo,
         params.canonicalUserId,
@@ -1223,7 +1234,7 @@ export function createPersonaReadOnlyTools(params: {
       name: "delegate",
       label: "Delegate Background Task",
       description:
-        "Delegate local execution, system/env checks, scripts, coding, or investigative tasks to a background worker (shell/files/worker skills/MCP) to figure out and complete. Never use for math (calc), online lookups (web_search/web_fetch), or standalone image_gen.",
+        "Asynchronous background delegation: queues local execution, system/env checks, scripts, coding, or investigative tasks to a background worker (shell/files/worker skills/MCP) and returns immediately. The system automatically pushes the result back to you when finished—do NOT call inspect_tickets to poll/wait, and do NOT dispatch duplicate tickets. Never use for math (calc), online lookups (web_search/web_fetch), or standalone image_gen.",
       parameters: DelegateParams,
       async execute(_toolCallId, input) {
         const accepted = delegateFn({
@@ -1235,7 +1246,7 @@ export function createPersonaReadOnlyTools(params: {
           content: [
             {
               type: "text",
-              text: `已转交后台处理 (internal_id=${accepted.ticketId}, status=${accepted.status})。请用自然日常口吻简短回应“这就去弄，好了告诉你”，除非用户主动问，否则不要报出工单号或说“派出工单”。`,
+              text: `已转交后台异步处理 (internal_id=${accepted.ticketId}, status=${accepted.status})。任务将在后台执行，完成后系统会自动回调通知你结果；请勿调用 inspect_tickets 轮询等待，也不要重复派单。请立即用自然日常口吻简短回应“这就去弄，好了告诉你”（不要报出工单号或说“派出工单”）并结束本轮。`,
             },
           ],
           details: accepted,
@@ -1268,7 +1279,7 @@ export function createPersonaReadOnlyTools(params: {
           content: [
             {
               type: "text",
-              text: `已开始后台生图 (internal_id=${accepted.ticketId}, status=${accepted.status})。请用自然日常口吻简短回应（例如“这就去画，画好了马上发给你”），不要报出内部工单号。`,
+              text: `已开始后台异步生图 (internal_id=${accepted.ticketId}, status=${accepted.status})。完成后系统会自动通知你，请勿调用 inspect_tickets 轮询等待；请用自然日常口吻简短回应（例如“这就去画，画好了马上发给你”），不要报出内部工单号，并立即结束本轮。`,
             },
           ],
           details: accepted,

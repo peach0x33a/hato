@@ -56,6 +56,7 @@ export interface TicketCoordinatorDeps {
   proxyRouter?: ScopedProxyRouter;
   liveTraceTracker?: LiveTraceTracker;
   maxConcurrentTickets?: number;
+  runDetached?: <T>(fn: () => T) => T;
   executeSensitiveFileConfirm?: (
     canonicalUserId: string,
     payload: SensitiveFileConfirmPayload,
@@ -117,9 +118,12 @@ export class TicketCoordinator {
       progressNote: "正在分析任务上下文与边界",
     });
 
-    const job = this.processDelegation(ticketId, params).catch((err) => {
-      logError("DISPATCH", `delegation ${ticketId} crashed`, err);
-    });
+    const detach = this.deps.runDetached ?? (<T>(fn: () => T) => fn());
+    const job = detach(() =>
+      this.processDelegation(ticketId, params).catch((err) => {
+        logError("DISPATCH", `delegation ${ticketId} crashed`, err);
+      }),
+    );
     this.trackPending(job);
 
     return { ticketId, status: "routing" };
@@ -326,9 +330,12 @@ export class TicketCoordinator {
       workspaceExpiresAt: Date.now() + cfg.worker.workspace_ttl_days * 24 * 60 * 60 * 1000,
     });
 
-    const job = this.processImageGeneration(ticketId, briefTitle, workspaceDir, params).catch((err) => {
-      logError("DISPATCH", `image_gen ${ticketId} crashed`, err);
-    });
+    const detach = this.deps.runDetached ?? (<T>(fn: () => T) => fn());
+    const job = detach(() =>
+      this.processImageGeneration(ticketId, briefTitle, workspaceDir, params).catch((err) => {
+        logError("DISPATCH", `image_gen ${ticketId} crashed`, err);
+      }),
+    );
     this.trackPending(job);
 
     return { ticketId, status: "running" };
@@ -573,21 +580,24 @@ export class TicketCoordinator {
       progressNote: "收到补充回复，继续执行中",
     });
 
-    const job = this.runTicketResume(
-      {
-        ticketId: target.id,
-        canonicalUserId: target.canonicalUserId,
-        backend: target.backend as WorkerMandate extends never ? never : any,
-        briefTitle: target.briefTitle,
-        contextId: target.contextId || `ctx_${target.id}`,
-        externalSessionId: target.externalSessionId,
-      },
-      mandate,
-      target.originChannel as ChannelName,
-      replyText,
-    ).catch((err) => {
-      logError("DISPATCH", `resume ${target.id} failed`, err);
-    });
+    const detach = this.deps.runDetached ?? (<T>(fn: () => T) => fn());
+    const job = detach(() =>
+      this.runTicketResume(
+        {
+          ticketId: target.id,
+          canonicalUserId: target.canonicalUserId,
+          backend: target.backend as WorkerMandate extends never ? never : any,
+          briefTitle: target.briefTitle,
+          contextId: target.contextId || `ctx_${target.id}`,
+          externalSessionId: target.externalSessionId,
+        },
+        mandate,
+        target.originChannel as ChannelName,
+        replyText,
+      ).catch((err) => {
+        logError("DISPATCH", `resume ${target.id} failed`, err);
+      }),
+    );
     this.trackPending(job);
 
     return { handledByTicket: true, ticketId: target.id };
@@ -687,21 +697,24 @@ export class TicketCoordinator {
       progressNote: "用户已确认，恢复执行",
     });
 
-    const job = this.runTicketResume(
-      {
-        ticketId: ticket.id,
-        canonicalUserId: ticket.canonicalUserId,
-        backend: ticket.backend as any,
-        briefTitle: ticket.briefTitle,
-        contextId: ticket.contextId || `ctx_${ticket.id}`,
-        externalSessionId: ticket.externalSessionId,
-      },
-      mandate,
-      ticket.originChannel as ChannelName,
-      "用户已确认批准该高危操作，请继续完成任务。",
-    ).catch((err) => {
-      logError("DISPATCH", `confirmed resume ${ticketId} failed`, err);
-    });
+    const detach = this.deps.runDetached ?? (<T>(fn: () => T) => fn());
+    const job = detach(() =>
+      this.runTicketResume(
+        {
+          ticketId: ticket.id,
+          canonicalUserId: ticket.canonicalUserId,
+          backend: ticket.backend as any,
+          briefTitle: ticket.briefTitle,
+          contextId: ticket.contextId || `ctx_${ticket.id}`,
+          externalSessionId: ticket.externalSessionId,
+        },
+        mandate,
+        ticket.originChannel as ChannelName,
+        "用户已确认批准该高危操作，请继续完成任务。",
+      ).catch((err) => {
+        logError("DISPATCH", `confirmed resume ${ticketId} failed`, err);
+      }),
+    );
     this.trackPending(job);
 
     return `已确认执行工单 ${ticketId}`;

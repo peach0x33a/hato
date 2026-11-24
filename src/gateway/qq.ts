@@ -5,6 +5,7 @@ import { resolveGatewayRetryConfig, type HatoConfig } from "../config/app.js";
 import type { ScopedProxyRouter } from "../config/proxy.js";
 import { logError, logInfo, logWarn, summarizeError } from "../utils/logger.js";
 import { retryWithBackoff } from "../utils/retry.js";
+import { isNoReplyOutput } from "../persona/agent.js";
 import { convertBufferToModelImage, detectMediaMimeType, saveInboundMediaBuffer } from "./media.js";
 import { formatGatewayMessageLog } from "./msg-log.js";
 import {
@@ -414,7 +415,8 @@ export class QqAdapter implements ChannelAdapter {
     delayRangeMs: [number, number],
     replyToPlatformMsgId?: string,
   ): Promise<void> {
-    const capped = bubbles.slice(0, this.capabilities.maxBubblesPerTurn);
+    const filtered = bubbles.filter((b) => b.trim() && !isNoReplyOutput(b));
+    const capped = filtered.slice(0, this.capabilities.maxBubblesPerTurn);
     for (let i = 0; i < capped.length; i++) {
       if (i > 0) {
         const [minMs, maxMs] = delayRangeMs;

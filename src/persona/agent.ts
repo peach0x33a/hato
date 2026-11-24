@@ -72,6 +72,7 @@ import type { SelfConfigInput } from "./self-config.js";
 import { sortToolsCanonically } from "./tool-disclosure.js";
 
 export const NO_REPLY_SENTINEL = "[NO_REPLY]";
+const MAX_INSPECT_TICKETS_PER_TURN = 3;
 
 export type ActiveTurnInterruptOutcome =
   | { action: "none" }
@@ -150,6 +151,8 @@ export class PersonaRuntime {
   private syncedCompactedUntilTs = 0;
   private pendingTranscriptRefresh = false;
   private turnPendingExecutedEvents: RawMessageRecord[] = [];
+  private readonly turnDispatchedTicketIds = new Set<string>();
+  private turnInspectTicketsCount = 0;
   private delegateHandler:
     | ((input: {
         canonicalUserId: string;
@@ -756,9 +759,21 @@ export class PersonaRuntime {
       browserRuntime: this.browserRuntime,
       getMemoryStore: () => this.memoryStore,
       enableReadSkillTool: this.personalSkills.length > 0,
-      extraTools: [
-        ...(this.mcpPool?.getToolsForZone("personal") ?? []),
-      ],
+      extraTools: [...(this.mcpPool?.getToolsForZone("personal") ?? [])],
+      onBeforeInspectTickets: (input) => {
+        const targetId = input.ticketId?.trim();
+        if (
+          this.turnDispatchedTicketIds.size > 0 &&
+          (!targetId || this.turnDispatchedTicketIds.has(targetId))
+        ) {
+          return `该任务刚刚转交后台异步执行（${[...this.turnDispatchedTicketIds].join(", ")}），完成后系统会自动回调通知结果，禁止通过 inspect_tickets 轮询等待。请立即简短回复用户并结束本轮。`;
+        }
+        this.turnInspectTicketsCount += 1;
+        if (this.turnInspectTicketsCount > MAX_INSPECT_TICKETS_PER_TURN) {
+          return `本轮已查询工单进度达上限（${MAX_INSPECT_TICKETS_PER_TURN} 次）。后台任务仍在异步执行中，完成后系统会自动通知，请停止轮询并直接回复用户。`;
+        }
+        return null;
+      },
       ...(this.delegateHandler
         ? {
             onDelegate: (input: { hint: string; urgency?: "normal" | "high"; deliverFiles?: boolean }) => {
@@ -771,6 +786,7 @@ export class PersonaRuntime {
                 deliverFiles: input.deliverFiles,
               });
               if (res.ticketId) {
+                this.turnDispatchedTicketIds.add(res.ticketId);
                 this.recordDispatchedTaskEvent({
                   canonicalUserId,
                   channel: targetChannel,
@@ -810,6 +826,7 @@ export class PersonaRuntime {
                 deliverFiles: input.deliverFiles,
               });
               if (res.ticketId) {
+                this.turnDispatchedTicketIds.add(res.ticketId);
                 this.recordDispatchedTaskEvent({
                   canonicalUserId,
                   channel: targetChannel,
@@ -1194,6 +1211,8 @@ export class PersonaRuntime {
     this.agent.state.thinkingLevel = this.modelRegistry.resolveSlotThinkingLevel("persona");
     this.syncTranscriptIfDrifted(canonicalUserId);
     this.turnPendingExecutedEvents = [];
+    this.turnDispatchedTicketIds.clear();
+    this.turnInspectTicketsCount = 0;
 
     const wmState = this.repo.getWorkingMemory(canonicalUserId);
     const userCreatedAt = Math.max(
@@ -1447,6 +1466,8 @@ export class PersonaRuntime {
       telemetry.unsubscribe();
       this.activeCallStartPerf = null;
       this.activeTurnRecalledMemories = [];
+      this.turnDispatchedTicketIds.clear();
+      this.turnInspectTicketsCount = 0;
       if (!promptErr && !turnState.abortedForSupersede && this.activeTurnEphemeralTail) {
         this.lastCompletedEphemeralTail = this.activeTurnEphemeralTail;
       }
@@ -1542,8 +1563,9 @@ export class PersonaRuntime {
     });
 
     const trimmedFinal = finalText.trim();
-    const isSilentNoReply = isNoReplyOutput(trimmedFinal) && preReplyState.sentBubbles.length === 0;
-    const trailingReply = isSilentNoReply
+    const isNoReplyFinal = isNoReplyOutput(trimmedFinal);
+    const isSilentNoReply = isNoReplyFinal && preReplyState.sentBubbles.length === 0;
+    const trailingReply = isNoReplyFinal
       ? ""
       : trimmedFinal ||
         (preReplyState.sentBubbles.length > 0 ? "" : "嗯……刚刚走神了一下，你再说一遍？");
@@ -1686,6 +1708,7 @@ export class PersonaRuntime {
     promptInstruction: string;
     images?: ImageContent[];
     fallbackToSummary?: boolean;
+    fallbackMessage?: string;
     persistEvent?: boolean;
   }): Promise<string[]> {
     this.activeTurnOriginChannel = params.channel;
@@ -1694,6 +1717,8 @@ export class PersonaRuntime {
     this.agent.state.thinkingLevel = this.modelRegistry.resolveSlotThinkingLevel("persona");
     this.syncTranscriptIfDrifted(params.canonicalUserId);
     this.turnPendingExecutedEvents = [];
+    this.turnDispatchedTicketIds.clear();
+    this.turnInspectTicketsCount = 0;
     this.agent.state.tools = this.allTools;
 
     if (params.persistEvent !== false) {
@@ -1766,6 +1791,8 @@ export class PersonaRuntime {
         this.lastCompletedEphemeralTail = this.activeTurnEphemeralTail;
       }
       this.activeTurnEphemeralTail = null;
+      this.turnDispatchedTicketIds.clear();
+      this.turnInspectTicketsCount = 0;
       this.liveTraceTracker?.finish(liveTraceId);
     }
 
@@ -1775,7 +1802,7 @@ export class PersonaRuntime {
       logWarn("PERSONA", `narrateBackgroundEvent failed: ${summarizeError(turnFailure)}`);
       this.turnPendingExecutedEvents = [];
       this.refreshTranscriptFromDb();
-      return params.fallbackToSummary === false ? [] : [params.eventSummary];
+      return params.fallbackToSummary === false ? [] : [params.fallbackMessage ?? params.eventSummary];
     }
 
     const { turnFirstDeltaPerf, totalDecodeMs } = telemetry.getTiming();
@@ -1791,12 +1818,12 @@ export class PersonaRuntime {
       this.refreshTranscriptFromDb();
       return [];
     }
-    if (trimmed === "[NO_REPLY]" && params.fallbackToSummary === false) {
+    if (isNoReplyOutput(trimmed)) {
       this.turnPendingExecutedEvents = [];
       this.refreshTranscriptFromDb();
-      return ["[NO_REPLY]"];
+      return params.fallbackToSummary === false ? [NO_REPLY_SENTINEL] : [];
     }
-    const reply = trimmed || params.eventSummary;
+    const reply = trimmed || params.fallbackMessage || params.eventSummary;
     const bubbles = splitIntoBubbles(reply, {
       enabled: this.hatoConfig.gateway.bubbles.enabled,
       maxPerTurn: this.hatoConfig.gateway.bubbles.max_per_turn,
@@ -2498,7 +2525,7 @@ function extractAssistantText(msg: AssistantMessage): string {
     .join("");
 }
 
-function isNoReplyOutput(text: string): boolean {
+export function isNoReplyOutput(text: string): boolean {
   if (!text) return false;
   const normalized = text.replace(/[`\s]/g, "").toUpperCase();
   return normalized === "[NO_REPLY]" || normalized === "NO_REPLY";

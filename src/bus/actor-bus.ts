@@ -88,6 +88,10 @@ export class ActorLock {
     return next;
   }
 
+  runDetached<T>(fn: () => T): T {
+    return this.als.exit(fn);
+  }
+
   isBusy(actorKey: string): boolean {
     return this.tails.has(actorKey);
   }

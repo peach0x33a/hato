@@ -48,3 +48,24 @@ test("EventBus dispatches typed events to registered listeners", async () => {
 
   assert.deepEqual(seen, ["每日 RSS 推送已完成"]);
 });
+
+test("ActorLock.runDetached prevents background tasks from bypassing held actor lock", async () => {
+  const lock = new ActorLock();
+  const trace: string[] = [];
+  let bgPromise!: Promise<void>;
+
+  await lock.run("owner", async () => {
+    trace.push("outer-start");
+    bgPromise = lock.runDetached(async () => {
+      await new Promise((r) => setTimeout(r, 5));
+      await lock.run("owner", async () => {
+        trace.push("bg-acquired");
+      });
+    });
+    await new Promise((r) => setTimeout(r, 25));
+    trace.push("outer-end");
+  });
+
+  await bgPromise;
+  assert.deepEqual(trace, ["outer-start", "outer-end", "bg-acquired"]);
+});
