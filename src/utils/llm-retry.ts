@@ -7,7 +7,7 @@ import {
   type Model,
   type Api,
 } from "@earendil-works/pi-ai";
-import { logWarn, summarizeError } from "./logger.js";
+import { logError, logWarn, redactSensitiveTokens, summarizeError } from "./logger.js";
 import { computeBackoffDelayMs, retryWithBackoff, type RetryPolicyConfig } from "./retry.js";
 
 export interface LlmRetryConfig extends RetryPolicyConfig {
@@ -168,6 +168,25 @@ function resolveEffectivePolicy(policy?: Partial<LlmRetryConfig>): LlmRetryConfi
   };
 }
 
+function formatLlmFailureContext(
+  slot?: string,
+  model?: Pick<Model<Api>, "api" | "provider" | "id"> & { baseUrl?: string },
+): string {
+  const parts: string[] = [];
+  if (slot?.trim()) {
+    parts.push(`[${slot.trim().toUpperCase()}]`);
+  }
+  if (model) {
+    const modelLabel = `${model.provider}/${model.id}`;
+    const apiLabel = String(model.api);
+    const baseUrl = model.baseUrl?.trim() ? redactSensitiveTokens(model.baseUrl.trim()) : "";
+    parts.push(
+      baseUrl ? `${modelLabel} (${apiLabel} @ ${baseUrl})` : `${modelLabel} (${apiLabel})`,
+    );
+  }
+  return parts.length > 0 ? parts.join(" ") : "LLM request";
+}
+
 /**
  * Wraps a `streamSimple` invocation with automatic exponential-backoff retries on transient LLM errors
  * (e.g. HTTP 503/429/5xx or network failures) before any content delta is emitted.
@@ -218,6 +237,14 @@ export function streamSimpleWithRetry(
               retryErrorSummary = summarizeError(event.error.errorMessage ?? "LLM transient error");
               break;
             }
+            if (event.reason !== "aborted" && !options.signal?.aborted) {
+              logError(
+                "LLM",
+                `${formatLlmFailureContext(options.slot, options.model)} failed: ${summarizeError(
+                  event.error.errorMessage ?? "LLM error",
+                )}`,
+              );
+            }
             for (const b of buffered) outer.push(b);
             outer.push(event);
             outer.end();
@@ -257,6 +284,14 @@ export function streamSimpleWithRetry(
           if (!options.signal?.aborted && attempt < maxRetries && isRetryableLlmError(fallbackMsg)) {
             retryErrorSummary = summarizeError(fallbackMsg.errorMessage ?? "LLM stream ended unexpectedly");
           } else {
+            if (!options.signal?.aborted && fallbackMsg.stopReason === "error") {
+              logError(
+                "LLM",
+                `${formatLlmFailureContext(options.slot, options.model)} failed: ${summarizeError(
+                  fallbackMsg.errorMessage ?? "LLM stream ended unexpectedly",
+                )}`,
+              );
+            }
             for (const b of buffered) outer.push(b);
             outer.push({ type: "error", reason: "error", error: fallbackMsg });
             outer.end(fallbackMsg);
@@ -266,6 +301,13 @@ export function streamSimpleWithRetry(
       } catch (err) {
         if (hasEmittedContent) {
           const msg = buildSyntheticErrorMessage(summarizeError(err), "error", options.model);
+          if (!options.signal?.aborted) {
+            logError(
+              "LLM",
+              `${formatLlmFailureContext(options.slot, options.model)} failed`,
+              err,
+            );
+          }
           outer.push({ type: "error", reason: "error", error: msg });
           outer.end(msg);
           return;
@@ -274,6 +316,13 @@ export function streamSimpleWithRetry(
           retryErrorSummary = summarizeError(err);
         } else {
           const stopReason = isAbortLike(err) || options.signal?.aborted ? "aborted" : "error";
+          if (stopReason === "error") {
+            logError(
+              "LLM",
+              `${formatLlmFailureContext(options.slot, options.model)} failed`,
+              err,
+            );
+          }
           const msg = buildSyntheticErrorMessage(summarizeError(err), stopReason, options.model);
           for (const b of buffered) outer.push(b);
           outer.push({ type: "error", reason: stopReason, error: msg });
@@ -325,40 +374,56 @@ export function streamSimpleWithRetry(
  */
 export async function completeSimpleWithRetry<T extends AssistantMessage>(
   fn: () => Promise<T>,
-  options: Omit<StreamRetryOptions, "model"> = {},
+  options: StreamRetryOptions = {},
 ): Promise<T> {
   const policy = resolveEffectivePolicy(options.policy);
   let notifiedUser = false;
 
-  return retryWithBackoff(
-    async (attempt) => {
-      if (options.signal?.aborted) {
-        throw new DOMException("Aborted", "AbortError");
-      }
-      const res = await fn();
-      if (res.stopReason === "error" && !options.signal?.aborted && attempt < policy.maxRetries && isRetryableLlmError(res)) {
-        const err = new Error(res.errorMessage || "LLM transient error");
-        const retryNumber = attempt + 1;
-        if (policy.notifyAfterRetry > 0 && retryNumber === policy.notifyAfterRetry && !notifiedUser) {
-          notifiedUser = true;
-          await Promise.resolve(
-            options.onRetryNotice?.({
-              retryNumber,
-              maxRetries: policy.maxRetries,
-              delayMs: 0,
-              errorSummary: summarizeError(res.errorMessage ?? "LLM transient error"),
-            }),
-          ).catch(() => undefined);
+  try {
+    const res = await retryWithBackoff(
+      async (attempt) => {
+        if (options.signal?.aborted) {
+          throw new DOMException("Aborted", "AbortError");
         }
-        throw err;
-      }
-      return res;
-    },
-    {
-      policy,
-      shouldRetry: (err) => !options.signal?.aborted && isRetryableLlmError(err),
-      sleepFn: (ms) => (options.sleepFn ?? abortableSleep)(ms, options.signal),
-      randomFn: options.randomFn,
-    },
-  );
+        const res = await fn();
+        if (res.stopReason === "error" && !options.signal?.aborted && attempt < policy.maxRetries && isRetryableLlmError(res)) {
+          const err = new Error(res.errorMessage || "LLM transient error");
+          const retryNumber = attempt + 1;
+          if (policy.notifyAfterRetry > 0 && retryNumber === policy.notifyAfterRetry && !notifiedUser) {
+            notifiedUser = true;
+            await Promise.resolve(
+              options.onRetryNotice?.({
+                retryNumber,
+                maxRetries: policy.maxRetries,
+                delayMs: 0,
+                errorSummary: summarizeError(res.errorMessage ?? "LLM transient error"),
+              }),
+            ).catch(() => undefined);
+          }
+          throw err;
+        }
+        return res;
+      },
+      {
+        policy,
+        shouldRetry: (err) => !options.signal?.aborted && isRetryableLlmError(err),
+        sleepFn: (ms) => (options.sleepFn ?? abortableSleep)(ms, options.signal),
+        randomFn: options.randomFn,
+      },
+    );
+    if (res.stopReason === "error" && !options.signal?.aborted) {
+      logError(
+        "LLM",
+        `${formatLlmFailureContext(options.slot, options.model)} failed: ${summarizeError(
+          res.errorMessage ?? "LLM error",
+        )}`,
+      );
+    }
+    return res;
+  } catch (err) {
+    if (!isAbortLike(err) && !options.signal?.aborted) {
+      logError("LLM", `${formatLlmFailureContext(options.slot, options.model)} failed`, err);
+    }
+    throw err;
+  }
 }

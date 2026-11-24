@@ -464,12 +464,14 @@ export function TrajectoryPanel({
             });
           } else {
             if (!showModels) continue;
+            const isStepError = st.stopReason === "error" || Boolean(st.errorMessage);
             const outPreview = singleLine(st.text) || singleLine(st.thinking);
-            const displayText =
-              outPreview ||
-              (st.toolCalls.length > 0
-                ? `（仅工具调用：${st.toolCalls.map((c) => c.name).join(", ")}）`
-                : `${tr.provider}/${tr.modelId}`);
+            const displayText = isStepError
+              ? `[错误] ${singleLine(st.errorMessage) || "请求失败"}`
+              : outPreview ||
+                (st.toolCalls.length > 0
+                  ? `（仅工具调用：${st.toolCalls.map((c) => c.name).join(", ")}）`
+                  : `${tr.provider}/${tr.modelId}`);
             const totalTok =
               tr.inputTokens + tr.cacheReadTokens + tr.cacheWriteTokens + tr.outputTokens;
             const stepOutTok = st.tokens?.output ?? tr.outputTokens;
@@ -1251,9 +1253,14 @@ export function TrajectoryPanel({
                       </div>
                       <span className="text-muted-foreground">状态</span>
                       <span className="text-foreground">
-                        {activeStep?.kind === "assistant" && activeStep.stopReason === "toolUse"
-                          ? "工具调用中"
-                          : "已完成"}
+                        {activeStep?.kind === "assistant" &&
+                        (activeStep.stopReason === "error" || Boolean(activeStep.errorMessage)) ? (
+                          <span className="font-medium text-rose-600 dark:text-rose-400">失败</span>
+                        ) : activeStep?.kind === "assistant" && activeStep.stopReason === "toolUse" ? (
+                          "工具调用中"
+                        ) : (
+                          "已完成"
+                        )}
                       </span>
                       <span className="text-muted-foreground">Token</span>
                       <span className="font-mono tabular-nums text-foreground">
@@ -1284,6 +1291,11 @@ export function TrajectoryPanel({
                                     {block.thinking}
                                   </pre>
                                 </details>
+                              )}
+                              {(block.stopReason === "error" || block.errorMessage) && (
+                                <pre className="overflow-auto whitespace-pre-wrap break-words rounded-md border border-rose-500/35 bg-rose-500/10 p-2.5 font-mono text-[11px] leading-relaxed text-rose-700 dark:text-rose-300">
+                                  {block.errorMessage || "请求失败"}
+                                </pre>
                               )}
                               {block.text ? (() => {
                                 const curatorParsed =
@@ -1443,8 +1455,18 @@ export function TrajectoryPanel({
                               {block.thinking}
                             </pre>
                           )}
+                          {(block.stopReason === "error" || block.errorMessage) && (
+                            <pre className="overflow-auto whitespace-pre-wrap break-words rounded-md border border-rose-500/35 bg-rose-500/10 p-2.5 font-mono text-[11px] leading-relaxed text-rose-700 dark:text-rose-300">
+                              {block.errorMessage || "请求失败"}
+                            </pre>
+                          )}
                           <div className="whitespace-pre-wrap break-words text-xs leading-relaxed text-foreground">
-                            {block.text || `（仅调用工具：${block.toolCalls.map((c) => c.name).join(", ")}）`}
+                            {block.text ||
+                              (block.toolCalls.length > 0
+                                ? `（仅调用工具：${block.toolCalls.map((c) => c.name).join(", ")}）`
+                                : block.stopReason === "error" || block.errorMessage
+                                  ? ""
+                                  : "（无输出正文）")}
                           </div>
                         </div>
                       ))

@@ -190,6 +190,7 @@ const ModelEntrySchema = Type.Object({
     }),
   ),
   thinking_level_map: Type.Optional(Type.Record(Type.String(), Type.Union([Type.String(), Type.Null()]))),
+  compat: Type.Optional(Type.Record(Type.String(), Type.Unknown())),
   models_dev: Type.Optional(
     Type.Object({
       enabled: Type.Boolean(),
@@ -269,6 +270,93 @@ export interface ModelRegistryOptions {
 
 const SLOT_OVERRIDES_SETTING_KEY = "model_slot_overrides";
 const SLOT_THINKING_OVERRIDES_SETTING_KEY = "model_slot_thinking_overrides";
+
+function parseHostname(rawUrl: string): string {
+  const trimmed = rawUrl.trim();
+  if (!trimmed) return "";
+  try {
+    return new URL(trimmed).hostname.toLowerCase();
+  } catch {
+    return "";
+  }
+}
+
+/**
+ * Resolve compatibility overrides for a model.
+ *
+ * `@earendil-works/pi-ai` only exempts a small hardcoded list of non-OpenAI endpoints in
+ * `openai-completions`, so custom slugs or third-party relays default to `supportsDeveloperRole: true`,
+ * `supportsStore: true`, `supportsLongCacheRetention: true`, and `max_completion_tokens`.
+ * Many OpenAI-compatible servers reject `role: "developer"` (HTTP 422/400) or unknown fields.
+ * Explicit `providerCompat` / `modelCompat` entries always take precedence over inferred defaults.
+ */
+export function resolveModelCompat(params: {
+  api: Api;
+  providerSlug: string;
+  baseUrl: string;
+  modelId: string;
+  providerCompat?: Record<string, unknown>;
+  modelCompat?: Record<string, unknown>;
+}): Model<Api>["compat"] {
+  const host = parseHostname(params.baseUrl);
+  const slug = params.providerSlug.trim().toLowerCase();
+  const modelId = params.modelId.trim();
+
+  const inferred: Record<string, unknown> = {};
+
+  if (params.api === "openai-completions") {
+    const isOfficialOpenAIHost =
+      host === "api.openai.com" ||
+      host.endsWith(".openai.azure.com") ||
+      host.endsWith(".cognitiveservices.azure.com");
+    const isOpenRouter =
+      slug === "openrouter" ||
+      host === "openrouter.ai" ||
+      host.endsWith(".openrouter.ai");
+    const isGithubCopilot =
+      slug === "github-copilot" ||
+      host === "api.githubcopilot.com" ||
+      host.endsWith(".githubcopilot.com");
+
+    if (!isOfficialOpenAIHost && !isOpenRouter && !isGithubCopilot) {
+      inferred.supportsDeveloperRole = false;
+      inferred.supportsStore = false;
+      inferred.supportsLongCacheRetention = false;
+      if (!/(?:^|\/)(?:o[134](?:-|$)|gpt-5(?:[.-]|$))/i.test(modelId)) {
+        inferred.maxTokensField = "max_tokens";
+      }
+
+      if (slug === "mistral" || host === "api.mistral.ai" || host.endsWith(".mistral.ai")) {
+        inferred.supportsReasoningEffort = false;
+      } else if (host.includes("dashscope") || slug === "dashscope" || slug === "qwen") {
+        inferred.thinkingFormat = "qwen";
+        inferred.supportsReasoningEffort = false;
+      } else if (slug === "minimax" || slug === "minimax-cn" || host.includes("minimax")) {
+        inferred.supportsReasoningEffort = false;
+      } else if (
+        slug === "zhipuai" ||
+        slug === "zhipu" ||
+        slug === "zai" ||
+        slug === "zai-coding-cn" ||
+        host.endsWith("bigmodel.cn") ||
+        host.endsWith("z.ai")
+      ) {
+        inferred.thinkingFormat = "zai";
+        inferred.supportsReasoningEffort = false;
+      } else if (host.includes("volces.com") || host.includes("bytepluses.com")) {
+        inferred.supportsReasoningEffort = false;
+      }
+    }
+  }
+
+  const merged: Record<string, unknown> = {
+    ...inferred,
+    ...(params.providerCompat ?? {}),
+    ...(params.modelCompat ?? {}),
+  };
+
+  return Object.keys(merged).length > 0 ? (merged as Model<Api>["compat"]) : undefined;
+}
 
 interface StoredProviderRecord extends ResolvedProviderMeta {
   isExtra: boolean;
@@ -426,7 +514,14 @@ function buildValidatedModelsCatalog(
         contextWindow: entry.context_window ?? 128_000,
         maxTokens: entry.max_tokens ?? 8_192,
         headers: mergedHeaders,
-        compat: providerCfg.compat as Model<Api>["compat"],
+        compat: resolveModelCompat({
+          api: modelApi,
+          providerSlug,
+          baseUrl: entry.base_url ?? providerCfg.base_url,
+          modelId,
+          providerCompat: providerCfg.compat,
+          modelCompat: entry.compat,
+        }),
       };
 
       builtModels.push(model);

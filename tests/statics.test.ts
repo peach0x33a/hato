@@ -8,7 +8,10 @@ import { runStaticsCli } from "../src/cli/statics.js";
 import { openDatabase } from "../src/db/client.js";
 import { HatoRepository } from "../src/db/repo.js";
 import {
+  buildFailedTraceSteps,
   computeTurnMetrics,
+  extractTraceErrorMessage,
+  extractTraceSteps,
   formatLlmTelemetryLog,
   parseSinceSpec,
   renderStaticsReport,
@@ -240,4 +243,55 @@ test("runStaticsCli supports filtering, summary, --json, and help output", () =>
   } finally {
     rmSync(tempDir, { recursive: true, force: true });
   }
+});
+
+test("formatLlmTelemetryLog, extractTraceSteps, buildFailedTraceSteps, and extractTraceErrorMessage surface redacted errors", () => {
+  const errLine = formatLlmTelemetryLog({
+    slot: "persona",
+    provider: "custom-relay",
+    modelId: "glm-5.3-flash",
+    api: "openai-completions",
+    stopReason: "error",
+    errorMessage: "422 Invalid role: Bearer secret_token_123",
+    inputTokens: 0,
+    outputTokens: 0,
+    cacheReadTokens: 0,
+    cacheWriteTokens: 0,
+    ttftMs: 120,
+    latencyMs: 120,
+    color: false,
+  });
+  assert.ok(errLine.includes("stop=error"));
+  assert.ok(errLine.includes("error="));
+  assert.ok(errLine.includes("Bearer ***"));
+  assert.ok(!errLine.includes("secret_token_123"));
+
+  const extracted = extractTraceSteps([
+    {
+      role: "assistant",
+      content: [],
+      stopReason: "error",
+      errorMessage: "401 Unauthorized: Bearer my_secret_key",
+    },
+  ]);
+  assert.equal(extracted.length, 1);
+  assert.equal(extracted[0]?.kind, "assistant");
+  if (extracted[0]?.kind === "assistant") {
+    assert.equal(extracted[0].stopReason, "error");
+    assert.equal(extracted[0].errorMessage, "401 Unauthorized: Bearer ***");
+  }
+
+  // Exception thrown before any assistant message was emitted
+  const syntheticSteps = buildFailedTraceSteps([], new Error("422 Input tag 'developer' invalid"));
+  assert.equal(syntheticSteps.length, 1);
+  assert.equal(syntheticSteps[0]?.kind, "assistant");
+  if (syntheticSteps[0]?.kind === "assistant") {
+    assert.equal(syntheticSteps[0].stopReason, "error");
+    assert.ok(syntheticSteps[0].errorMessage?.includes("422 Input tag 'developer' invalid"));
+  }
+  assert.equal(
+    extractTraceErrorMessage(JSON.stringify(syntheticSteps)),
+    "422 Input tag 'developer' invalid",
+  );
+  assert.equal(extractTraceErrorMessage("[]"), null);
 });

@@ -112,7 +112,7 @@ import type { LiveTraceTracker } from "../stats/live-trace.js";
 import type { NotebookService } from "../notebook/service.js";
 import type { NotebookEntryKind } from "../notebook/store.js";
 import type { StickerService } from "../stickers/service.js";
-import { getRuntimeLogs, logInfo, logWarn, subscribeRuntimeLogs, summarizeError } from "../utils/logger.js";
+import { getRuntimeLogs, logError, logInfo, logWarn, subscribeRuntimeLogs, summarizeError } from "../utils/logger.js";
 import { parseWorkerMandate } from "../dispatch/schema.js";
 import { workerActivityHub } from "../worker/activity-stream.js";
 import {
@@ -554,6 +554,11 @@ export class WebConsoleServer {
     } catch (err) {
       const statusCode = err instanceof HttpStatusError ? err.statusCode : 500;
       const msg = err instanceof HttpStatusError ? err.message : summarizeError(err);
+      if (statusCode >= 500) {
+        logError("WEB", `${method} ${pathname} (${statusCode})`, err);
+      } else if (statusCode >= 400 && statusCode !== 401) {
+        logWarn("WEB", `${method} ${pathname} (${statusCode}): ${msg}`);
+      }
       if (!res.headersSent) {
         sendJson(res, statusCode, { ok: false, error: msg });
       } else {
@@ -1161,6 +1166,7 @@ export class WebConsoleServer {
 
       emit({ type: "done", pendingTakeover: this.deps.getBrowserRuntime().isPendingTakeover() });
     } catch (err) {
+      logError("WEB", "chat turn failed", err);
       emit({ type: "error", message: summarizeError(err) });
     } finally {
       if (!res.writableEnded) res.end();
@@ -1902,6 +1908,7 @@ export class WebConsoleServer {
       apiKeyEnv?: unknown;
       apiKeyOverride?: unknown;
       providerHeaders?: unknown;
+      providerCompat?: unknown;
       model?: {
         id?: unknown;
         name?: unknown;
@@ -1912,6 +1919,7 @@ export class WebConsoleServer {
         input?: unknown;
         context_window?: unknown;
         max_tokens?: unknown;
+        compat?: unknown;
       };
     };
 
@@ -1941,6 +1949,11 @@ export class WebConsoleServer {
       return;
     }
 
+    const toPlainRecord = (val: unknown): Record<string, unknown> | undefined =>
+      val && typeof val === "object" && !Array.isArray(val)
+        ? (val as Record<string, unknown>)
+        : undefined;
+
     const result = await probeAdHocModel({
       providerSlug,
       api,
@@ -1948,6 +1961,7 @@ export class WebConsoleServer {
       apiKeyEnv,
       apiKeyOverride,
       providerHeaders: this.toStringMap(body.providerHeaders),
+      providerCompat: toPlainRecord(body.providerCompat),
       model: {
         id: modelId,
         name: typeof body.model?.name === "string" ? body.model.name.trim() : undefined,
@@ -1961,11 +1975,19 @@ export class WebConsoleServer {
         context_window:
           typeof body.model?.context_window === "number" ? body.model.context_window : undefined,
         max_tokens: typeof body.model?.max_tokens === "number" ? body.model.max_tokens : undefined,
+        compat: toPlainRecord(body.model?.compat),
       },
       modelRegistry: this.deps.getModelRegistry(),
       proxyRouter: this.deps.getProxyRouter(),
       envOverrides: readEnvMap(this.envPath),
     });
+
+    if (!result.ok) {
+      logWarn(
+        "LLM",
+        `[TEST] ${result.target} (${result.api}) failed in ${result.latencyMs}ms: ${result.error ?? "unknown error"}`,
+      );
+    }
 
     sendJson(res, 200, { ok: true, result });
   }

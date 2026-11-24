@@ -802,6 +802,7 @@ export type TraceStepRecord =
       thinking?: string;
       toolCalls: Array<{ id: string; name: string; args: unknown }>;
       stopReason?: string;
+      errorMessage?: string;
       tokens?: {
         input: number;
         output: number;
@@ -1232,6 +1233,7 @@ export const api = {
     apiKeyEnv?: string;
     apiKeyOverride?: string;
     providerHeaders?: Record<string, string>;
+    providerCompat?: Record<string, unknown>;
     model: ModelDefinitionConfig;
   }) =>
     requestJson<{

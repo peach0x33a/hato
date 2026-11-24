@@ -1,4 +1,4 @@
-import { colorize, formatLogLine, shouldUseColor } from "../utils/logger.js";
+import { colorize, formatLogLine, redactSensitiveTokens, shouldUseColor, summarizeError } from "../utils/logger.js";
 
 export interface RawTurnUsage {
   inputTokens: number;
@@ -25,6 +25,7 @@ export type TraceStepRecord =
       thinking?: string;
       toolCalls: Array<{ id: string; name: string; args: unknown }>;
       stopReason?: string;
+      errorMessage?: string;
       tokens?: {
         input: number;
         output: number;
@@ -45,6 +46,10 @@ export type TraceStepRecord =
 function clipTraceText(text: string, maxChars: number): string {
   if (text.length <= maxChars) return text;
   return `${text.slice(0, maxChars)}\n…(已截断，共 ${text.length} 字符)`;
+}
+
+function sanitizeTraceErrorText(raw: string): string {
+  return clipTraceText(redactSensitiveTokens(raw.trim()), 2000);
 }
 
 function formatToolContent(content: unknown): string {
@@ -78,6 +83,7 @@ export function extractTraceSteps(messages: readonly unknown[]): TraceStepRecord
       role?: unknown;
       content?: unknown;
       stopReason?: unknown;
+      errorMessage?: unknown;
       usage?: { input?: number; output?: number; cacheRead?: number; cacheWrite?: number };
       toolCallId?: unknown;
       toolName?: unknown;
@@ -111,6 +117,11 @@ export function extractTraceSteps(messages: readonly unknown[]): TraceStepRecord
         }
       }
 
+      const errorMessage =
+        typeof msg.errorMessage === "string" && msg.errorMessage.trim()
+          ? sanitizeTraceErrorText(msg.errorMessage)
+          : undefined;
+
       stepNo += 1;
       steps.push({
         kind: "assistant",
@@ -121,6 +132,7 @@ export function extractTraceSteps(messages: readonly unknown[]): TraceStepRecord
           : {}),
         toolCalls,
         ...(typeof msg.stopReason === "string" ? { stopReason: msg.stopReason } : {}),
+        ...(errorMessage ? { errorMessage } : {}),
         ...(msg.usage
           ? {
               tokens: {
@@ -151,6 +163,69 @@ export function extractTraceSteps(messages: readonly unknown[]): TraceStepRecord
   }
 
   return steps;
+}
+
+/**
+ * Builds trace steps for a failed turn/call, ensuring the final assistant step records `stopReason: "error"`
+ * and a redacted `errorMessage` even if the failure threw before an assistant message was appended.
+ */
+export function buildFailedTraceSteps(
+  messages: readonly unknown[],
+  error: unknown,
+): TraceStepRecord[] {
+  const steps = extractTraceSteps(messages);
+  const rawErr =
+    error instanceof Error && error.message.trim()
+      ? error.message
+      : summarizeError(error);
+  const errText = sanitizeTraceErrorText(rawErr || "请求失败");
+
+  for (let i = steps.length - 1; i >= 0; i--) {
+    const st = steps[i]!;
+    if (st.kind === "assistant") {
+      if (st.stopReason === "error") {
+        if (!st.errorMessage) {
+          st.errorMessage = errText;
+        }
+        return steps;
+      }
+      break;
+    }
+  }
+
+  steps.push({
+    kind: "assistant",
+    step: steps.length + 1,
+    text: "",
+    toolCalls: [],
+    stopReason: "error",
+    errorMessage: errText,
+  });
+  return steps;
+}
+
+/**
+ * Extracts the latest assistant error message from a serialized `steps_json` trace column, or null if none.
+ */
+export function extractTraceErrorMessage(stepsJson: string | null | undefined): string | null {
+  if (!stepsJson) return null;
+  try {
+    const parsed = JSON.parse(stepsJson) as unknown;
+    if (!Array.isArray(parsed)) return null;
+    for (let i = parsed.length - 1; i >= 0; i--) {
+      const item = parsed[i];
+      if (!item || typeof item !== "object") continue;
+      const rec = item as { kind?: unknown; stopReason?: unknown; errorMessage?: unknown };
+      if (rec.kind !== "assistant") continue;
+      const errMsg = typeof rec.errorMessage === "string" ? rec.errorMessage.trim() : "";
+      if (rec.stopReason === "error" || errMsg.length > 0) {
+        return errMsg || "请求失败";
+      }
+    }
+  } catch {
+    // Ignore malformed JSON
+  }
+  return null;
 }
 
 export interface AggregatedAgentTraceMetrics {
@@ -624,6 +699,7 @@ export interface LlmTelemetryLogInput {
   api: string;
   stopReason: string;
   rawStopReason?: string;
+  errorMessage?: string;
   thinkingLevel?: string;
   inputTokens: number;
   outputTokens: number;
@@ -701,6 +777,9 @@ export function formatLlmTelemetryLog(input: LlmTelemetryLogInput): string {
   const tailParts: string[] = [];
   if (typeof input.costTotal === "number" && input.costTotal > 0) {
     tailParts.push(`cost=$${input.costTotal.toFixed(6)}`);
+  }
+  if (input.errorMessage && input.errorMessage.trim()) {
+    tailParts.push(colorize(`error=${summarizeError(input.errorMessage)}`, "31", useColor));
   }
   if (input.toolCalls && input.toolCalls.length > 0) {
     tailParts.push(colorize(`tools=[${input.toolCalls.join(",")}]`, "33", useColor));

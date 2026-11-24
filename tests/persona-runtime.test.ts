@@ -1337,3 +1337,80 @@ hindsight_llm = "faux-provider/faux-persona-1"
     rmSync(tempDir, { recursive: true, force: true });
   }
 });
+
+test("PersonaRuntime records a failed turn_traces row when the LLM call returns an error", async () => {
+  const faux = fauxProvider({
+    api: "hato-faux-api",
+    provider: "faux-provider",
+    models: [{ id: "faux-persona-1", name: "Faux Persona" }],
+    tokensPerSecond: 10000,
+  });
+
+  const tempDir = mkdtempSync(join(tmpdir(), "hato-failed-trace-"));
+  const hatoTomlPath = join(tempDir, "hato.toml");
+  const modelsTomlPath = join(tempDir, "models.toml");
+
+  writeHatoConfig(hatoTomlPath, createDefaultHatoConfig(), { backup: false });
+  writeFileSync(
+    modelsTomlPath,
+    `
+[slots]
+persona = "faux-provider/faux-persona-1"
+router = "faux-provider/faux-persona-1"
+curator = "faux-provider/faux-persona-1"
+worker = "faux-provider/faux-persona-1"
+hindsight_llm = "faux-provider/faux-persona-1"
+
+[providers]
+`,
+    "utf8",
+  );
+
+  const dbHandle = openDatabase(":memory:");
+  try {
+    const hatoConfig = loadHatoConfig(hatoTomlPath);
+    const repo = new HatoRepository(dbHandle.db);
+    const modelRegistry = new ModelRegistry(modelsTomlPath, repo, {
+      extraProviders: [faux.provider],
+    });
+    const proxyRouter = new ScopedProxyRouter(hatoConfig.network?.proxies ?? []);
+    const runtime = new PersonaRuntime(hatoConfig, modelRegistry, proxyRouter, repo);
+
+    faux.setResponses([
+      () => {
+        throw new Error("422 Input tag 'developer' invalid");
+      },
+    ]);
+
+    await assert.rejects(
+      () =>
+        runtime.handleUserBatch({
+          canonicalUserId: "owner",
+          originChannel: "web",
+          originPlatformUserId: "owner",
+          platformMsgIds: ["m_err_1"],
+          latestPlatformMsgId: "m_err_1",
+          combinedText: "你好",
+          attachments: [],
+          firstTimestampMs: Date.now(),
+          lastTimestampMs: Date.now(),
+        }),
+      /422 Input tag 'developer' invalid/,
+    );
+
+    const traces = repo.listTurnTraces("owner", 10);
+    assert.equal(traces.length, 1);
+    assert.equal(traces[0]?.slot, "persona");
+    assert.ok(traces[0]?.timeCardText.includes("[error]"));
+    const steps = JSON.parse(traces[0]?.stepsJson ?? "[]") as Array<{
+      kind?: string;
+      stopReason?: string;
+      errorMessage?: string;
+    }>;
+    assert.equal(steps[steps.length - 1]?.stopReason, "error");
+    assert.ok(steps[steps.length - 1]?.errorMessage?.includes("422 Input tag 'developer' invalid"));
+  } finally {
+    dbHandle.close();
+    rmSync(tempDir, { recursive: true, force: true });
+  }
+});

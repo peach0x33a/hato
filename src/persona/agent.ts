@@ -40,6 +40,7 @@ import {
 } from "../skills/loader.js";
 import {
   aggregateAssistantTraceMetrics,
+  buildFailedTraceSteps,
   computeTurnMetrics,
   extractTraceSteps,
   formatLlmTelemetryLog,
@@ -1533,6 +1534,44 @@ export class PersonaRuntime {
     const turnFailure =
       promptErr ?? (this.agent.state.errorMessage ? new Error(this.agent.state.errorMessage) : null);
     if (turnFailure) {
+      const failedMessages = this.agent.state.messages.slice(startIndex);
+      const { totalUsage, toolCalls } = extractTurnMetrics(
+        failedMessages,
+        preReplyState.sentMessageRefs,
+      );
+      const failedMetrics = computeTurnMetrics({
+        inputTokens: totalUsage.input,
+        outputTokens: totalUsage.output,
+        cacheReadTokens: totalUsage.cacheRead,
+        cacheWriteTokens: totalUsage.cacheWrite,
+        latencyMs,
+        ttftMs,
+        decodeMs: totalDecodeMs > 0 ? totalDecodeMs : undefined,
+      });
+      try {
+        this.repo.insertTurnTrace({
+          canonicalUserId,
+          slot: "persona",
+          provider: resolved.providerSlug,
+          modelId: resolved.model.id,
+          api: String(resolved.model.api),
+          inputTokens: totalUsage.input,
+          outputTokens: totalUsage.output,
+          cacheReadTokens: totalUsage.cacheRead,
+          cacheWriteTokens: totalUsage.cacheWrite,
+          cacheHitRate: failedMetrics.cacheHitRate,
+          ttftMs,
+          tps: failedMetrics.decodeTps,
+          userPreview,
+          recalledIds: [...this.activeTurnRecalledIds],
+          timeCardText: `${this.lastTimeCardSnapshot}\n[error] ${summarizeError(turnFailure)}`.trim(),
+          toolCalls,
+          steps: buildFailedTraceSteps(failedMessages, turnFailure),
+          latencyMs,
+        });
+      } catch {
+        // Never let trace recording mask the original turn failure.
+      }
       this.persistInterruptedTurn({
         canonicalUserId,
         channel: batch.originChannel,
@@ -1800,6 +1839,45 @@ export class PersonaRuntime {
       promptErr ?? (this.agent.state.errorMessage ? new Error(this.agent.state.errorMessage) : null);
     if (turnFailure) {
       logWarn("PERSONA", `narrateBackgroundEvent failed: ${summarizeError(turnFailure)}`);
+      const { turnFirstDeltaPerf, totalDecodeMs } = telemetry.getTiming();
+      const latencyMs = Math.max(1, Math.round(performance.now() - startPerf));
+      const ttftMs =
+        turnFirstDeltaPerf !== null ? Math.max(0, Math.round(turnFirstDeltaPerf - startPerf)) : latencyMs;
+      const failedMessages = this.agent.state.messages.slice(startIndex);
+      const { totalUsage, toolCalls } = extractTurnMetrics(failedMessages);
+      const failedMetrics = computeTurnMetrics({
+        inputTokens: totalUsage.input,
+        outputTokens: totalUsage.output,
+        cacheReadTokens: totalUsage.cacheRead,
+        cacheWriteTokens: totalUsage.cacheWrite,
+        latencyMs,
+        ttftMs,
+        decodeMs: totalDecodeMs > 0 ? totalDecodeMs : undefined,
+      });
+      try {
+        this.repo.insertTurnTrace({
+          canonicalUserId: params.canonicalUserId,
+          slot: "persona",
+          provider: resolved.providerSlug,
+          modelId: resolved.model.id,
+          api: String(resolved.model.api),
+          inputTokens: totalUsage.input,
+          outputTokens: totalUsage.output,
+          cacheReadTokens: totalUsage.cacheRead,
+          cacheWriteTokens: totalUsage.cacheWrite,
+          cacheHitRate: failedMetrics.cacheHitRate,
+          ttftMs,
+          tps: failedMetrics.decodeTps,
+          userPreview,
+          recalledIds: [],
+          timeCardText: `${params.promptInstruction}\n[error] ${summarizeError(turnFailure)}`.trim(),
+          toolCalls,
+          steps: buildFailedTraceSteps(failedMessages, turnFailure),
+          latencyMs,
+        });
+      } catch {
+        // Ignore trace persistence failures on background narration errors.
+      }
       this.turnPendingExecutedEvents = [];
       this.refreshTranscriptFromDb();
       return params.fallbackToSummary === false ? [] : [params.fallbackMessage ?? params.eventSummary];
@@ -2029,6 +2107,7 @@ export class PersonaRuntime {
             api: String(msg.api),
             stopReason: msg.stopReason,
             rawStopReason: msg.rawStopReason,
+            errorMessage: msg.errorMessage,
             thinkingLevel: msg.providerThinkingLevel ?? msg.thinkingLevel,
             inputTokens: msg.usage.input,
             outputTokens: msg.usage.output,
@@ -2119,37 +2198,78 @@ export class PersonaRuntime {
 
     const callStartPerf = performance.now();
     let firstDeltaPerf: number | null = null;
-    const result = await this.proxyRouter.runWithScope(`llm-calling.${resolved.providerSlug}`, async () => {
-      const stream = streamSimpleWithRetry(
-        () =>
-          this.modelRegistry.models.streamSimple(
-            resolved.model,
-            { systemPrompt, messages: llmMessages },
-            {
-              apiKey,
-              sessionId: `${params.canonicalUserId}:compaction`,
-              disableContinuation: true,
-              ...(supportsCustomFetchOption(resolved.model.api) ? { fetch: scopedFetch } : {}),
-              reasoning: compactionThinking === "off" ? undefined : compactionThinking,
-            },
-          ),
-        {
-          policy: resolveLlmRetryConfig(this.hatoConfig),
-          model: resolved.model,
-          slot: "COMPACTION",
-        },
-      );
-      for await (const ev of stream) {
-        if (
-          firstDeltaPerf === null &&
-          (ev.type === "text_delta" || ev.type === "thinking_delta" || ev.type === "toolcall_delta") &&
-          ev.delta.length > 0
-        ) {
-          firstDeltaPerf = performance.now();
+    const prevSummaryChars = params.previousSummary.trim().length;
+    const baseCompactSnapshot = [
+      "task: context_compaction",
+      "compaction_mode: curator",
+      `compacted_messages: ${params.messagesToSummarize.length}`,
+      `timezone: ${tz}`,
+      prevSummaryChars > 0 ? `previous_summary_chars: ${prevSummaryChars}` : "",
+    ]
+      .filter(Boolean)
+      .join("\n");
+
+    let result;
+    try {
+      result = await this.proxyRouter.runWithScope(`llm-calling.${resolved.providerSlug}`, async () => {
+        const stream = streamSimpleWithRetry(
+          () =>
+            this.modelRegistry.models.streamSimple(
+              resolved.model,
+              { systemPrompt, messages: llmMessages },
+              {
+                apiKey,
+                sessionId: `${params.canonicalUserId}:compaction`,
+                disableContinuation: true,
+                ...(supportsCustomFetchOption(resolved.model.api) ? { fetch: scopedFetch } : {}),
+                reasoning: compactionThinking === "off" ? undefined : compactionThinking,
+              },
+            ),
+          {
+            policy: resolveLlmRetryConfig(this.hatoConfig),
+            model: resolved.model,
+            slot: "COMPACTION",
+          },
+        );
+        for await (const ev of stream) {
+          if (
+            firstDeltaPerf === null &&
+            (ev.type === "text_delta" || ev.type === "thinking_delta" || ev.type === "toolcall_delta") &&
+            ev.delta.length > 0
+          ) {
+            firstDeltaPerf = performance.now();
+          }
         }
+        return stream.result();
+      });
+    } catch (err) {
+      const latencyMs = Math.max(1, Math.round(performance.now() - callStartPerf));
+      try {
+        this.repo.insertTurnTrace({
+          canonicalUserId: params.canonicalUserId,
+          slot: "curator",
+          provider: resolved.providerSlug,
+          modelId: resolved.model.id,
+          api: String(resolved.model.api),
+          inputTokens: 0,
+          outputTokens: 0,
+          cacheReadTokens: 0,
+          cacheWriteTokens: 0,
+          cacheHitRate: 0,
+          ttftMs: latencyMs,
+          tps: null,
+          userPreview: `[上下文压缩] 压缩 ${params.messagesToSummarize.length} 条历史对话`,
+          recalledIds: [],
+          timeCardText: `${baseCompactSnapshot}\n[error] ${summarizeError(err)}`,
+          toolCalls: [],
+          steps: buildFailedTraceSteps([], err),
+          latencyMs,
+        });
+      } catch {
+        // Ignore trace DB error
       }
-      return stream.result();
-    });
+      throw err;
+    }
 
     const nowPerf = performance.now();
     const latencyMs = Math.max(1, Math.round(nowPerf - callStartPerf));
@@ -2168,6 +2288,7 @@ export class PersonaRuntime {
         api: String(result.api),
         stopReason: result.stopReason,
         rawStopReason: result.rawStopReason,
+        errorMessage: result.errorMessage,
         thinkingLevel: result.providerThinkingLevel ?? result.thinkingLevel,
         inputTokens: result.usage.input,
         outputTokens: result.usage.output,
@@ -2183,10 +2304,6 @@ export class PersonaRuntime {
       }),
     );
 
-    if (result.stopReason === "error" || result.stopReason === "aborted") {
-      throw new Error(result.errorMessage || "Compaction summary generation failed");
-    }
-
     const curatorMetrics = computeTurnMetrics({
       inputTokens: result.usage.input,
       outputTokens: result.usage.output,
@@ -2196,7 +2313,38 @@ export class PersonaRuntime {
       ttftMs,
       decodeMs,
     });
-    const prevSummaryChars = params.previousSummary.trim().length;
+
+    if (result.stopReason === "error" || result.stopReason === "aborted") {
+      if (result.stopReason === "error") {
+        const errMsg = result.errorMessage || "Compaction summary generation failed";
+        try {
+          this.repo.insertTurnTrace({
+            canonicalUserId: params.canonicalUserId,
+            slot: "curator",
+            provider: resolved.providerSlug,
+            modelId: result.model || resolved.model.id,
+            api: String(result.api),
+            inputTokens: result.usage.input,
+            outputTokens: result.usage.output,
+            cacheReadTokens: result.usage.cacheRead,
+            cacheWriteTokens: result.usage.cacheWrite,
+            cacheHitRate: curatorMetrics.cacheHitRate,
+            ttftMs,
+            tps: curatorMetrics.decodeTps,
+            userPreview: `[上下文压缩] 压缩 ${params.messagesToSummarize.length} 条历史对话`,
+            recalledIds: [],
+            timeCardText: `${baseCompactSnapshot}\n[error] ${summarizeError(errMsg)}`,
+            toolCalls: [],
+            steps: buildFailedTraceSteps([result], errMsg),
+            latencyMs,
+          });
+        } catch {
+          // Ignore trace DB error
+        }
+      }
+      throw new Error(result.errorMessage || "Compaction summary generation failed");
+    }
+
     this.repo.insertTurnTrace({
       canonicalUserId: params.canonicalUserId,
       slot: "curator",
@@ -2212,15 +2360,7 @@ export class PersonaRuntime {
       tps: curatorMetrics.decodeTps,
       userPreview: `[上下文压缩] 压缩 ${params.messagesToSummarize.length} 条历史对话`,
       recalledIds: [],
-      timeCardText: [
-        "task: context_compaction",
-        "compaction_mode: curator",
-        `compacted_messages: ${params.messagesToSummarize.length}`,
-        `timezone: ${tz}`,
-        prevSummaryChars > 0 ? `previous_summary_chars: ${prevSummaryChars}` : "",
-      ]
-        .filter(Boolean)
-        .join("\n"),
+      timeCardText: baseCompactSnapshot,
       toolCalls: [],
       steps: extractTraceSteps([result]),
       latencyMs,
@@ -2338,34 +2478,76 @@ export class PersonaRuntime {
 
     const callStartPerf = performance.now();
     let firstDeltaPerf: number | null = null;
-    const result = await this.proxyRouter.runWithScope(`llm-calling.${resolved.providerSlug}`, async () => {
-      const stream = streamSimpleWithRetry(
-        () =>
-          this.modelRegistry.models.streamSimple(resolved.model, llmContext, {
-            apiKey,
-            sessionId: params.canonicalUserId,
-            disableContinuation: true,
-            identity: DEFAULT_AGENT_IDENTITY,
-            ...(supportsCustomFetchOption(resolved.model.api) ? { fetch: scopedFetch } : {}),
-            reasoning: compactionThinking === "off" ? undefined : compactionThinking,
-          }),
-        {
-          policy: resolveLlmRetryConfig(this.hatoConfig),
-          model: resolved.model,
-          slot: "COMPACTION",
-        },
-      );
-      for await (const ev of stream) {
-        if (
-          firstDeltaPerf === null &&
-          (ev.type === "text_delta" || ev.type === "thinking_delta" || ev.type === "toolcall_delta") &&
-          ev.delta.length > 0
-        ) {
-          firstDeltaPerf = performance.now();
+    const prevSummaryChars = params.previousSummary.trim().length;
+    const baseForkSnapshot = [
+      "task: context_compaction",
+      "compaction_mode: reuse_conversation",
+      `forked_live_prefix: ${hasLivePrefix}`,
+      `compacted_messages: ${params.messagesToSummarize.length}`,
+      `timezone: ${tz}`,
+      prevSummaryChars > 0 ? `previous_summary_chars: ${prevSummaryChars}` : "",
+    ]
+      .filter(Boolean)
+      .join("\n");
+
+    let result;
+    try {
+      result = await this.proxyRouter.runWithScope(`llm-calling.${resolved.providerSlug}`, async () => {
+        const stream = streamSimpleWithRetry(
+          () =>
+            this.modelRegistry.models.streamSimple(resolved.model, llmContext, {
+              apiKey,
+              sessionId: params.canonicalUserId,
+              disableContinuation: true,
+              identity: DEFAULT_AGENT_IDENTITY,
+              ...(supportsCustomFetchOption(resolved.model.api) ? { fetch: scopedFetch } : {}),
+              reasoning: compactionThinking === "off" ? undefined : compactionThinking,
+            }),
+          {
+            policy: resolveLlmRetryConfig(this.hatoConfig),
+            model: resolved.model,
+            slot: "COMPACTION",
+          },
+        );
+        for await (const ev of stream) {
+          if (
+            firstDeltaPerf === null &&
+            (ev.type === "text_delta" || ev.type === "thinking_delta" || ev.type === "toolcall_delta") &&
+            ev.delta.length > 0
+          ) {
+            firstDeltaPerf = performance.now();
+          }
         }
+        return stream.result();
+      });
+    } catch (err) {
+      const latencyMs = Math.max(1, Math.round(performance.now() - callStartPerf));
+      try {
+        this.repo.insertTurnTrace({
+          canonicalUserId: params.canonicalUserId,
+          slot: "persona",
+          provider: resolved.providerSlug,
+          modelId: resolved.model.id,
+          api: String(resolved.model.api),
+          inputTokens: 0,
+          outputTokens: 0,
+          cacheReadTokens: 0,
+          cacheWriteTokens: 0,
+          cacheHitRate: 0,
+          ttftMs: latencyMs,
+          tps: null,
+          userPreview: `[上下文压缩·复用对话] 压缩 ${params.messagesToSummarize.length} 条历史对话`,
+          recalledIds: [],
+          timeCardText: `${baseForkSnapshot}\n[error] ${summarizeError(err)}`,
+          toolCalls: [],
+          steps: buildFailedTraceSteps([], err),
+          latencyMs,
+        });
+      } catch {
+        // Ignore trace DB error
       }
-      return stream.result();
-    });
+      throw err;
+    }
 
     const nowPerf = performance.now();
     const latencyMs = Math.max(1, Math.round(nowPerf - callStartPerf));
@@ -2384,6 +2566,7 @@ export class PersonaRuntime {
         api: String(result.api),
         stopReason: result.stopReason,
         rawStopReason: result.rawStopReason,
+        errorMessage: result.errorMessage,
         thinkingLevel: result.providerThinkingLevel ?? result.thinkingLevel,
         inputTokens: result.usage.input,
         outputTokens: result.usage.output,
@@ -2399,10 +2582,6 @@ export class PersonaRuntime {
       }),
     );
 
-    if (result.stopReason === "error" || result.stopReason === "aborted") {
-      throw new Error(result.errorMessage || "Forked compaction summary generation failed");
-    }
-
     const metrics = computeTurnMetrics({
       inputTokens: result.usage.input,
       outputTokens: result.usage.output,
@@ -2412,7 +2591,38 @@ export class PersonaRuntime {
       ttftMs,
       decodeMs,
     });
-    const prevSummaryChars = params.previousSummary.trim().length;
+
+    if (result.stopReason === "error" || result.stopReason === "aborted") {
+      if (result.stopReason === "error") {
+        const errMsg = result.errorMessage || "Forked compaction summary generation failed";
+        try {
+          this.repo.insertTurnTrace({
+            canonicalUserId: params.canonicalUserId,
+            slot: "persona",
+            provider: resolved.providerSlug,
+            modelId: result.model || resolved.model.id,
+            api: String(result.api),
+            inputTokens: result.usage.input,
+            outputTokens: result.usage.output,
+            cacheReadTokens: result.usage.cacheRead,
+            cacheWriteTokens: result.usage.cacheWrite,
+            cacheHitRate: metrics.cacheHitRate,
+            ttftMs,
+            tps: metrics.decodeTps,
+            userPreview: `[上下文压缩·复用对话] 压缩 ${params.messagesToSummarize.length} 条历史对话`,
+            recalledIds: [],
+            timeCardText: `${baseForkSnapshot}\n[error] ${summarizeError(errMsg)}`,
+            toolCalls: [],
+            steps: buildFailedTraceSteps([result], errMsg),
+            latencyMs,
+          });
+        } catch {
+          // Ignore trace DB error
+        }
+      }
+      throw new Error(result.errorMessage || "Forked compaction summary generation failed");
+    }
+
     this.repo.insertTurnTrace({
       canonicalUserId: params.canonicalUserId,
       slot: "persona",
@@ -2428,16 +2638,7 @@ export class PersonaRuntime {
       tps: metrics.decodeTps,
       userPreview: `[上下文压缩·复用对话] 压缩 ${params.messagesToSummarize.length} 条历史对话`,
       recalledIds: [],
-      timeCardText: [
-        "task: context_compaction",
-        "compaction_mode: reuse_conversation",
-        `forked_live_prefix: ${hasLivePrefix}`,
-        `compacted_messages: ${params.messagesToSummarize.length}`,
-        `timezone: ${tz}`,
-        prevSummaryChars > 0 ? `previous_summary_chars: ${prevSummaryChars}` : "",
-      ]
-        .filter(Boolean)
-        .join("\n"),
+      timeCardText: baseForkSnapshot,
       toolCalls: [],
       steps: extractTraceSteps([result]),
       latencyMs,

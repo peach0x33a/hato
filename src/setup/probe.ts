@@ -12,6 +12,7 @@ import type { ResolvedMemoryEchoConfig, ResolvedTavilySearchConfig } from "../co
 import { QqOpenApiClient } from "../gateway/qq-client.js";
 import {
   resolveBuiltInApiStreams,
+  resolveModelCompat,
   supportsCustomFetchOption,
   type ModelSlot,
   type ModelRegistry,
@@ -686,6 +687,7 @@ export async function probeAdHocModel(params: {
   apiKeyEnv: string;
   apiKeyOverride?: string;
   providerHeaders?: Record<string, string>;
+  providerCompat?: Record<string, unknown>;
   model: {
     id: string;
     name?: string;
@@ -696,6 +698,7 @@ export async function probeAdHocModel(params: {
     input?: Array<"text" | "image">;
     context_window?: number;
     max_tokens?: number;
+    compat?: Record<string, unknown>;
   };
   modelRegistry: ModelRegistry;
   proxyRouter: ScopedProxyRouter;
@@ -792,6 +795,14 @@ export async function probeAdHocModel(params: {
     contextWindow: params.model.context_window ?? 128_000,
     maxTokens: params.model.max_tokens ?? 8_192,
     headers: mergedHeaders,
+    compat: resolveModelCompat({
+      api: modelApi,
+      providerSlug,
+      baseUrl,
+      modelId,
+      providerCompat: params.providerCompat,
+      modelCompat: params.model.compat,
+    }),
   };
 
   const tempModels = createModels();

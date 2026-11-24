@@ -7,6 +7,7 @@ import {
 } from "@earendil-works/pi-ai";
 import { resolveLlmRetryConfig, validateHatoConfigObject } from "../src/config/app.js";
 import { createDefaultHatoConfig } from "../src/setup/presets.js";
+import { clearRuntimeLogs, getRuntimeLogs } from "../src/utils/logger.js";
 import {
   DEFAULT_LLM_RETRY_CONFIG,
   completeSimpleWithRetry,
@@ -361,4 +362,67 @@ test("streamSimpleWithRetry retries pre-content Incomplete JSON segment errors d
   assert.equal(finalMsg.stopReason, "stop");
   const textBlock = finalMsg.content.find((b) => b.type === "text");
   assert.equal(textBlock?.type === "text" ? textBlock.text : "", "恢复成功");
+});
+
+test("streamSimpleWithRetry logs non-retryable errors to runtime ERR logs but does not log aborted stops", async () => {
+  clearRuntimeLogs();
+  const fakeModel = {
+    id: "glm-5.3-flash",
+    name: "GLM 5.3 Flash",
+    api: "openai-completions",
+    provider: "custom-relay",
+    baseUrl: "https://relay.example.com/v1",
+    reasoning: true,
+    input: ["text"],
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    contextWindow: 128_000,
+    maxTokens: 8192,
+  } as Parameters<typeof streamSimpleWithRetry>[1] extends { model?: infer M } ? NonNullable<M> : never;
+
+  const failedStream = streamSimpleWithRetry(
+    () => {
+      const s = createAssistantMessageEventStream();
+      queueMicrotask(() => {
+        s.push({
+          type: "error",
+          reason: "error",
+          error: makeAssistantMessage({
+            stopReason: "error",
+            errorMessage: "422 Input tag 'developer' does not match",
+          }),
+        });
+        s.end();
+      });
+      return s;
+    },
+    {
+      model: fakeModel,
+      slot: "PERSONA",
+      sleepFn: async () => {},
+    },
+  );
+  const res = await failedStream.result();
+  assert.equal(res.stopReason, "error");
+
+  const errLogs = getRuntimeLogs({ category: "ERR", scope: "LLM" });
+  assert.equal(errLogs.length, 1);
+  assert.ok(errLogs[0]?.message.includes("[PERSONA]"));
+  assert.ok(errLogs[0]?.message.includes("custom-relay/glm-5.3-flash"));
+  assert.ok(errLogs[0]?.message.includes("422 Input tag 'developer'"));
+
+  // Aborted stops must NOT produce ERR logs
+  clearRuntimeLogs();
+  const ac = new AbortController();
+  ac.abort();
+  const abortedStream = streamSimpleWithRetry(
+    () => createAssistantMessageEventStream(),
+    {
+      model: fakeModel,
+      slot: "PERSONA",
+      signal: ac.signal,
+    },
+  );
+  const abortedRes = await abortedStream.result();
+  assert.equal(abortedRes.stopReason, "aborted");
+  assert.equal(getRuntimeLogs({ category: "ERR", scope: "LLM" }).length, 0);
 });

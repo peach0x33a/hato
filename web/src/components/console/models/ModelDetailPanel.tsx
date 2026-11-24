@@ -479,7 +479,7 @@ export function ModelDetailPanel({
 
       {/* 2x2 Basic Info */}
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-        <div className="flex flex-col gap-1.5">
+        <div className="flex min-w-0 flex-col gap-1.5">
           <label
             htmlFor={`detail-id-${model.uid}`}
             className="text-xs font-medium text-zinc-600 dark:text-zinc-400"
@@ -506,7 +506,7 @@ export function ModelDetailPanel({
           ) : null}
         </div>
 
-        <div className="flex flex-col gap-1.5">
+        <div className="flex min-w-0 flex-col gap-1.5">
           <label
             htmlFor={`detail-name-${model.uid}`}
             className="text-xs font-medium text-zinc-600 dark:text-zinc-400"
@@ -523,7 +523,7 @@ export function ModelDetailPanel({
           />
         </div>
 
-        <div className="flex flex-col gap-1.5">
+        <div className="flex min-w-0 flex-col gap-1.5">
           <label
             htmlFor={`detail-ctx-${model.uid}`}
             className="text-xs font-medium text-zinc-600 dark:text-zinc-400"
@@ -553,7 +553,7 @@ export function ModelDetailPanel({
           ) : null}
         </div>
 
-        <div className="flex flex-col gap-1.5">
+        <div className="flex min-w-0 flex-col gap-1.5">
           <label
             htmlFor={`detail-maxout-${model.uid}`}
             className="text-xs font-medium text-zinc-600 dark:text-zinc-400"
@@ -638,7 +638,7 @@ export function ModelDetailPanel({
           用于哪些槽位
         </span>
 
-        <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3">
+        <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
           {visibleSlots.map((slot) => {
             const rawTarget = slots[slot.key]?.trim() ?? "";
             const isAssignedHere = Boolean(currentTarget && rawTarget === currentTarget);
@@ -659,7 +659,7 @@ export function ModelDetailPanel({
                       ? `勾选后将从 ${otherHolderLabel} 移走`
                       : undefined
                 }
-                className={`flex items-center justify-between gap-2 rounded-lg border px-3 py-2 text-xs transition-colors ${
+                className={`flex min-w-0 items-center justify-between gap-2 overflow-hidden rounded-lg border px-3 py-2 text-xs transition-colors ${
                   !currentTarget
                     ? "cursor-not-allowed border-zinc-200/70 opacity-50 dark:border-zinc-800/70"
                     : cannotUncheck
@@ -669,7 +669,7 @@ export function ModelDetailPanel({
                         : "cursor-pointer border-zinc-200 bg-zinc-50/40 hover:border-zinc-300 dark:border-zinc-800 dark:bg-[#0b1014]/60 dark:hover:border-zinc-700"
                 }`}
               >
-                <span className="flex min-w-0 items-center gap-2">
+                <span className="flex shrink-0 items-center gap-2">
                   <input
                     type="checkbox"
                     checked={isAssignedHere}
@@ -682,13 +682,13 @@ export function ModelDetailPanel({
                         onChangeSlot(slot.key, "");
                       }
                     }}
-                    className="accent-emerald-500"
+                    className="shrink-0 accent-emerald-500"
                   />
-                  <span className={`font-mono font-medium ${slot.accentClass}`}>
+                  <span className={`whitespace-nowrap font-mono font-medium ${slot.accentClass}`}>
                     {slot.key}
                   </span>
                 </span>
-                <span className="truncate text-[11px] text-zinc-400 dark:text-zinc-500">
+                <span className="min-w-0 flex-1 truncate text-right text-[11px] text-zinc-400 dark:text-zinc-500">
                   {isAssignedHere
                     ? isOptionalSlot
                       ? "取消将回退"
@@ -736,9 +736,9 @@ export function ModelDetailPanel({
               className="mt-3.5 flex flex-col gap-4 rounded-lg border border-zinc-200/80 bg-zinc-50/50 p-4 dark:border-zinc-800/80 dark:bg-[#0b1014]/60"
             >
             {/* Protocol / Base URL / Headers */}
-            <div className="grid grid-cols-1 gap-3.5 md:grid-cols-3">
-              <div className="flex flex-col gap-1.5">
-                <span className="text-xs font-medium text-zinc-600 dark:text-zinc-400">
+            <div className="grid grid-cols-1 gap-3.5 sm:grid-cols-2">
+              <div className="flex min-w-0 flex-col gap-1.5">
+                <span className="whitespace-nowrap text-xs font-medium text-zinc-600 dark:text-zinc-400">
                   覆盖协议
                 </span>
                 <ConsoleSelect
@@ -752,10 +752,10 @@ export function ModelDetailPanel({
                 />
               </div>
 
-              <div className="flex flex-col gap-1.5">
+              <div className="flex min-w-0 flex-col gap-1.5">
                 <label
                   htmlFor={`detail-endpoint-${model.uid}`}
-                  className="text-xs font-medium text-zinc-600 dark:text-zinc-400"
+                  className="whitespace-nowrap text-xs font-medium text-zinc-600 dark:text-zinc-400"
                 >
                   覆盖 Base URL
                 </label>
@@ -771,11 +771,11 @@ export function ModelDetailPanel({
                 />
               </div>
 
-              <div className="flex flex-col gap-1.5">
+              <div className="flex min-w-0 flex-col gap-1.5 sm:col-span-2">
                 <div className="flex items-center justify-between gap-2">
                   <label
                     htmlFor={`detail-headers-${model.uid}`}
-                    className="text-xs font-medium text-zinc-600 dark:text-zinc-400"
+                    className="whitespace-nowrap text-xs font-medium text-zinc-600 dark:text-zinc-400"
                   >
                     自定义请求头（JSON）
                   </label>
@@ -823,18 +823,18 @@ export function ModelDetailPanel({
             </div>
 
             {/* models.dev Mapping */}
-            <div className="flex flex-col gap-2 border-t border-zinc-200/70 pt-3.5 sm:flex-row sm:items-end sm:justify-between sm:gap-4 dark:border-zinc-800/70">
+            <div className="flex flex-col gap-2.5 border-t border-zinc-200/70 pt-3.5 dark:border-zinc-800/70">
               <div ref={suggestionsBoxRef} className="relative flex flex-1 flex-col gap-1.5">
-                <div className="flex items-center justify-between gap-2">
+                <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1">
                   <label
                     htmlFor={`detail-modelsdev-${model.uid}`}
-                    className="inline-flex items-center gap-1.5 text-xs font-medium text-zinc-700 dark:text-zinc-300"
+                    className="inline-flex items-center gap-1.5 whitespace-nowrap text-xs font-medium text-zinc-700 dark:text-zinc-300"
                   >
-                    <Link2 className="h-3.5 w-3.5 text-emerald-500" />
+                    <Link2 className="h-3.5 w-3.5 shrink-0 text-emerald-500" />
                     <span>models.dev 元数据映射</span>
                   </label>
                   {isMetadataLocked ? (
-                    <span className="inline-flex items-center gap-1 text-[11px] font-medium text-emerald-600 dark:text-emerald-400">
+                    <span className="inline-flex items-center gap-1 whitespace-nowrap text-[11px] font-medium text-emerald-600 dark:text-emerald-400">
                       <Lock className="h-3 w-3 shrink-0" />
                       <span>已启用映射，规格只读</span>
                     </span>
@@ -968,7 +968,7 @@ export function ModelDetailPanel({
                 ) : null}
               </div>
 
-              <label className="inline-flex h-9 shrink-0 cursor-pointer items-center gap-2 text-xs font-medium text-zinc-600 dark:text-zinc-400">
+              <label className="inline-flex w-fit cursor-pointer items-center gap-2 whitespace-nowrap text-xs font-medium text-zinc-600 dark:text-zinc-400">
                 <input
                   type="checkbox"
                   checked={modelsDev.enabled}

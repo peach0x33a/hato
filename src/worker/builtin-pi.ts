@@ -695,6 +695,7 @@ export class BuiltinPiRunner implements ExecutionRunner {
             api: String(msg.api),
             stopReason: msg.stopReason,
             rawStopReason: msg.rawStopReason,
+            errorMessage: msg.errorMessage,
             thinkingLevel: msg.providerThinkingLevel ?? msg.thinkingLevel,
             inputTokens: msg.usage.input,
             outputTokens: msg.usage.output,

@@ -63,6 +63,27 @@ function parseToolsJson(raw: string | null | undefined): string[] {
   }
 }
 
+function extractTraceError(stepsJson?: string): string | null {
+  if (!stepsJson) return null;
+  try {
+    const parsed = JSON.parse(stepsJson) as unknown;
+    if (!Array.isArray(parsed)) return null;
+    for (let i = parsed.length - 1; i >= 0; i--) {
+      const item = parsed[i];
+      if (!item || typeof item !== "object") continue;
+      const rec = item as { kind?: unknown; stopReason?: unknown; errorMessage?: unknown };
+      if (rec.kind !== "assistant") continue;
+      const errMsg = typeof rec.errorMessage === "string" ? rec.errorMessage.trim() : "";
+      if (rec.stopReason === "error" || errMsg.length > 0) {
+        return errMsg || "请求失败";
+      }
+    }
+  } catch {
+    // Ignore malformed JSON
+  }
+  return null;
+}
+
 export function StaticsPanel({ onToast, sessionEpoch = 0, sessionId = null }: StaticsPanelProps) {
   const [slot, setSlot] = useState("__all__");
   const [since, setSince] = useState("24h");
@@ -508,12 +529,17 @@ export function StaticsPanel({ onToast, sessionEpoch = 0, sessionId = null }: St
                     const tools = parseToolsJson(tr.toolCallsJson);
                     const promptTotal = tr.inputTokens + tr.cacheReadTokens + tr.cacheWriteTokens;
                     const expanded = expandedRowId === tr.id;
+                    const traceError = extractTraceError(tr.stepsJson);
                     return (
                       <Fragment key={tr.id}>
                         <tr
                           onClick={() => setExpandedRowId((prev) => (prev === tr.id ? null : tr.id))}
                           className={`cursor-pointer align-middle transition-colors ${
-                            expanded ? "bg-primary/8" : "hover:bg-muted/30"
+                            expanded
+                              ? "bg-primary/8"
+                              : traceError
+                                ? "bg-rose-500/5 hover:bg-rose-500/10"
+                                : "hover:bg-muted/30"
                           }`}
                         >
                           <td className="py-2 pl-3 text-muted-foreground">
@@ -540,6 +566,11 @@ export function StaticsPanel({ onToast, sessionEpoch = 0, sessionId = null }: St
                                 {tr.provider}/{tr.modelId}
                               </span>
                               <ApiBadge api={tr.api} className="h-4 px-1 text-[10px]" />
+                              {traceError && (
+                                <AnimatedBadge status="danger" size="sm">
+                                  失败
+                                </AnimatedBadge>
+                              )}
                             </div>
                           </td>
                           <td
@@ -609,9 +640,16 @@ export function StaticsPanel({ onToast, sessionEpoch = 0, sessionId = null }: St
                         {expanded && (
                           <tr className="bg-muted/15">
                             <td colSpan={11} className="px-4 py-2.5">
-                              <pre className="max-h-44 w-full max-w-full min-w-0 overflow-auto whitespace-pre-wrap [overflow-wrap:anywhere] border-l-2 border-primary/40 bg-muted/25 px-3 py-2 font-mono text-[11px] leading-relaxed text-foreground">
-                                {tr.timeCardText || "（无额外上下文快照）"}
-                              </pre>
+                              <div className="flex flex-col gap-2">
+                                {traceError && (
+                                  <pre className="max-h-40 w-full max-w-full min-w-0 overflow-auto whitespace-pre-wrap [overflow-wrap:anywhere] border-l-2 border-rose-500/70 bg-rose-500/10 px-3 py-2 font-mono text-[11px] leading-relaxed text-rose-700 dark:text-rose-300">
+                                    {traceError}
+                                  </pre>
+                                )}
+                                <pre className="max-h-44 w-full max-w-full min-w-0 overflow-auto whitespace-pre-wrap [overflow-wrap:anywhere] border-l-2 border-primary/40 bg-muted/25 px-3 py-2 font-mono text-[11px] leading-relaxed text-foreground">
+                                  {tr.timeCardText || "（无额外上下文快照）"}
+                                </pre>
+                              </div>
                             </td>
                           </tr>
                         )}

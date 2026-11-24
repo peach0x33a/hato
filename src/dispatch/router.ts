@@ -15,7 +15,7 @@ import type { ScopedProxyRouter } from "../config/proxy.js";
 import type { HatoRepository, RawMessageRecord } from "../db/repo.js";
 import type { MemoryStore } from "../memory/store.js";
 import { loadZoneSkills } from "../skills/loader.js";
-import { computeTurnMetrics, extractTraceSteps, formatLlmTelemetryLog } from "../stats/metrics.js";
+import { buildFailedTraceSteps, computeTurnMetrics, extractTraceSteps, formatLlmTelemetryLog } from "../stats/metrics.js";
 import { formatLocalDateTime } from "../time/clock.js";
 import { logWarn, summarizeError } from "../utils/logger.js";
 import {
@@ -240,40 +240,80 @@ export class NeutralRouter {
       },
     ];
 
-    const result: AssistantMessage = await this.deps.proxyRouter.runWithScope(
-      `llm-calling.${resolved.model.provider}`,
-      async () => {
-        const scopedFetch = this.deps.proxyRouter.createScopedFetch(`llm-calling.${resolved.model.provider}`);
-        const thinkingLevel = this.deps.modelRegistry.resolveSlotThinkingLevel("router");
-        const stream = streamSimpleWithRetry(
-          () =>
-            this.deps.modelRegistry.models.streamSimple(
-              resolved.model,
-              { systemPrompt, messages },
-              {
-                apiKey: this.deps.modelRegistry.resolveApiKeyForProvider(resolved.model.provider),
-                disableContinuation: true,
-                ...(supportsCustomFetchOption(resolved.model.api) ? { fetch: scopedFetch } : {}),
-                reasoning: thinkingLevel === "off" ? undefined : thinkingLevel,
-              },
-            ),
-          {
-            model: resolved.model,
-            slot: "ROUTER",
-          },
-        );
-        for await (const ev of stream) {
-          if (
-            firstDeltaPerf === null &&
-            (ev.type === "text_delta" || ev.type === "thinking_delta") &&
-            ev.delta.length > 0
-          ) {
-            firstDeltaPerf = performance.now();
+    const firstLine = userPrompt.split("\n")[0]?.trim() || userPrompt.trim();
+    const baseRouterSnapshot = [
+      `router_task: ${label}`,
+      `--- System Prompt ---`,
+      systemPrompt,
+      "",
+      `--- Router Input Context ---`,
+      userPrompt,
+    ].join("\n");
+
+    let result: AssistantMessage;
+    try {
+      result = await this.deps.proxyRouter.runWithScope(
+        `llm-calling.${resolved.model.provider}`,
+        async () => {
+          const scopedFetch = this.deps.proxyRouter.createScopedFetch(`llm-calling.${resolved.model.provider}`);
+          const thinkingLevel = this.deps.modelRegistry.resolveSlotThinkingLevel("router");
+          const stream = streamSimpleWithRetry(
+            () =>
+              this.deps.modelRegistry.models.streamSimple(
+                resolved.model,
+                { systemPrompt, messages },
+                {
+                  apiKey: this.deps.modelRegistry.resolveApiKeyForProvider(resolved.model.provider),
+                  disableContinuation: true,
+                  ...(supportsCustomFetchOption(resolved.model.api) ? { fetch: scopedFetch } : {}),
+                  reasoning: thinkingLevel === "off" ? undefined : thinkingLevel,
+                },
+              ),
+            {
+              model: resolved.model,
+              slot: "ROUTER",
+            },
+          );
+          for await (const ev of stream) {
+            if (
+              firstDeltaPerf === null &&
+              (ev.type === "text_delta" || ev.type === "thinking_delta") &&
+              ev.delta.length > 0
+            ) {
+              firstDeltaPerf = performance.now();
+            }
           }
-        }
-        return stream.result();
-      },
-    );
+          return stream.result();
+        },
+      );
+    } catch (err) {
+      const latencyMs = Math.max(1, Math.round(performance.now() - callStart));
+      try {
+        this.deps.repo.insertTurnTrace({
+          canonicalUserId,
+          slot: "router",
+          provider: resolved.providerSlug,
+          modelId: resolved.model.id,
+          api: String(resolved.model.api),
+          inputTokens: 0,
+          outputTokens: 0,
+          cacheReadTokens: 0,
+          cacheWriteTokens: 0,
+          cacheHitRate: 0,
+          ttftMs: latencyMs,
+          tps: null,
+          userPreview: `[${label}] ${firstLine.slice(0, 140)}`,
+          recalledIds: [],
+          timeCardText: `${baseRouterSnapshot}\n[error] ${summarizeError(err)}`,
+          toolCalls: [],
+          steps: buildFailedTraceSteps([], err),
+          latencyMs,
+        });
+      } catch {
+        // Ignore trace DB error
+      }
+      throw err;
+    }
 
     const nowPerf = performance.now();
     const latencyMs = Math.max(1, Math.round(nowPerf - callStart));
@@ -292,6 +332,7 @@ export class NeutralRouter {
         api: String(result.api),
         stopReason: result.stopReason,
         rawStopReason: result.rawStopReason,
+        errorMessage: result.errorMessage,
         thinkingLevel: result.providerThinkingLevel ?? result.thinkingLevel,
         inputTokens: result.usage.input,
         outputTokens: result.usage.output,
@@ -306,10 +347,6 @@ export class NeutralRouter {
       }),
     );
 
-    if (result.stopReason === "error" || result.stopReason === "aborted") {
-      throw new Error(result.errorMessage || "Router LLM failed");
-    }
-
     const metrics = computeTurnMetrics({
       inputTokens: result.usage.input,
       outputTokens: result.usage.output,
@@ -320,7 +357,37 @@ export class NeutralRouter {
       decodeMs,
     });
 
-    const firstLine = userPrompt.split("\n")[0]?.trim() || userPrompt.trim();
+    if (result.stopReason === "error" || result.stopReason === "aborted") {
+      if (result.stopReason === "error") {
+        const errMsg = result.errorMessage || "Router LLM failed";
+        try {
+          this.deps.repo.insertTurnTrace({
+            canonicalUserId,
+            slot: "router",
+            provider: resolved.providerSlug,
+            modelId: resolved.model.id,
+            api: String(resolved.model.api),
+            inputTokens: result.usage.input,
+            outputTokens: result.usage.output,
+            cacheReadTokens: result.usage.cacheRead,
+            cacheWriteTokens: result.usage.cacheWrite,
+            cacheHitRate: metrics.cacheHitRate,
+            ttftMs,
+            tps: metrics.decodeTps,
+            userPreview: `[${label}] ${firstLine.slice(0, 140)}`,
+            recalledIds: [],
+            timeCardText: `${baseRouterSnapshot}\n[error] ${summarizeError(errMsg)}`,
+            toolCalls: [],
+            steps: buildFailedTraceSteps([result], errMsg),
+            latencyMs,
+          });
+        } catch {
+          // Ignore trace DB error
+        }
+      }
+      throw new Error(result.errorMessage || "Router LLM failed");
+    }
+
     this.deps.repo.insertTurnTrace({
       canonicalUserId,
       slot: "router",

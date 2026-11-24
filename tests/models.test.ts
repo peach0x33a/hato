@@ -7,6 +7,7 @@ import {
   deriveApiKeyEnvFromSlug,
   ModelRegistry,
   parseQualifiedModelTarget,
+  resolveModelCompat,
   supportsCustomFetchOption,
 } from "../src/config/models.js";
 import { openDatabase } from "../src/db/client.js";
@@ -413,6 +414,245 @@ name = "Gemini Default"
     assert.equal(registry.resolveSlot("persona").explicitCache, false);
     assert.equal(registry.resolveSlot("router").explicitCache, true);
     assert.equal(registry.resolveSlot("curator").explicitCache, false);
+  } finally {
+    rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("resolveModelCompat disables developer role and OpenAI-only flags for third-party openai-completions endpoints", () => {
+  // Generic custom relay / FastAPI proxy
+  assert.deepEqual(
+    resolveModelCompat({
+      api: "openai-completions",
+      providerSlug: "custom-relay",
+      baseUrl: "https://relay.example.com/v1",
+      modelId: "glm-5.3-flash",
+    }),
+    {
+      supportsDeveloperRole: false,
+      supportsStore: false,
+      supportsLongCacheRetention: false,
+      maxTokensField: "max_tokens",
+    },
+  );
+
+  // OpenAI reasoning model behind a custom relay keeps max_completion_tokens (maxTokensField unset)
+  assert.deepEqual(
+    resolveModelCompat({
+      api: "openai-completions",
+      providerSlug: "custom-relay",
+      baseUrl: "https://relay.example.com/v1",
+      modelId: "gpt-5.4",
+    }),
+    {
+      supportsDeveloperRole: false,
+      supportsStore: false,
+      supportsLongCacheRetention: false,
+    },
+  );
+  assert.deepEqual(
+    resolveModelCompat({
+      api: "openai-completions",
+      providerSlug: "custom-relay",
+      baseUrl: "https://relay.example.com/v1",
+      modelId: "o3-mini",
+    }),
+    {
+      supportsDeveloperRole: false,
+      supportsStore: false,
+      supportsLongCacheRetention: false,
+    },
+  );
+
+  // Official OpenAI and OpenRouter leave compat undefined by default
+  assert.equal(
+    resolveModelCompat({
+      api: "openai-completions",
+      providerSlug: "openai",
+      baseUrl: "https://api.openai.com/v1",
+      modelId: "gpt-5.4",
+    }),
+    undefined,
+  );
+  assert.equal(
+    resolveModelCompat({
+      api: "openai-completions",
+      providerSlug: "openrouter",
+      baseUrl: "https://openrouter.ai/api/v1",
+      modelId: "openai/gpt-5.4",
+    }),
+    undefined,
+  );
+
+  // Non-openai-completions APIs do not get openai-completions defaults injected
+  assert.equal(
+    resolveModelCompat({
+      api: "anthropic-messages",
+      providerSlug: "custom-relay",
+      baseUrl: "https://relay.example.com/anthropic",
+      modelId: "claude-sonnet-4-5",
+    }),
+    undefined,
+  );
+
+  // Vendor-specific hints
+  assert.deepEqual(
+    resolveModelCompat({
+      api: "openai-completions",
+      providerSlug: "mistral",
+      baseUrl: "https://api.mistral.ai/v1",
+      modelId: "mistral-large-latest",
+    }),
+    {
+      supportsDeveloperRole: false,
+      supportsStore: false,
+      supportsLongCacheRetention: false,
+      maxTokensField: "max_tokens",
+      supportsReasoningEffort: false,
+    },
+  );
+  assert.deepEqual(
+    resolveModelCompat({
+      api: "openai-completions",
+      providerSlug: "dashscope",
+      baseUrl: "https://dashscope.aliyuncs.com/compatible-mode/v1",
+      modelId: "qwen3-max",
+    }),
+    {
+      supportsDeveloperRole: false,
+      supportsStore: false,
+      supportsLongCacheRetention: false,
+      maxTokensField: "max_tokens",
+      thinkingFormat: "qwen",
+      supportsReasoningEffort: false,
+    },
+  );
+  assert.deepEqual(
+    resolveModelCompat({
+      api: "openai-completions",
+      providerSlug: "zhipuai",
+      baseUrl: "https://open.bigmodel.cn/api/paas/v4",
+      modelId: "glm-5.3-flash",
+    }),
+    {
+      supportsDeveloperRole: false,
+      supportsStore: false,
+      supportsLongCacheRetention: false,
+      maxTokensField: "max_tokens",
+      thinkingFormat: "zai",
+      supportsReasoningEffort: false,
+    },
+  );
+  assert.deepEqual(
+    resolveModelCompat({
+      api: "openai-completions",
+      providerSlug: "minimax-cn",
+      baseUrl: "https://api.minimaxi.com/v1",
+      modelId: "MiniMax-M1",
+    }),
+    {
+      supportsDeveloperRole: false,
+      supportsStore: false,
+      supportsLongCacheRetention: false,
+      maxTokensField: "max_tokens",
+      supportsReasoningEffort: false,
+    },
+  );
+  assert.deepEqual(
+    resolveModelCompat({
+      api: "openai-completions",
+      providerSlug: "ark",
+      baseUrl: "https://ark.cn-beijing.volces.com/api/v3",
+      modelId: "doubao-seed-1-6",
+    }),
+    {
+      supportsDeveloperRole: false,
+      supportsStore: false,
+      supportsLongCacheRetention: false,
+      maxTokensField: "max_tokens",
+      supportsReasoningEffort: false,
+    },
+  );
+});
+
+test("ModelRegistry applies compat precedence (model > provider > inferred) and pi-ai emits role=system", async () => {
+  const tempDir = mkdtempSync(join(tmpdir(), "hato-models-compat-"));
+  const modelsToml = join(tempDir, "models.toml");
+  try {
+    writeFileSync(
+      modelsToml,
+      `
+[slots]
+persona = "custom-relay/reasoning-default"
+router = "custom-relay/override-model"
+curator = "custom-relay/reasoning-default"
+worker = "custom-relay/reasoning-default"
+hindsight_llm = "custom-relay/reasoning-default"
+
+[providers.custom-relay]
+api = "openai-completions"
+base_url = "https://relay.example.com/v1"
+
+[providers.custom-relay.compat]
+supportsStore = true
+
+[[providers.custom-relay.models]]
+id = "reasoning-default"
+name = "Reasoning Default"
+reasoning = true
+
+[[providers.custom-relay.models]]
+id = "override-model"
+name = "Override Model"
+reasoning = true
+
+[providers.custom-relay.models.compat]
+supportsDeveloperRole = true
+supportsStore = false
+`,
+      "utf8",
+    );
+
+    const registry = new ModelRegistry(modelsToml);
+    const defaultResolved = registry.resolveSlot("persona");
+    assert.deepEqual(defaultResolved.model.compat, {
+      supportsDeveloperRole: false,
+      supportsStore: true,
+      supportsLongCacheRetention: false,
+      maxTokensField: "max_tokens",
+    });
+
+    const overrideResolved = registry.resolveSlot("router");
+    assert.deepEqual(overrideResolved.model.compat, {
+      supportsDeveloperRole: true,
+      supportsStore: false,
+      supportsLongCacheRetention: false,
+      maxTokensField: "max_tokens",
+    });
+
+    // End-to-end verification with pi-ai's convertMessages: role must be "system", not "developer"
+    const completionsMod = await import("@earendil-works/pi-ai/api/openai-completions");
+    const messages = completionsMod.convertMessages(
+      defaultResolved.model as Parameters<typeof completionsMod.convertMessages>[0],
+      {
+        messages: [
+          { role: "system", content: "You are a helpful assistant.", timestamp: Date.now() },
+          { role: "user", content: "hi", timestamp: Date.now() },
+        ],
+      },
+      {
+        supportsDeveloperRole: defaultResolved.model.compat?.supportsDeveloperRole,
+        supportsMidConvoSystemMessages: false,
+        supportsMidConvoToolAdditions: false,
+        requiresAssistantAfterToolResult: false,
+        requiresNonNullAssistantContent: false,
+        requiresThinkingAsText: false,
+        requiresReasoningContentOnAssistantMessages: false,
+        requiresToolResultName: false,
+        supportsOpenAIGrammarTools: false,
+      } as Parameters<typeof completionsMod.convertMessages>[2],
+    );
+    assert.equal(messages[0]?.role, "system");
   } finally {
     rmSync(tempDir, { recursive: true, force: true });
   }

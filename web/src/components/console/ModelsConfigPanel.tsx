@@ -933,6 +933,7 @@ export function ModelsConfigPanel({
         apiKeyEnv: prov.apiKeyEnv.trim() || undefined,
         apiKeyOverride: prov.apiKeyEnv.trim() ? pendingSecrets[prov.apiKeyEnv.trim()] : undefined,
         providerHeaders: provHeadersRes.headers,
+        providerCompat: prov.preserved?.compat,
         model: {
           id: modelId,
           name: model.displayName.trim() || modelId,
@@ -944,6 +945,7 @@ export function ModelsConfigPanel({
           headers: modHeadersRes.headers,
           reasoning: model.supportsThinking,
           input: model.supportsVision ? ["text", "image"] : ["text"],
+          compat: model.preserved?.compat,
         },
       });
 
@@ -1305,7 +1307,7 @@ export function ModelsConfigPanel({
                 initial={reduceMotion ? false : { x: 40, opacity: 0 }}
                 animate={{ x: 0, opacity: 1 }}
                 exit={reduceMotion ? undefined : { x: 40, opacity: 0, transition: { duration: 0.14 } }}
-                className="relative z-10 flex h-full w-full max-w-[500px] flex-col border-l border-zinc-200 bg-white shadow-2xl dark:border-zinc-800 dark:bg-[#10161b]"
+                className="relative z-10 flex h-full w-full max-w-[560px] flex-col border-l border-zinc-200 bg-white shadow-2xl dark:border-zinc-800 dark:bg-[#10161b]"
               >
                 <div className="flex items-center justify-between border-b border-zinc-200 px-5 py-3.5 dark:border-zinc-800">
                   <div className="min-w-0">

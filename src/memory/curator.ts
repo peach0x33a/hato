@@ -15,10 +15,10 @@ import type {
   MemorySyncRecordView,
   RawMessageRecord,
 } from "../db/repo.js";
-import { computeTurnMetrics, extractTraceSteps, formatLlmTelemetryLog } from "../stats/metrics.js";
+import { buildFailedTraceSteps, computeTurnMetrics, extractTraceSteps, formatLlmTelemetryLog } from "../stats/metrics.js";
 import { stripErrorInterruptionNotices } from "../persona/interruption.js";
 import { formatLocalDateTime, parseLocalDateTimeToEpochMs } from "../time/clock.js";
-import { logInfo, logWarn } from "../utils/logger.js";
+import { logInfo, logWarn, summarizeError } from "../utils/logger.js";
 import type { MemoryStore } from "./store.js";
 
 const DEFAULT_CURATOR_PROMPT = `You are Hato's neutral, asynchronous Memory Curator. Objectively extract facts worth retaining long-term from timestamped conversation logs and route them strictly into two isolated banks: persona (personal life, preferences, events) and tech (tech stack, environment, engineering habits), plus optional upcoming proactive care follow-ups (open_loops).
@@ -600,36 +600,74 @@ export class MemoryCurator {
     const callStartPerf = performance.now();
     let firstDeltaPerf: number | null = null;
     const thinkingLevel = this.modelRegistry.resolveSlotThinkingLevel("curator");
-    const result = await this.proxyRouter.runWithScope(`llm-calling.${resolved.providerSlug}`, async () => {
-      const stream = streamSimpleWithRetry(
-        () =>
-          this.modelRegistry.models.streamSimple(
-            resolved.model,
-            { systemPrompt: this.curatorPrompt, messages: llmMessages },
-            {
-              apiKey,
-              sessionId: `${canonicalUserId}:curator`,
-              disableContinuation: true,
-              ...(supportsCustomFetchOption(resolved.model.api) ? { fetch: scopedFetch } : {}),
-              reasoning: thinkingLevel === "off" ? undefined : thinkingLevel,
-            },
-          ),
-        {
-          model: resolved.model,
-          slot: "CURATOR",
-        },
-      );
-      for await (const ev of stream) {
-        if (
-          firstDeltaPerf === null &&
-          (ev.type === "text_delta" || ev.type === "thinking_delta" || ev.type === "toolcall_delta") &&
-          ev.delta.length > 0
-        ) {
-          firstDeltaPerf = performance.now();
+    const baseCuratorSnapshot = [
+      `curator_messages: ${messages.length}`,
+      `timezone: ${tz}`,
+      "",
+      "--- 待提炼对话日志 ---",
+      ...transcriptLines,
+    ].join("\n");
+
+    let result;
+    try {
+      result = await this.proxyRouter.runWithScope(`llm-calling.${resolved.providerSlug}`, async () => {
+        const stream = streamSimpleWithRetry(
+          () =>
+            this.modelRegistry.models.streamSimple(
+              resolved.model,
+              { systemPrompt: this.curatorPrompt, messages: llmMessages },
+              {
+                apiKey,
+                sessionId: `${canonicalUserId}:curator`,
+                disableContinuation: true,
+                ...(supportsCustomFetchOption(resolved.model.api) ? { fetch: scopedFetch } : {}),
+                reasoning: thinkingLevel === "off" ? undefined : thinkingLevel,
+              },
+            ),
+          {
+            model: resolved.model,
+            slot: "CURATOR",
+          },
+        );
+        for await (const ev of stream) {
+          if (
+            firstDeltaPerf === null &&
+            (ev.type === "text_delta" || ev.type === "thinking_delta" || ev.type === "toolcall_delta") &&
+            ev.delta.length > 0
+          ) {
+            firstDeltaPerf = performance.now();
+          }
         }
+        return stream.result();
+      });
+    } catch (err) {
+      const latencyMs = Math.max(1, Math.round(performance.now() - callStartPerf));
+      try {
+        this.repo.insertTurnTrace({
+          canonicalUserId,
+          slot: "curator",
+          provider: resolved.providerSlug,
+          modelId: resolved.model.id,
+          api: String(resolved.model.api),
+          inputTokens: 0,
+          outputTokens: 0,
+          cacheReadTokens: 0,
+          cacheWriteTokens: 0,
+          cacheHitRate: 0,
+          ttftMs: latencyMs,
+          tps: null,
+          userPreview: `[记忆提炼] 分析 ${messages.length} 条日志`,
+          recalledIds: [],
+          timeCardText: `${baseCuratorSnapshot}\n[error] ${summarizeError(err)}`,
+          toolCalls: [],
+          steps: buildFailedTraceSteps([], err),
+          latencyMs,
+        });
+      } catch {
+        // Ignore trace DB error
       }
-      return stream.result();
-    });
+      throw err;
+    }
 
     const nowPerf = performance.now();
     const latencyMs = Math.max(1, Math.round(nowPerf - callStartPerf));
@@ -648,6 +686,7 @@ export class MemoryCurator {
         api: String(result.api),
         stopReason: result.stopReason,
         rawStopReason: result.rawStopReason,
+        errorMessage: result.errorMessage,
         thinkingLevel: result.providerThinkingLevel ?? result.thinkingLevel,
         inputTokens: result.usage.input,
         outputTokens: result.usage.output,
@@ -663,10 +702,6 @@ export class MemoryCurator {
       }),
     );
 
-    if (result.stopReason === "error" || result.stopReason === "aborted") {
-      throw new Error(result.errorMessage || "Curator extraction LLM failed");
-    }
-
     const metrics = computeTurnMetrics({
       inputTokens: result.usage.input,
       outputTokens: result.usage.output,
@@ -676,6 +711,37 @@ export class MemoryCurator {
       ttftMs,
       decodeMs,
     });
+
+    if (result.stopReason === "error" || result.stopReason === "aborted") {
+      if (result.stopReason === "error") {
+        const errMsg = result.errorMessage || "Curator extraction LLM failed";
+        try {
+          this.repo.insertTurnTrace({
+            canonicalUserId,
+            slot: "curator",
+            provider: resolved.providerSlug,
+            modelId: result.model || resolved.model.id,
+            api: String(result.api),
+            inputTokens: result.usage.input,
+            outputTokens: result.usage.output,
+            cacheReadTokens: result.usage.cacheRead,
+            cacheWriteTokens: result.usage.cacheWrite,
+            cacheHitRate: metrics.cacheHitRate,
+            ttftMs,
+            tps: metrics.decodeTps,
+            userPreview: `[记忆提炼] 分析 ${messages.length} 条日志`,
+            recalledIds: [],
+            timeCardText: `${baseCuratorSnapshot}\n[error] ${summarizeError(errMsg)}`,
+            toolCalls: [],
+            steps: buildFailedTraceSteps([result], errMsg),
+            latencyMs,
+          });
+        } catch {
+          // Ignore trace DB error
+        }
+      }
+      throw new Error(result.errorMessage || "Curator extraction LLM failed");
+    }
 
     this.repo.insertTurnTrace({
       canonicalUserId,
@@ -692,13 +758,7 @@ export class MemoryCurator {
       tps: metrics.decodeTps,
       userPreview: `[记忆提炼] 分析 ${messages.length} 条日志`,
       recalledIds: [],
-      timeCardText: [
-        `curator_messages: ${messages.length}`,
-        `timezone: ${tz}`,
-        "",
-        "--- 待提炼对话日志 ---",
-        ...transcriptLines,
-      ].join("\n"),
+      timeCardText: baseCuratorSnapshot,
       toolCalls: [],
       steps: extractTraceSteps([result]),
       latencyMs,

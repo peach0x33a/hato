@@ -5,7 +5,7 @@ import type { ForgetRunSummary, RetainRunSummary } from "../memory/curator.js";
 import type { MemoryUsageSummary, MemoryVaultInfo } from "../memory/store.js";
 import type { NotebookService } from "../notebook/service.js";
 import type { MarkdownRenderTheme } from "../render/markdown-image.js";
-import { computeTurnMetrics, formatCacheHitRate } from "../stats/metrics.js";
+import { computeTurnMetrics, extractTraceErrorMessage, formatCacheHitRate } from "../stats/metrics.js";
 
 export interface ModelSlotView {
   slot: string;
@@ -335,9 +335,11 @@ export function createDefaultSlashCommandRegistry(): SlashCommandRegistry {
             : computed.e2eTps !== null
               ? `${computed.e2eTps.toFixed(1)} tok/s (e2e)`
               : "-";
+        const traceError = extractTraceErrorMessage(trace.stepsJson);
         return [
           `【最近一轮 Trace: ${trace.id}】`,
           `- 槽位 / 模型: ${trace.slot} -> ${trace.provider}/${trace.modelId} (${trace.api})`,
+          ...(traceError ? [`- 错误信息: ${traceError}`] : []),
           `- 缓存命中率: ${formatCacheHitRate(hitRate)} (cache_read=${trace.cacheReadTokens}, cache_write=${trace.cacheWriteTokens}, uncached_in=${trace.inputTokens}, prompt=${computed.totalPromptTokens})`,
           `- 输出与耗时: out=${trace.outputTokens} · 总耗时=${trace.latencyMs}ms · 首字=${trace.ttftMs !== null ? `${trace.ttftMs}ms` : "-"} · TPS=${tpsText}`,
           `- 工具调用: ${tools.length > 0 ? tools.join(", ") : "无"}`,
