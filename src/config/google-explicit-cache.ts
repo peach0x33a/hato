@@ -12,6 +12,7 @@ const REQUEST_TIMEOUT_MS = 15_000;
 const SAFETY_BUFFER_MS = 60_000;
 const KEY_FAILURE_COOLDOWN_MS = 5 * 60_000;
 const UNSUPPORTED_ENDPOINT_COOLDOWN_MS = 15 * 60_000;
+const MODEL_UNSUPPORTED_OR_ZERO_QUOTA_COOLDOWN_MS = 12 * 60 * 60_000;
 
 interface CachedContentEntry {
   name: string;
@@ -41,6 +42,7 @@ export class GoogleExplicitCacheManager {
   private readonly inflightCreates = new Map<string, Promise<CachedContentEntry | null>>();
   private readonly renewingNames = new Set<string>();
   private readonly keyCooldownUntil = new Map<string, number>();
+  private readonly modelCooldownUntil = new Map<string, number>();
   private readonly baseUrlCooldownUntil = new Map<string, number>();
 
   constructor(options: GoogleExplicitCacheOptions = {}) {
@@ -110,6 +112,12 @@ export class GoogleExplicitCacheManager {
       return undefined;
     }
 
+    const modelCooldownKey = `${baseUrl}|${modelName}|${createHash("sha256").update(apiKey).digest("hex").slice(0, 16)}`;
+    const modelCooldown = this.modelCooldownUntil.get(modelCooldownKey) ?? 0;
+    if (modelCooldown > now) {
+      return undefined;
+    }
+
     const cacheKey = computePrefixCacheKey({
       baseUrl,
       modelName,
@@ -138,6 +146,7 @@ export class GoogleExplicitCacheManager {
     if (!inflight) {
       inflight = this.createCachedContent({
         cacheKey,
+        modelCooldownKey,
         baseUrl,
         modelName,
         model,
@@ -161,6 +170,7 @@ export class GoogleExplicitCacheManager {
 
   private async createCachedContent(params: {
     cacheKey: string;
+    modelCooldownKey: string;
     baseUrl: string;
     modelName: string;
     model: Model<any>;
@@ -211,14 +221,27 @@ export class GoogleExplicitCacheManager {
 
       if (!response.ok) {
         const text = (await response.text().catch(() => "")).trim().slice(0, 200);
-        if (response.status === 404 || response.status === 405 || response.status === 501) {
+        const isZeroFreeTierQuota =
+          response.status === 429 &&
+          (/limit=0\b/i.test(text) || /TotalCachedContentStorageTokensPerModelFreeTier/i.test(text));
+        const isModelCachingUnsupported =
+          (response.status === 400 || response.status === 403) &&
+          /cachedContent|caching is not supported|not supported for cached/i.test(text);
+        const isLocationUnsupported =
+          response.status === 400 && /User location is not supported/i.test(text);
+
+        if (response.status === 404 || response.status === 405 || response.status === 501 || isLocationUnsupported) {
           this.baseUrlCooldownUntil.set(params.baseUrl, Date.now() + UNSUPPORTED_ENDPOINT_COOLDOWN_MS);
+        } else if (isZeroFreeTierQuota || isModelCachingUnsupported) {
+          this.modelCooldownUntil.set(
+            params.modelCooldownKey,
+            Date.now() + MODEL_UNSUPPORTED_OR_ZERO_QUOTA_COOLDOWN_MS,
+          );
         } else {
           this.keyCooldownUntil.set(params.cacheKey, Date.now() + KEY_FAILURE_COOLDOWN_MS);
         }
         const freeTierHint =
-          response.status === 429 &&
-          (/limit=0\b/i.test(text) || /TotalCachedContentStorageTokensPerModelFreeTier/i.test(text))
+          isZeroFreeTierQuota
             ? "（可在 models.toml 对应 provider 或 model 下设置 explicit_cache = false 关闭显式缓存）"
             : "";
         logWarn(

@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import { basename, resolve } from "node:path";
 import { ActorLock, EventBus } from "./bus/actor-bus.js";
 import { BrowserRuntime } from "./browser/runtime.js";
@@ -13,6 +14,7 @@ import {
   resolveTavilySearchConfig,
   resolveUpdatesConfig,
   resolveWebBrowserConfig,
+  resolveExternalCliCustomEnv,
   type HatoConfig,
 } from "./config/app.js";
 import { collectReloadDiff, fingerprintSecret, type ReloadSnapshot } from "./config/diff.js";
@@ -70,11 +72,19 @@ import { probeTelegramGateway, updateTelegramBotProfile } from "./setup/probe.js
 import { StickerService } from "./stickers/service.js";
 import { StickerStore } from "./stickers/store.js";
 import { LiveTraceTracker } from "./stats/live-trace.js";
-import { logError, logInfo, logWarn, setLogTimezone, summarizeError } from "./utils/logger.js";
+import {
+  formatUserFacingTurnError,
+  logError,
+  logInfo,
+  logWarn,
+  setLogTimezone,
+  summarizeError,
+} from "./utils/logger.js";
 import { WebConsoleServer } from "./web-console/server.js";
 import { WorkerDispatcher } from "./worker/backend.js";
 import { BuiltinPiRunner } from "./worker/builtin-pi.js";
 import { ExternalCliRunner } from "./worker/external-cli.js";
+import { resolveBackendCommand } from "./worker/overlay.js";
 
 const APP_PATHS = ensureHatoHomeConfig();
 const HATO_CONFIG_PATH = APP_PATHS.hatoConfigPath;
@@ -139,6 +149,15 @@ async function main(): Promise<void> {
     proxyRouter,
     repo,
     getMemoryStore: () => memoryStore,
+    filterAvailableBackends: (backends, cfg) => {
+      const customEnv = resolveExternalCliCustomEnv(cfg);
+      const searchPath = customEnv.PATH ?? process.env.PATH;
+      return backends.filter((backend) => {
+        if (backend === "builtin-pi") return true;
+        const cmd = resolveBackendCommand(backend, cfg);
+        return cmd.includes("/") ? existsSync(cmd) : Bun.which(cmd, { PATH: searchPath }) !== null;
+      });
+    },
   });
   const builtinRunner = new BuiltinPiRunner({
     getHatoConfig: () => hatoConfig,
@@ -937,10 +956,9 @@ async function main(): Promise<void> {
         bubblesToSend = output.bubbles;
         superseded = output.superseded;
       } catch (err) {
-        const msg = summarizeError(err);
         logError("PERSONA", "turn failed", err);
         await adapter
-          .sendText(targetId, `处理刚才这条消息时出错了：${msg}`)
+          .sendText(targetId, formatUserFacingTurnError(err))
           .catch(() => undefined);
         return;
       }

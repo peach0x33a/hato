@@ -1198,3 +1198,142 @@ hindsight_llm = "faux-provider/faux-persona-1"
     rmSync(tempDir, { recursive: true, force: true });
   }
 });
+
+test("PersonaRuntime preserves prior toolCalls on superseded batch and persists delegate/image_gen receipts", async () => {
+  const faux = fauxProvider({
+    api: "hato-faux-api",
+    provider: "faux-provider",
+    models: [{ id: "faux-persona-1", name: "Faux Persona" }],
+    tokensPerSecond: 10000,
+  });
+
+  const tempDir = mkdtempSync(join(tmpdir(), "hato-superseded-receipt-test-"));
+  const hatoTomlPath = join(tempDir, "hato.toml");
+  const modelsTomlPath = join(tempDir, "models.toml");
+
+  writeHatoConfig(hatoTomlPath, createDefaultHatoConfig(), { backup: false });
+  writeFileSync(
+    modelsTomlPath,
+    `
+[slots]
+persona = "faux-provider/faux-persona-1"
+router = "faux-provider/faux-persona-1"
+curator = "faux-provider/faux-persona-1"
+worker = "faux-provider/faux-persona-1"
+hindsight_llm = "faux-provider/faux-persona-1"
+
+[providers]
+`,
+    "utf8",
+  );
+
+  const dbHandle = openDatabase(":memory:");
+  try {
+    const hatoConfig = loadHatoConfig(hatoTomlPath);
+    const repo = new HatoRepository(dbHandle.db);
+    const modelRegistry = new ModelRegistry(modelsTomlPath, repo, {
+      extraProviders: [faux.provider],
+    });
+    const proxyRouter = new ScopedProxyRouter([]);
+    const runtime = new PersonaRuntime(hatoConfig, modelRegistry, proxyRouter, repo);
+
+    runtime.setDelegateHandler(() => ({ ticketId: "t_delegate_1", status: "routing" }));
+    runtime.setImageGenHandler(() => ({ ticketId: "t_imggen_1", status: "running" }));
+
+    let sawPriorDelegateToolCall = false;
+    let sawDelegateReceiptAfterRefresh = false;
+    let sawImageGenReceiptAfterRefresh = false;
+
+    faux.setResponses([
+      () =>
+        fauxAssistantMessage(
+          [fauxToolCall("delegate", { hint: "跑一下晨报预览" })],
+          { stopReason: "toolUse" },
+        ),
+      () => fauxAssistantMessage("这就去跑晨报看看～"),
+      (ctx) => {
+        const serialized = JSON.stringify(ctx.messages);
+        sawPriorDelegateToolCall =
+          serialized.includes("t_delegate_1") && serialized.includes("delegate");
+        return fauxAssistantMessage(
+          [fauxToolCall("image_gen", { prompt: "画一只小鸠" })],
+          { stopReason: "toolUse" },
+        );
+      },
+      () => fauxAssistantMessage("这就去画～"),
+      (ctx) => {
+        const serialized = JSON.stringify(ctx.messages);
+        sawDelegateReceiptAfterRefresh = serialized.includes(
+          "已通过 delegate 转交后台处理 (t_delegate_1",
+        );
+        sawImageGenReceiptAfterRefresh = serialized.includes(
+          "已通过 image_gen 启动后台生图 (t_imggen_1",
+        );
+        return fauxAssistantMessage("收到啦");
+      },
+    ]);
+
+    await runtime.handleUserBatch({
+      canonicalUserId: "owner",
+      originChannel: "qq",
+      originPlatformUserId: "u1",
+      platformMsgIds: ["m1"],
+      latestPlatformMsgId: "m1",
+      combinedText: "帮我跑晨报",
+      attachments: [],
+      firstTimestampMs: Date.now(),
+      lastTimestampMs: Date.now(),
+    });
+
+    // Superseded batch before prompt()
+    const supersededOut = await runtime.handleUserBatch(
+      {
+        canonicalUserId: "owner",
+        originChannel: "qq",
+        originPlatformUserId: "u1",
+        platformMsgIds: ["m2"],
+        latestPlatformMsgId: "m2",
+        combinedText: "群聊记录1",
+        attachments: [],
+        firstTimestampMs: Date.now() + 50,
+        lastTimestampMs: Date.now() + 50,
+      },
+      [],
+      { shouldSuppressSend: () => true },
+    );
+    assert.equal(supersededOut.superseded, true);
+
+    // Next batch should still see prior turn's delegate toolCall/toolResult in memory
+    await runtime.handleUserBatch({
+      canonicalUserId: "owner",
+      originChannel: "qq",
+      originPlatformUserId: "u1",
+      platformMsgIds: ["m3"],
+      latestPlatformMsgId: "m3",
+      combinedText: "顺便画个头像",
+      attachments: [],
+      firstTimestampMs: Date.now() + 100,
+      lastTimestampMs: Date.now() + 100,
+    });
+    assert.equal(sawPriorDelegateToolCall, true);
+
+    // Force DB transcript refresh and verify persisted executed_event receipts survive
+    runtime.refreshTranscriptFromDb({ force: true });
+    await runtime.handleUserBatch({
+      canonicalUserId: "owner",
+      originChannel: "qq",
+      originPlatformUserId: "u1",
+      platformMsgIds: ["m4"],
+      latestPlatformMsgId: "m4",
+      combinedText: "刚派了啥",
+      attachments: [],
+      firstTimestampMs: Date.now() + 200,
+      lastTimestampMs: Date.now() + 200,
+    });
+    assert.equal(sawDelegateReceiptAfterRefresh, true);
+    assert.equal(sawImageGenReceiptAfterRefresh, true);
+  } finally {
+    dbHandle.close();
+    rmSync(tempDir, { recursive: true, force: true });
+  }
+});

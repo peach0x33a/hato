@@ -4,6 +4,7 @@ import {
   clearRuntimeLogs,
   formatLogLine,
   formatLogTimestamp,
+  formatUserFacingTurnError,
   getLogTimezone,
   getRuntimeLogs,
   setLogTimezone,
@@ -124,4 +125,35 @@ test("runtime log ring buffer records, strips ANSI, redacts tokens, filters, and
     unsub();
     clearRuntimeLogs();
   }
+});
+
+test("summarizeError unwraps nested Google API JSON and formatUserFacingTurnError maps friendly messages", () => {
+  const nested503 = new Error(
+    JSON.stringify({
+      error: {
+        message: JSON.stringify({
+          error: {
+            code: 503,
+            message: "This model is currently experiencing high demand.",
+            status: "UNAVAILABLE",
+          },
+        }),
+        code: 503,
+        status: "Service Unavailable",
+      },
+    }),
+  );
+  const summary = summarizeError(nested503);
+  assert.equal(summary.includes('\\"error\\"'), false);
+  assert.ok(summary.includes("HTTP 503"));
+  assert.ok(summary.includes("This model is currently experiencing high demand."));
+
+  assert.equal(
+    formatUserFacingTurnError(nested503),
+    "模型服务当前繁忙（503），自动重试后仍未恢复，请稍后再试～",
+  );
+  assert.equal(
+    formatUserFacingTurnError(new Error("Incomplete JSON segment at the end")),
+    "模型连接或响应流意外中断，请再发一次试试～",
+  );
 });

@@ -312,3 +312,53 @@ test("streamSimpleWithRetry retries ECONNRESET/503 after thinking_delta and text
   const textBlock = finalMsg.content.find((b) => b.type === "text");
   assert.equal(textBlock?.type === "text" ? textBlock.text : "", "最终回答");
 });
+
+test("streamSimpleWithRetry retries pre-content Incomplete JSON segment errors during thinking", async () => {
+  let calls = 0;
+  const stream = streamSimpleWithRetry(
+    () => {
+      calls++;
+      const s = createAssistantMessageEventStream();
+      queueMicrotask(() => {
+        const partial = makeAssistantMessage();
+        s.push({ type: "start", partial });
+        if (calls === 1) {
+          s.push({ type: "thinking_start", contentIndex: 0, partial });
+          s.push({ type: "thinking_delta", contentIndex: 0, delta: "draft", partial });
+          s.push({
+            type: "error",
+            reason: "error",
+            error: makeAssistantMessage({
+              stopReason: "error",
+              errorMessage: "Error: Incomplete JSON segment at the end",
+            }),
+          });
+        } else {
+          const okMsg = makeAssistantMessage({
+            stopReason: "stop",
+            content: [{ type: "text", text: "恢复成功" }],
+          });
+          s.push({ type: "text_start", contentIndex: 0, partial: okMsg });
+          s.push({ type: "text_delta", contentIndex: 0, delta: "恢复成功", partial: okMsg });
+          s.push({ type: "text_end", contentIndex: 0, content: "恢复成功", partial: okMsg });
+          s.push({ type: "done", reason: "stop", message: okMsg });
+        }
+        s.end();
+      });
+      return s;
+    },
+    {
+      policy: { initialDelayMs: 1, jitter: false },
+      sleepFn: async () => {},
+    },
+  );
+
+  for await (const _ev of stream) {
+    // drain
+  }
+  const finalMsg = await stream.result();
+  assert.equal(calls, 2);
+  assert.equal(finalMsg.stopReason, "stop");
+  const textBlock = finalMsg.content.find((b) => b.type === "text");
+  assert.equal(textBlock?.type === "text" ? textBlock.text : "", "恢复成功");
+});

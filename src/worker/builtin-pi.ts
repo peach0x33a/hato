@@ -4,7 +4,7 @@ import { homedir } from "node:os";
 import { basename, dirname, resolve, sep } from "node:path";
 import { promisify } from "node:util";
 import { Agent, type AgentMessage, type AgentTool } from "@earendil-works/pi-agent-core";
-import { type AssistantMessage, type TextContent } from "@earendil-works/pi-ai";
+import { type AssistantMessage, type Message, type TextContent } from "@earendil-works/pi-ai";
 import { arr, num, obj, opt, oneOf, str } from "@earendil-works/pi-schema";
 import { resolveLlmRetryConfig, resolveSkillsDir, type HatoConfig } from "../config/app.js";
 import { resolveHatoHomeDir } from "../config/paths.js";
@@ -203,9 +203,25 @@ const RequestConfirmParams = obj({
 const RegisterScriptParams = obj({
   name: str({ description: "Short human-readable name for the scheduled script" }),
   script_path: str({ description: "Path to the executable/script file inside workspace" }),
-  cron_expr: str({ description: "5-field cron expression, e.g. '0 9 * * *'" }),
+  cron_expr: str({
+    description:
+      "Standard 5-field cron expression ('min hour dom month dow') evaluated in the owner's configured timezone (NOT UTC / OS timezone unless owner timezone is UTC), e.g. '0 9 * * *'",
+  }),
   notify_channel: opt(oneOf(["tg", "qq", "last_active"], { description: "Optional notification channel (defaults to owner proactive_channel)" })),
   required_secrets: opt(arr(str())),
+});
+
+const ManageScriptsParams = obj({
+  action: oneOf(["list", "pause", "resume", "reschedule", "delete"], {
+    description: "Action to perform on registered cron scripts",
+  }),
+  script_id: opt(str({ description: "Target script id (required for pause/resume/reschedule/delete)" })),
+  cron_expr: opt(
+    str({
+      description:
+        "New 5-field cron expression in the owner's configured timezone (required for reschedule)",
+    }),
+  ),
 });
 
 const FinishTaskParams = obj({
@@ -256,6 +272,54 @@ function resolveRealPathOrAncestor(targetPath: string): string {
  * Built-in `pi-agent-core` Worker running inside the host process with workspace-confined tools,
  * model snapshot locking, host-side `McpClientPool` integration, and explicit `ask_user`/`finish_task` states.
  */
+/**
+ * Folds large historical `toolResult` text outputs beyond the most recent `keepRecentToolResults`
+ * turns so multi-step worker loops do not accumulate unbounded uncached input tokens.
+ */
+export function foldStaleWorkerToolOutputs(
+  messages: readonly Message[],
+  keepRecentToolResults = 6,
+  maxOldChars = 1600,
+): Message[] {
+  let toolResultSeen = 0;
+  const keepIndices = new Set<number>();
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (messages[i]?.role === "toolResult") {
+      toolResultSeen++;
+      if (toolResultSeen <= keepRecentToolResults) {
+        keepIndices.add(i);
+      }
+    }
+  }
+
+  let changed = false;
+  const next = messages.map((msg, idx): Message => {
+    if (msg.role !== "toolResult" || keepIndices.has(idx) || !Array.isArray(msg.content)) {
+      return msg;
+    }
+    let msgChanged = false;
+    const nextContent = msg.content.map((part) => {
+      if (part.type !== "text" || part.text.length <= maxOldChars) {
+        return part;
+      }
+      msgChanged = true;
+      const omitted = part.text.length - 1400;
+      return {
+        ...part,
+        text: `${part.text.slice(0, 800)}\n...[历史工具输出已折叠 ${omitted} 字符]...\n${part.text.slice(-600)}`,
+      };
+    });
+    if (!msgChanged) return msg;
+    changed = true;
+    return {
+      ...msg,
+      content: nextContent,
+    };
+  });
+
+  return changed ? next : [...messages];
+}
+
 export class BuiltinPiRunner implements ExecutionRunner {
   private readonly sessions = new Map<string, BuiltinSessionState>();
   private readonly activeAborts = new Set<string>();
@@ -335,10 +399,17 @@ export class BuiltinPiRunner implements ExecutionRunner {
             state.activeCallStartPerf = performance.now();
             return this.deps.proxyRouter.runWithScope(`llm-calling.${model.provider}`, () =>
               Promise.resolve(
-                this.deps.modelRegistry.models.streamSimple(model, context, {
-                  ...options,
-                  ...(supportsCustomFetchOption(model.api) ? { fetch: scopedFetch } : {}),
-                }),
+                this.deps.modelRegistry.models.streamSimple(
+                  model,
+                  {
+                    ...context,
+                    messages: foldStaleWorkerToolOutputs(context.messages),
+                  },
+                  {
+                    ...options,
+                    ...(supportsCustomFetchOption(model.api) ? { fetch: scopedFetch } : {}),
+                  },
+                ),
               ),
             );
           },
@@ -974,7 +1045,7 @@ export class BuiltinPiRunner implements ExecutionRunner {
       {
         name: "register_script",
         label: "注册常驻定时脚本",
-        description: "Register a verified script into Hato's cron script_registry so it runs periodically.",
+        description: `Register a verified script into Hato's cron script_registry so it runs periodically. IMPORTANT: cron_expr is evaluated in owner timezone "${hatoConfig.owner.timezone}" (do NOT convert local owner hours to UTC).`,
         parameters: RegisterScriptParams,
         execute: async (_id, input) => {
           if (!isValidCronExpression(input.cron_expr)) {
@@ -991,7 +1062,7 @@ export class BuiltinPiRunner implements ExecutionRunner {
               !state.approvedConfirmKeys.has("register_script")
             ) {
               params.onRequestConfirm(
-                `注册常驻定时脚本 "${input.name}" (cron: ${input.cron_expr}, 脚本: ${basename(abs)})`,
+                `注册常驻定时脚本 "${input.name}" (cron: ${input.cron_expr}, 时区: ${hatoConfig.owner.timezone}, 脚本: ${basename(abs)})`,
                 confirmKey,
               );
               return {
@@ -1032,10 +1103,112 @@ export class BuiltinPiRunner implements ExecutionRunner {
             content: [
               {
                 type: "text",
-                text: `已注册常驻脚本 [${created.id}] "${created.name}" (${created.cronExpr}) -> ${created.notifyChannel}`,
+                text: `已注册常驻脚本 [${created.id}] "${created.name}" (cron: ${created.cronExpr}, 时区: ${hatoConfig.owner.timezone}) -> ${created.notifyChannel}`,
               },
             ],
             details: { ok: true, id: created.id, scriptPath: targetScriptPath },
+          };
+        },
+      },
+      {
+        name: "manage_scripts",
+        label: "管理常驻定时脚本",
+        description: `List, pause, resume, reschedule, or delete existing scripts in Hato's script_registry. cron_expr is evaluated in owner timezone "${hatoConfig.owner.timezone}".`,
+        parameters: ManageScriptsParams,
+        execute: async (_id, input) => {
+          const tz = hatoConfig.owner.timezone;
+          if (input.action === "list") {
+            const scripts = this.deps.repo.listScripts(50);
+            if (scripts.length === 0) {
+              return {
+                content: [{ type: "text", text: "当前没有已注册的常驻定时脚本。" }],
+                details: { ok: true, count: 0 },
+              };
+            }
+            const lines = scripts.map(
+              (s) =>
+                `- [${s.id}] "${s.name}" cron="${s.cronExpr}" (timezone=${tz}) enabled=${s.enabled} path=${s.scriptPath} channel=${s.notifyChannel}`,
+            );
+            return {
+              content: [{ type: "text", text: lines.join("\n") }],
+              details: { ok: true, count: scripts.length },
+            };
+          }
+
+          const scriptId = input.script_id?.trim();
+          if (!scriptId) {
+            throw new Error(`action="${input.action}" 必须提供 script_id`);
+          }
+          const target = this.deps.repo.listScripts(100).find((s) => s.id === scriptId);
+          if (!target) {
+            throw new Error(`未找到脚本 ${scriptId}`);
+          }
+
+          const trimmedCron = input.cron_expr?.trim();
+          if (input.action === "reschedule") {
+            if (!trimmedCron || !isValidCronExpression(trimmedCron)) {
+              throw new Error(`无效的 cron 表达式: ${input.cron_expr ?? ""}`);
+            }
+          }
+
+          if (!isVmUnrestricted) {
+            const confirmKey = `manage_scripts:${input.action}:${target.id}${trimmedCron ? `:${trimmedCron}` : ""}`;
+            if (
+              !state.approvedConfirmKeys.has(confirmKey) &&
+              !state.approvedConfirmKeys.has("manage_scripts")
+            ) {
+              const actionDesc =
+                input.action === "pause"
+                  ? `暂停常驻脚本 [${target.id}] "${target.name}"`
+                  : input.action === "resume"
+                    ? `恢复常驻脚本 [${target.id}] "${target.name}"`
+                    : input.action === "reschedule"
+                      ? `修改常驻脚本 [${target.id}] "${target.name}" 周期为 "${trimmedCron}" (时区: ${tz})`
+                      : `删除常驻脚本 [${target.id}] "${target.name}"`;
+              params.onRequestConfirm(actionDesc, confirmKey);
+              return {
+                content: [
+                  {
+                    type: "text",
+                    text: "已向主人发起常驻定时脚本变更确认请求，工单已挂起等待确认。",
+                  },
+                ],
+                details: { awaiting_confirm: true },
+              };
+            }
+          }
+
+          if (input.action === "pause") {
+            this.deps.repo.updateScriptSchedule(target.id, { enabled: false });
+            return {
+              content: [{ type: "text", text: `已暂停常驻脚本 [${target.id}] "${target.name}"` }],
+              details: { ok: true, id: target.id, action: "pause" },
+            };
+          }
+          if (input.action === "resume") {
+            this.deps.repo.updateScriptSchedule(target.id, { enabled: true });
+            return {
+              content: [{ type: "text", text: `已恢复常驻脚本 [${target.id}] "${target.name}"` }],
+              details: { ok: true, id: target.id, action: "resume" },
+            };
+          }
+          if (input.action === "reschedule") {
+            this.deps.repo.updateScriptSchedule(target.id, { cronExpr: trimmedCron! });
+            return {
+              content: [
+                {
+                  type: "text",
+                  text: `已更新常驻脚本 [${target.id}] "${target.name}" 周期为 ${trimmedCron} (时区: ${tz})`,
+                },
+              ],
+              details: { ok: true, id: target.id, action: "reschedule", cronExpr: trimmedCron },
+            };
+          }
+
+          this.deps.repo.deleteScript(target.id);
+          return {
+            content: [{ type: "text", text: `已删除常驻脚本 [${target.id}] "${target.name}"` }],
+            details: { ok: true, id: target.id, action: "delete" },
           };
         },
       },

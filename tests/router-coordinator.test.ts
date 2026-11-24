@@ -514,3 +514,178 @@ hindsight_llm = "faux-worker/w1"
     rmSync(tempDir, { recursive: true, force: true });
   }
 });
+
+test("NeutralRouter clips long messages, filters unavailable backends, and TicketCoordinator records backend as modelId", async () => {
+  const cfg = createDefaultHatoConfig();
+  cfg.worker.default_backend = "codex-cli";
+  cfg.worker.external_cli.codex_cli = { enabled: true };
+  cfg.worker.external_cli.opencode_v2 = { enabled: false };
+  cfg.worker.external_cli.antigravity_cli = { enabled: false };
+  cfg.worker.external_cli.external_pi = { enabled: false };
+  cfg.worker.external_cli.claude_code = { enabled: false };
+
+  const tempDir = mkdtempSync(join(tmpdir(), "hato-router-opt-"));
+  const modelsToml = join(tempDir, "models.toml");
+  writeFileSync(
+    modelsToml,
+    `[slots]
+persona = "faux-router/r1"
+router = "faux-router/r1"
+curator = "faux-router/r1"
+worker = "faux-router/r1"
+hindsight_llm = "faux-router/r1"
+
+[providers]
+`,
+    "utf8",
+  );
+
+  const fauxRouter = fauxProvider({
+    api: "hato-faux-router-opt",
+    provider: "faux-router",
+    models: [{ id: "r1", name: "R1" }],
+    tokensPerSecond: 10_000,
+  });
+
+  let capturedPrompt = "";
+  fauxRouter.setResponses([
+    (ctx) => {
+      capturedPrompt = JSON.stringify(ctx.messages);
+      return fauxAssistantMessage(
+        JSON.stringify({
+          decision: "ticket",
+          backend: "codex-cli",
+          brief_title: "测试裁剪与后端过滤",
+          context_range: { from_msg_id: "m1", to_msg_id: "m1" },
+          workspace_mode: "isolated",
+        }),
+      );
+    },
+  ]);
+
+  const dbHandle = openDatabase(":memory:");
+  try {
+    const repo = new HatoRepository(dbHandle.db);
+    repo.ensureOwner({
+      canonicalUserId: "owner",
+      timezone: "Asia/Shanghai",
+      proactiveChannel: "qq",
+    });
+    repo.appendRawMessage({
+      id: "m1",
+      canonicalUserId: "owner",
+      channel: "qq",
+      role: "user",
+      content: "HEAD_" + "X".repeat(2000) + "_TAIL",
+      createdAt: Date.now(),
+    });
+
+    const registry = new ModelRegistry(modelsToml, repo, {
+      extraProviders: [fauxRouter.provider],
+    });
+    const proxyRouter = new ScopedProxyRouter([]);
+    const router = new NeutralRouter({
+      getHatoConfig: () => cfg,
+      getMcpConfig: () => ({ mcpServers: {} }),
+      modelRegistry: registry,
+      proxyRouter,
+      repo,
+      filterAvailableBackends: (backends) => backends.filter((b) => b !== "codex-cli"),
+    });
+
+    const decision = await router.routeDelegation({
+      canonicalUserId: "owner",
+      hint: "处理一下",
+    });
+    assert.equal(decision.decision, "ticket");
+    if (decision.decision === "ticket") {
+      assert.equal(decision.backend, "builtin-pi");
+    }
+    assert.ok(capturedPrompt.includes("截断"));
+    assert.ok(capturedPrompt.indexOf("[routing_mode]") < capturedPrompt.indexOf("[delegate hint"));
+
+    // Verify TicketCoordinator records backend ("codex-cli") rather than ticketId when workerTrace is absent
+    const bus = new EventBus();
+    const dispatcher = {
+      dispatch: async () => ({
+        ticket_id: "t_no_trace_1",
+        status: "failed" as const,
+        narration_hint: "binary missing",
+        verbatim_blocks: [],
+        artifacts: [],
+        required_secrets: [],
+        caveats: ["ENOENT"],
+      }),
+      resume: async () => ({
+        ticket_id: "t_no_trace_1",
+        status: "done" as const,
+        narration_hint: "ok",
+        verbatim_blocks: [],
+        artifacts: [],
+        required_secrets: [],
+        caveats: [],
+      }),
+      abort: async () => false,
+    };
+    const coordinator = new TicketCoordinator({
+      bus,
+      repo,
+      router,
+      dispatcher: dispatcher as never,
+      getHatoConfig: () => cfg,
+    });
+
+    repo.createTicket({
+      id: "t_no_trace_1",
+      canonicalUserId: "owner",
+      status: "running",
+      backend: "codex-cli",
+      briefTitle: "测试 trace modelId",
+      originChannel: "qq",
+    });
+    await (coordinator as unknown as {
+      recordWorkerTrace: (p: {
+        canonicalUserId: string;
+        ticketId: string;
+        backend: "codex-cli";
+        briefTitle: string;
+        mandate: { workspace_mode: "isolated"; workspace_dir: string };
+        result: {
+          ticket_id: string;
+          status: "failed";
+          narration_hint: string;
+          verbatim_blocks: [];
+          artifacts: [];
+          required_secrets: [];
+          caveats: string[];
+        };
+        latencyMs: number;
+      }) => void;
+    }).recordWorkerTrace({
+      canonicalUserId: "owner",
+      ticketId: "t_no_trace_1",
+      backend: "codex-cli",
+      briefTitle: "测试 trace modelId",
+      mandate: { workspace_mode: "isolated", workspace_dir: tempDir },
+      result: {
+        ticket_id: "t_no_trace_1",
+        status: "failed",
+        narration_hint: "binary missing",
+        verbatim_blocks: [],
+        artifacts: [],
+        required_secrets: [],
+        caveats: ["ENOENT"],
+      },
+      latencyMs: 120,
+    });
+
+    const traces = repo.listTurnTraces("owner", 10);
+    const workerTrace = traces.find((t) => t.slot === "worker");
+    assert.ok(workerTrace);
+    assert.equal(workerTrace.modelId, "codex-cli");
+    assert.notEqual(workerTrace.modelId, "t_no_trace_1");
+  } finally {
+    dbHandle.close();
+    rmSync(tempDir, { recursive: true, force: true });
+  }
+});

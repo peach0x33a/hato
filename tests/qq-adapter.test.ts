@@ -4,10 +4,10 @@ import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, it } from "node:test";
+import { describe, it, test } from "node:test";
 import { ScopedProxyRouter } from "../src/config/proxy.js";
 import { createDefaultHatoConfig } from "../src/setup/presets.js";
-import { QqAdapter, splitQqText } from "../src/gateway/qq.js";
+import { QqAdapter, cleanQqFaceTags, splitQqText } from "../src/gateway/qq.js";
 import { QqOpenApiClient } from "../src/gateway/qq-client.js";
 
 describe("QQ Official Bot adapter", () => {
@@ -288,4 +288,16 @@ describe("QQ Official Bot adapter", () => {
       server.close();
     }
   });
+});
+
+test("cleanQqFaceTags decodes base64 ext text and strips raw faceType tags", () => {
+  assert.equal(
+    cleanQqFaceTags('<faceType=6,faceId="0",ext="eyJ0ZXh0IjoiIn0=">你想不想看你的图片'),
+    "[表情]你想不想看你的图片",
+  );
+  const namedExt = Buffer.from(JSON.stringify({ text: "/微笑" }), "utf8").toString("base64");
+  assert.equal(
+    cleanQqFaceTags(`你好<faceType=1,faceId="14",ext="${namedExt}">`),
+    "你好[表情:微笑]",
+  );
 });

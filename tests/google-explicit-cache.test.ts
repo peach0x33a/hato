@@ -198,3 +198,43 @@ test("GoogleExplicitCacheManager logs WARN with explicit_cache hint on 429 limit
     console.warn = origWarn;
   }
 });
+
+test("GoogleExplicitCacheManager trips model-level cooldown on 429 limit=0 even when systemInstruction changes", async () => {
+  let postCount = 0;
+  const manager = new GoogleExplicitCacheManager({
+    minEstimatedChars: 100,
+    fetcher: async () => {
+      postCount++;
+      return new Response(
+        JSON.stringify({
+          error: {
+            code: 429,
+            message:
+              "TotalCachedContentStorageTokensPerModelFreeTier limit exceeded for model gemini-3.5-flash-lite: limit=0, requested=7930",
+            status: "RESOURCE_EXHAUSTED",
+          },
+        }),
+        { status: 429 },
+      );
+    },
+  });
+
+  const model = makeGoogleModel();
+  const first = await manager.preparePayload({
+    model,
+    apiKey: "k-free",
+    payload: makePayload("a".repeat(500)),
+  });
+  assert.equal(first, undefined);
+  assert.equal(postCount, 1);
+
+  // Even with a different systemInstruction and invalidateForModel, model-level zero-quota cooldown skips HTTP
+  manager.invalidateForModel(model.provider, model.id);
+  const second = await manager.preparePayload({
+    model,
+    apiKey: "k-free",
+    payload: makePayload("b".repeat(500)),
+  });
+  assert.equal(second, undefined);
+  assert.equal(postCount, 1);
+});

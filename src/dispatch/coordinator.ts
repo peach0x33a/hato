@@ -13,6 +13,7 @@ import type { ScopedProxyRouter } from "../config/proxy.js";
 import type { HatoRepository } from "../db/repo.js";
 import type { ChannelName, InboundBatch } from "../gateway/types.js";
 import type { LiveTraceTracker } from "../stats/live-trace.js";
+import { computeTurnMetrics } from "../stats/metrics.js";
 import { logError, logInfo, summarizeError } from "../utils/logger.js";
 import type { WorkerDispatcher } from "../worker/backend.js";
 import {
@@ -979,17 +980,27 @@ export class TicketCoordinator {
             },
           ];
 
+    const workerMetrics = workerTrace
+      ? computeTurnMetrics({
+          inputTokens: workerTrace.inputTokens,
+          outputTokens: workerTrace.outputTokens,
+          cacheReadTokens: workerTrace.cacheReadTokens,
+          cacheWriteTokens: workerTrace.cacheWriteTokens,
+          latencyMs: params.latencyMs,
+        })
+      : null;
+
     this.deps.repo.insertTurnTrace({
       canonicalUserId: params.canonicalUserId,
       slot: "worker",
       provider: workerTrace?.provider ?? params.backend,
-      modelId: workerTrace?.modelId ?? params.ticketId,
+      modelId: workerTrace?.modelId ?? params.backend,
       api: workerTrace?.api ?? "worker-cli",
       inputTokens: workerTrace?.inputTokens ?? 0,
       outputTokens: workerTrace?.outputTokens ?? 0,
       cacheReadTokens: workerTrace?.cacheReadTokens ?? 0,
       cacheWriteTokens: workerTrace?.cacheWriteTokens ?? 0,
-      cacheHitRate: 0,
+      cacheHitRate: workerMetrics?.cacheHitRate ?? 0,
       ttftMs: null,
       tps: null,
       userPreview: `[工单 ${params.ticketId}] ${params.briefTitle}`,

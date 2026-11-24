@@ -15,6 +15,7 @@ import { HatoRepository } from "../src/db/repo.js";
 import { PersonaRuntime } from "../src/persona/agent.js";
 import { loadLayeredPrompts } from "../src/persona/prompts.js";
 import { runSelfConfigAction } from "../src/persona/self-config.js";
+import { createPersonaReadOnlyTools } from "../src/persona/tools.js";
 import { createDefaultHatoConfig } from "../src/setup/presets.js";
 
 test("loadLayeredPrompts assembles blocks, system.md, and soul.md in default and custom order", () => {
@@ -104,7 +105,13 @@ curator = "faux-provider/model-a"
 worker = "faux-provider/model-a"
 hindsight_llm = "faux-provider/model-a"
 
-[providers]
+[providers.p]
+api = "openai-completions"
+base_url = "https://example.com/v1"
+
+[[providers.p.models]]
+id = "m"
+name = "m"
 `,
     "utf8",
   );
@@ -356,7 +363,13 @@ curator = "faux-provider/model-thinking"
 worker = "faux-provider/model-thinking"
 hindsight_llm = "faux-provider/model-thinking"
 
-[providers]
+[providers.p]
+api = "openai-completions"
+base_url = "https://example.com/v1"
+
+[[providers.p.models]]
+id = "m"
+name = "m"
 `,
     "utf8",
   );
@@ -396,6 +409,106 @@ hindsight_llm = "faux-provider/model-thinking"
     assert.equal(registry.resolveSlotThinkingLevel("persona"), "high");
     assert.deepEqual(thinkingUpdates, [["persona", "high"]]);
     assert.ok(faux);
+  } finally {
+    dbHandle.close();
+    rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("self_config accepts structured config_patch object and read_artifact allows media/inbound & notebook while blocking .env", async () => {
+  const tempDir = mkdtempSync(join(tmpdir(), "hato-tools-patch-read-"));
+  const hatoTomlPath = join(tempDir, "hato.toml");
+  const modelsTomlPath = join(tempDir, "models.toml");
+  const dataDir = join(tempDir, "data");
+  const inboundDir = join(dataDir, "media", "inbound");
+  const notebookDir = join(dataDir, "notebook");
+  mkdirSync(inboundDir, { recursive: true });
+  mkdirSync(notebookDir, { recursive: true });
+
+  const cfg = createDefaultHatoConfig();
+  cfg.paths.sqlite = join(dataDir, "hato.db");
+  cfg.paths.workspaces_dir = join(dataDir, "workspaces");
+  writeHatoConfig(hatoTomlPath, cfg, { backup: false });
+  writeFileSync(
+    modelsTomlPath,
+    `[slots]
+persona = "p/m"
+router = "p/m"
+curator = "p/m"
+worker = "p/m"
+hindsight_llm = "p/m"
+
+[providers.p]
+api = "openai-completions"
+base_url = "https://example.com/v1"
+
+[[providers.p.models]]
+id = "m"
+name = "m"
+`,
+    "utf8",
+  );
+
+  const inboundTxt = join(inboundDir, "note.txt");
+  const notebookTxt = join(notebookDir, "entry.txt");
+  const outsideTxt = join(tempDir, "outside.txt");
+  const envFile = join(tempDir, ".env");
+  writeFileSync(inboundTxt, "INBOUND_OK", "utf8");
+  writeFileSync(notebookTxt, "NOTEBOOK_OK", "utf8");
+  writeFileSync(outsideTxt, "OUTSIDE_SECRET", "utf8");
+  writeFileSync(envFile, "API_KEY=123", "utf8");
+
+  const dbHandle = openDatabase(":memory:");
+  try {
+    const repo = new HatoRepository(dbHandle.db);
+    const registry = new ModelRegistry(modelsTomlPath, repo);
+    const proxyRouter = new ScopedProxyRouter([]);
+    let confirmedPatch: Record<string, unknown> | undefined;
+    const scDeps = {
+      hatoConfigPath: hatoTomlPath,
+      getHatoConfig: () => loadHatoConfig(hatoTomlPath),
+      getModelRegistry: () => registry,
+      repo,
+      onReloadRuntime: async () => {},
+    };
+    const tools = createPersonaReadOnlyTools({
+      repo,
+      canonicalUserId: "owner",
+      getTimezone: () => "Asia/Shanghai",
+      getHatoConfig: () => loadHatoConfig(hatoTomlPath),
+      proxyRouter,
+      selfConfigDeps: scDeps,
+      onRequestSelfConfigConfirm: async (req) => {
+        confirmedPatch = req.action.config_patch;
+        const out = await runSelfConfigAction(scDeps, req.action);
+        return { ok: out.ok, ticketId: "sc_test", message: out.summary };
+      },
+    });
+
+    const selfConfigTool = tools.find((t) => t.name === "self_config")!;
+    const readArtifactTool = tools.find((t) => t.name === "read_artifact")!;
+
+    const patchRes = await selfConfigTool.execute("tc1", {
+      action: "patch_hato",
+      config_patch: { gateway: { debounce_ms: 2500 } },
+    });
+    assert.deepEqual(confirmedPatch, { gateway: { debounce_ms: 2500 } });
+    assert.equal(loadHatoConfig(hatoTomlPath).gateway.debounce_ms, 2500);
+    assert.ok(patchRes);
+
+    const rInbound = await readArtifactTool.execute("tc2", { path: inboundTxt });
+    assert.equal((rInbound.details as { ok?: boolean }).ok, true);
+    assert.match(JSON.stringify(rInbound.content), /INBOUND_OK/);
+
+    const rNotebook = await readArtifactTool.execute("tc3", { path: notebookTxt });
+    assert.equal((rNotebook.details as { ok?: boolean }).ok, true);
+    assert.match(JSON.stringify(rNotebook.content), /NOTEBOOK_OK/);
+
+    const rOutside = await readArtifactTool.execute("tc4", { path: outsideTxt });
+    assert.equal((rOutside.details as { ok?: boolean }).ok, false);
+
+    const rEnv = await readArtifactTool.execute("tc5", { path: envFile });
+    assert.equal((rEnv.details as { ok?: boolean }).ok, false);
   } finally {
     dbHandle.close();
     rmSync(tempDir, { recursive: true, force: true });

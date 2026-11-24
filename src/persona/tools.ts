@@ -1,8 +1,9 @@
 import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
-import { basename, extname, resolve, sep } from "node:path";
+import { basename, dirname, extname, resolve, sep } from "node:path";
 import type { AgentTool } from "@earendil-works/pi-agent-core";
 import type { ImageContent, TextContent } from "@earendil-works/pi-ai";
 import { arr, bool, num, obj, oneOf, opt, str } from "@earendil-works/pi-schema";
+import { Type } from "@sinclair/typebox";
 import { convertBufferToModelImage } from "../gateway/media.js";
 import type { BrowserRuntime } from "../browser/runtime.js";
 import {
@@ -144,6 +145,12 @@ const SelfConfigParams = obj({
     "set_relationship_fact",
     "delete_relationship_fact",
   ]),
+  config_patch: opt(
+    Type.Record(Type.String(), Type.Unknown(), {
+      description:
+        "Structured JSON object of allowlisted hato.toml patches (preferred over config_patch_json), e.g. {\"gateway\":{\"debounce_ms\":2500}}",
+    }),
+  ),
   config_patch_json: opt(
     str({
       description:
@@ -768,7 +775,7 @@ export function createPersonaReadOnlyTools(params: {
     name: "read_artifact",
     label: "Read Worker Artifact",
     description:
-      "Read a worker-delivered text/code/report artifact or inspect a generated image artifact by path.",
+      "Read a worker-delivered text/code/report artifact or inspect a generated/inbound/notebook image or file by path.",
     parameters: ReadArtifactParams,
     async execute(_toolCallId, input) {
       const resolved = resolve(input.path.trim());
@@ -796,12 +803,27 @@ export function createPersonaReadOnlyTools(params: {
           details: { ok: false, path: resolved },
         };
       }
-      const rawWorkspacesRoot = resolve(params.getHatoConfig().paths.workspaces_dir);
+      const cfg = params.getHatoConfig();
+      const rawWorkspacesRoot = resolve(cfg.paths.workspaces_dir);
       const workspacesRoot = existsSync(rawWorkspacesRoot)
         ? realpathSync(rawWorkspacesRoot)
         : rawWorkspacesRoot;
       const inWorkspace =
         realTarget === workspacesRoot || realTarget.startsWith(`${workspacesRoot}${sep}`);
+
+      const dataDir = dirname(resolve(cfg.paths.sqlite));
+      const rawInboundRoot = resolve(dataDir, "media", "inbound");
+      const inboundRoot = existsSync(rawInboundRoot) ? realpathSync(rawInboundRoot) : rawInboundRoot;
+      const inInbound =
+        realTarget === inboundRoot || realTarget.startsWith(`${inboundRoot}${sep}`);
+
+      const rawNotebookRoot = resolve(dataDir, "notebook");
+      const notebookRoot = existsSync(rawNotebookRoot)
+        ? realpathSync(rawNotebookRoot)
+        : rawNotebookRoot;
+      const inNotebook =
+        realTarget === notebookRoot || realTarget.startsWith(`${notebookRoot}${sep}`);
+
       const knownArtifact = params.repo.listTickets(params.canonicalUserId, 50).some((t) => {
         if (!t.resultJson) return false;
         try {
@@ -822,9 +844,9 @@ export function createPersonaReadOnlyTools(params: {
           return false;
         }
       });
-      if (!inWorkspace && !knownArtifact) {
+      if (!inWorkspace && !inInbound && !inNotebook && !knownArtifact) {
         return {
-          content: [{ type: "text", text: `路径不在工单产物或工作区范围内: ${resolved}` }],
+          content: [{ type: "text", text: `路径不在工单产物、工作区或媒体/小本本范围内: ${resolved}` }],
           details: { ok: false, path: resolved },
         };
       }
@@ -1032,26 +1054,40 @@ export function createPersonaReadOnlyTools(params: {
       parameters: SelfConfigParams,
       async execute(_toolCallId, input) {
         let parsedPatch: Record<string, unknown> | undefined;
-        if (input.config_patch_json !== undefined) {
-          try {
-            const raw = JSON.parse(input.config_patch_json) as unknown;
-            if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+        if (
+          input.config_patch &&
+          typeof input.config_patch === "object" &&
+          !Array.isArray(input.config_patch)
+        ) {
+          parsedPatch = input.config_patch as Record<string, unknown>;
+        } else if (input.config_patch_json !== undefined) {
+          if (
+            typeof input.config_patch_json === "object" &&
+            input.config_patch_json !== null &&
+            !Array.isArray(input.config_patch_json)
+          ) {
+            parsedPatch = input.config_patch_json as Record<string, unknown>;
+          } else {
+            try {
+              const raw = JSON.parse(input.config_patch_json) as unknown;
+              if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+                return {
+                  content: [{ type: "text", text: "config_patch_json 必须是合法的 JSON 对象。" }],
+                  details: { ok: false },
+                };
+              }
+              parsedPatch = raw as Record<string, unknown>;
+            } catch (err) {
               return {
-                content: [{ type: "text", text: "config_patch_json 必须是合法的 JSON 对象。" }],
+                content: [
+                  {
+                    type: "text",
+                    text: `config_patch_json JSON 解析失败: ${err instanceof Error ? err.message : String(err)}`,
+                  },
+                ],
                 details: { ok: false },
               };
             }
-            parsedPatch = raw as Record<string, unknown>;
-          } catch (err) {
-            return {
-              content: [
-                {
-                  type: "text",
-                  text: `config_patch_json JSON 解析失败: ${err instanceof Error ? err.message : String(err)}`,
-                },
-              ],
-              details: { ok: false },
-            };
           }
         }
 

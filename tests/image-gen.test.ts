@@ -182,3 +182,85 @@ describe("OpenAI-compatible image_gen", () => {
     }
   });
 });
+
+test("generateOpenAiImage retries transient 503 and socket errors but fails fast on 400", async () => {
+  let mode: "503_then_ok" | "reset_then_ok" | "400_fail" = "503_then_ok";
+  let attempts = 0;
+  const pngBytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+
+  const server = createServer((req, res) => {
+    attempts++;
+    req.resume();
+    req.on("end", () => {
+      if (mode === "503_then_ok" && attempts === 1) {
+        res.writeHead(503, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: { message: "No available compatible accounts" } }));
+        return;
+      }
+      if (mode === "reset_then_ok" && attempts === 1) {
+        req.socket.destroy();
+        return;
+      }
+      if (mode === "400_fail") {
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: { message: "Duplicate parameter: 'image'" } }));
+        return;
+      }
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ data: [{ b64_json: pngBytes.toString("base64") }] }));
+    });
+  });
+
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", () => resolve()));
+  const port = (server.address() as AddressInfo).port;
+  const workspaceDir = mkdtempSync(join(tmpdir(), "hato-imggen-retry-"));
+  const proxyRouter = new ScopedProxyRouter([]);
+
+  try {
+    mode = "503_then_ok";
+    attempts = 0;
+    const r1 = await generateOpenAiImage({
+      prompt: "retry 503",
+      workspaceDir,
+      providerSlug: "claudeflare",
+      baseUrl: `http://127.0.0.1:${port}/v1`,
+      apiKey: "test-key",
+      proxyRouter,
+      sleepFn: async () => {},
+    });
+    assert.equal(r1.ok, true);
+    assert.equal(attempts, 2);
+
+    mode = "reset_then_ok";
+    attempts = 0;
+    const r2 = await generateOpenAiImage({
+      prompt: "retry reset",
+      workspaceDir,
+      providerSlug: "claudeflare",
+      baseUrl: `http://127.0.0.1:${port}/v1`,
+      apiKey: "test-key",
+      proxyRouter,
+      sleepFn: async () => {},
+    });
+    assert.equal(r2.ok, true);
+    assert.equal(attempts, 2);
+
+    mode = "400_fail";
+    attempts = 0;
+    const r3 = await generateOpenAiImage({
+      prompt: "bad request",
+      workspaceDir,
+      providerSlug: "claudeflare",
+      baseUrl: `http://127.0.0.1:${port}/v1`,
+      apiKey: "test-key",
+      proxyRouter,
+      sleepFn: async () => {},
+    });
+    assert.equal(r3.ok, false);
+    assert.equal(attempts, 1);
+    assert.match(r3.error ?? "", /HTTP 400/);
+  } finally {
+    server.close();
+    rmSync(workspaceDir, { recursive: true, force: true });
+  }
+});

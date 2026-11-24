@@ -223,6 +223,62 @@ export function redactSensitiveTokens(text: string): string {
     .replace(/(Bearer\s+)[A-Za-z0-9._-]+/gi, "$1***");
 }
 
+function unwrapNestedApiErrorJson(raw: string): string | null {
+  const startIdx = raw.indexOf("{");
+  if (startIdx < 0) return null;
+  const candidate = raw.slice(startIdx).trim();
+  if (!candidate.startsWith("{") || !candidate.endsWith("}")) return null;
+
+  let current: unknown;
+  try {
+    current = JSON.parse(candidate);
+  } catch {
+    return null;
+  }
+
+  let code: string | number | undefined;
+  let status: string | undefined;
+  let message: string | undefined;
+
+  for (let depth = 0; depth < 3 && current && typeof current === "object"; depth++) {
+    const rec = current as Record<string, unknown>;
+    const errObj =
+      rec.error && typeof rec.error === "object" && !Array.isArray(rec.error)
+        ? (rec.error as Record<string, unknown>)
+        : rec;
+
+    if (typeof errObj.code === "number" || typeof errObj.code === "string") {
+      code = errObj.code;
+    }
+    if (typeof errObj.status === "string" && errObj.status.trim()) {
+      status = errObj.status.trim();
+    }
+
+    const msg = typeof errObj.message === "string" ? errObj.message.trim() : "";
+    if (!msg) break;
+    message = msg;
+
+    if (msg.startsWith("{")) {
+      try {
+        current = JSON.parse(msg);
+        continue;
+      } catch {
+        break;
+      }
+    }
+    break;
+  }
+
+  if (!message && code === undefined && !status) return null;
+  const prefix = raw.slice(0, startIdx).trim();
+  const codePart = code !== undefined ? `HTTP ${code}` : "";
+  const statusPart = status ? `(${status})` : "";
+  const header = [prefix, codePart, statusPart].filter(Boolean).join(" ");
+  const body = message ? message.replace(/\s+/g, " ").trim() : "";
+  const combined = header && body ? `${header}: ${body}` : header || body;
+  return combined.length > 600 ? `${combined.slice(0, 597)}...` : combined;
+}
+
 function formatReadableErrorText(raw: string): string {
   const collapsed = redactSensitiveTokens(raw.replace(/\s+/g, " ").trim());
   if (!collapsed) return "";
@@ -240,6 +296,11 @@ function formatReadableErrorText(raw: string): string {
       return `${source}返回错误 (${title})，请稍后重试`;
     }
     return `${source}返回 ${statusText} 错误，请稍后重试`;
+  }
+
+  const unwrapped = unwrapNestedApiErrorJson(raw.trim());
+  if (unwrapped) {
+    return redactSensitiveTokens(unwrapped);
   }
 
   return collapsed.length > 600 ? `${collapsed.slice(0, 597)}...` : collapsed;
@@ -285,6 +346,31 @@ export function summarizeError(err: unknown): string {
   }
 
   return parts.join(" <- ") || "Unknown error";
+}
+
+/**
+ * Formats an LLM/turn failure into a concise, user-friendly IM message without raw JSON dumps.
+ */
+export function formatUserFacingTurnError(err: unknown): string {
+  const summary = summarizeError(err);
+  if (/User location is not supported/i.test(summary)) {
+    return "模型接口返回地区限制（400 User location is not supported），请检查代理路由配置或切换模型～";
+  }
+  if (/\b503\b|UNAVAILABLE|high demand|overloaded|model is at capacity/i.test(summary)) {
+    return "模型服务当前繁忙（503），自动重试后仍未恢复，请稍后再试～";
+  }
+  if (/\b429\b|RESOURCE_EXHAUSTED|rate.?limit|too many requests|quota/i.test(summary)) {
+    return "模型接口触发限流或额度上限（429），请稍后再试～";
+  }
+  if (
+    /incomplete json segment|unexpected end of json input|stream ended unexpectedly|ECONNRESET|timed? out/i.test(
+      summary,
+    )
+  ) {
+    return "模型连接或响应流意外中断，请再发一次试试～";
+  }
+  const clipped = summary.length > 180 ? `${summary.slice(0, 177)}...` : summary;
+  return `处理刚才这条消息时出错了：${clipped}`;
 }
 
 /**

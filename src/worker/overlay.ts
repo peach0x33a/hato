@@ -464,7 +464,7 @@ export function prepareExternalCliOverlay(
   };
 }
 
-function resolveBackendCommand(backend: ExternalCliBackend, config: HatoConfig): string {
+export function resolveBackendCommand(backend: ExternalCliBackend, config: HatoConfig): string {
   const ext = config.worker.external_cli;
   if (backend === "codex-cli") return ext.codex_cli?.command?.trim() || "codex";
   if (backend === "antigravity-cli") return ext.antigravity_cli?.command?.trim() || "agy";

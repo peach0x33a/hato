@@ -823,7 +823,10 @@ export class QqAdapter implements ChannelAdapter {
       effectiveTextParts.push(`[引用消息: ${evt.message_reference.message_id}]`);
     }
     if (text && !parsedContentForward) {
-      effectiveTextParts.push(text);
+      const cleaned = cleanQqFaceTags(text).trim();
+      if (cleaned) {
+        effectiveTextParts.push(cleaned);
+      }
     }
     if (forwardNotes.length > 0) {
       effectiveTextParts.push(...forwardNotes);
@@ -871,6 +874,24 @@ export function splitQqText(text: string, maxLen = QQ_MAX_MESSAGE_LENGTH): strin
   }
   if (remaining) chunks.push(remaining);
   return chunks;
+}
+
+export function cleanQqFaceTags(text: string): string {
+  return text.replace(
+    /<faceType=\d+,faceId="[^"]*",ext="([^"]*)">/g,
+    (_match, rawExt: string) => {
+      try {
+        const decoded = Buffer.from(rawExt, "base64").toString("utf8");
+        const parsed = JSON.parse(decoded) as { text?: unknown };
+        if (typeof parsed.text === "string" && parsed.text.trim()) {
+          return `[表情:${parsed.text.trim().replace(/^\//, "")}]`;
+        }
+      } catch {
+        // ignore malformed ext payload
+      }
+      return "[表情]";
+    },
+  );
 }
 
 function sleepAbortable(ms: number, signal?: AbortSignal): Promise<void> {

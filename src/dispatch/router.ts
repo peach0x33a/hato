@@ -43,6 +43,7 @@ export interface NeutralRouterDeps {
   proxyRouter: ScopedProxyRouter;
   repo: HatoRepository;
   getMemoryStore?: () => MemoryStore | null;
+  filterAvailableBackends?: (backends: WorkerBackend[], cfg: HatoConfig) => WorkerBackend[];
 }
 
 /**
@@ -100,12 +101,21 @@ export class NeutralRouter {
       }
     }
 
-    const enabledBackends = listEnabledWorkerBackends(cfg);
-    const effectiveDefaultBackend = resolveEffectiveDefaultBackend(cfg);
+    const rawEnabledBackends = listEnabledWorkerBackends(cfg);
+    const filteredBackends = this.deps.filterAvailableBackends
+      ? this.deps.filterAvailableBackends(rawEnabledBackends, cfg)
+      : rawEnabledBackends;
+    const enabledBackends: WorkerBackend[] = filteredBackends.includes("builtin-pi")
+      ? filteredBackends
+      : [...filteredBackends, "builtin-pi"];
+
+    const rawDefaultBackend = resolveEffectiveDefaultBackend(cfg);
+    const effectiveDefaultBackend: WorkerBackend = enabledBackends.includes(rawDefaultBackend)
+      ? rawDefaultBackend
+      : (enabledBackends[0] ?? "builtin-pi");
     const routingMode = cfg.worker.routing_mode ?? "smart";
     const formattedMsgs = formatNumberedMessages(recentMsgs, cfg.owner.timezone);
     const userPayload = [
-      `[delegate hint (urgency=${params.urgency ?? "normal"})]: ${params.hint}`,
       `[routing_mode]: ${routingMode}`,
       `[default_backend]: ${effectiveDefaultBackend}`,
       `[enabled_backends]: ${enabledBackends.join(", ")}`,
@@ -114,8 +124,9 @@ export class NeutralRouter {
       `[worker_mcp_servers]: ${workerMcpServers.length > 0 ? workerMcpServers.map((s) => `${s.name} (${s.description || s.transport})`).join("; ") : "(none)"}`,
       `[script_registry]: ${scripts.length > 0 ? scripts.map((s) => `${s.id}:${s.name} cron=${s.cronExpr} enabled=${s.enabled}`).join("; ") : "(none)"}`,
       `[open_loops]: ${openLoops.length > 0 ? openLoops.map((l) => `${l.id}:${l.content} status=${l.status}`).join("; ") : "(none)"}`,
-      `[tech_bank_context]:\n${techFactsText}`,
       `[recent_messages (${recentMsgs.length})]:\n${formattedMsgs}`,
+      `[tech_bank_context]:\n${techFactsText}`,
+      `[delegate hint (urgency=${params.urgency ?? "normal"})]: ${params.hint}`,
     ].join("\n\n");
 
     try {
@@ -162,7 +173,7 @@ export class NeutralRouter {
       logWarn("ROUTER", `Router LLM failed, falling back deterministically: ${summarizeError(err)}`);
     }
 
-    return buildFallbackTicketDecision(cfg, recentMsgs, params.hint);
+    return buildFallbackTicketDecision(cfg, recentMsgs, params.hint, effectiveDefaultBackend);
   }
 
   async classifyNeedsInputReply(params: {
@@ -349,12 +360,13 @@ function buildFallbackTicketDecision(
   config: HatoConfig,
   recentMsgs: readonly RawMessageRecord[],
   hint: string,
+  preferredBackend?: WorkerBackend,
 ): RouterDecision {
   const firstId = recentMsgs[0]?.id ?? "msg_0";
   const lastId = recentMsgs[recentMsgs.length - 1]?.id ?? firstId;
   return {
     decision: "ticket",
-    backend: resolveEffectiveDefaultBackend(config),
+    backend: preferredBackend ?? resolveEffectiveDefaultBackend(config),
     brief_title: hint.trim().slice(0, 32) || "后台任务",
     context_range: {
       from_msg_id: firstId,
@@ -368,6 +380,14 @@ function buildFallbackTicketDecision(
   };
 }
 
+const MAX_ROUTER_MSG_CHARS = 800;
+
+function clipRouterMessageContent(content: string): string {
+  if (content.length <= MAX_ROUTER_MSG_CHARS) return content;
+  const omitted = content.length - 700;
+  return `${content.slice(0, 500)} ...[截断 ${omitted} 字符]... ${content.slice(-200)}`;
+}
+
 function formatNumberedMessages(
   messages: readonly RawMessageRecord[],
   timezone: string,
@@ -378,7 +398,7 @@ function formatNumberedMessages(
       const speaker =
         m.role === "user" ? "USER" : m.role === "assistant" ? "CHAT_RELAY" : "EVENT";
       const stamp = formatLocalDateTime(m.createdAt, timezone).compactStamp;
-      return `[${m.id} | ${stamp} | ${speaker}] ${m.content}`;
+      return `[${m.id} | ${stamp} | ${speaker}] ${clipRouterMessageContent(m.content)}`;
     })
     .join("\n");
 }

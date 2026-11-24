@@ -761,14 +761,27 @@ export class PersonaRuntime {
       ],
       ...(this.delegateHandler
         ? {
-            onDelegate: (input: { hint: string; urgency?: "normal" | "high"; deliverFiles?: boolean }) =>
-              this.delegateHandler!({
+            onDelegate: (input: { hint: string; urgency?: "normal" | "high"; deliverFiles?: boolean }) => {
+              const targetChannel = this.activeTurnOriginChannel;
+              const res = this.delegateHandler!({
                 canonicalUserId,
-                originChannel: this.activeTurnOriginChannel,
+                originChannel: targetChannel,
                 hint: input.hint,
                 urgency: input.urgency,
                 deliverFiles: input.deliverFiles,
-              }),
+              });
+              if (res.ticketId) {
+                this.recordDispatchedTaskEvent({
+                  canonicalUserId,
+                  channel: targetChannel,
+                  toolName: "delegate",
+                  ticketId: res.ticketId,
+                  status: res.status,
+                  summary: input.hint,
+                });
+              }
+              return res;
+            },
           }
         : {}),
       ...(this.imageGenHandler
@@ -782,10 +795,11 @@ export class PersonaRuntime {
               filename?: string;
               referenceImagePaths?: string[];
               deliverFiles?: boolean;
-            }) =>
-              this.imageGenHandler!({
+            }) => {
+              const targetChannel = this.activeTurnOriginChannel;
+              const res = this.imageGenHandler!({
                 canonicalUserId,
-                originChannel: this.activeTurnOriginChannel,
+                originChannel: targetChannel,
                 prompt: input.prompt,
                 model: input.model,
                 size: input.size,
@@ -794,7 +808,19 @@ export class PersonaRuntime {
                 filename: input.filename,
                 referenceImagePaths: input.referenceImagePaths,
                 deliverFiles: input.deliverFiles,
-              }),
+              });
+              if (res.ticketId) {
+                this.recordDispatchedTaskEvent({
+                  canonicalUserId,
+                  channel: targetChannel,
+                  toolName: "image_gen",
+                  ticketId: res.ticketId,
+                  status: res.status,
+                  summary: input.prompt,
+                });
+              }
+              return res;
+            },
           }
         : {}),
       ...(this.sendFileHandler
@@ -1334,6 +1360,8 @@ export class PersonaRuntime {
 
     const recallCfg = resolveMemoryRecallConfig(this.hatoConfig);
     if (
+      !turnState.abortedForSupersede &&
+      !options?.shouldSuppressSend?.() &&
       (recallCfg.mode === "auto" || recallCfg.mode === "hybrid") &&
       this.memoryStore?.isConfigured() &&
       shouldAutoRecall(batch.combinedText, recallCfg.minQueryChars)
@@ -1445,7 +1473,18 @@ export class PersonaRuntime {
       }
       this.activeTurnRecalledIds.clear();
       this.turnPendingExecutedEvents = [];
-      this.refreshTranscriptFromDb();
+      if (this.pendingTranscriptRefresh) {
+        this.refreshTranscriptFromDb();
+      } else {
+        const retainedUserMsg =
+          userAgentMsg.role === "hato_user_batch" && userAgentMsg.images.length > 0
+            ? { ...userAgentMsg, images: [] }
+            : userAgentMsg;
+        this.agent.state.messages = [
+          ...this.agent.state.messages.slice(0, startIndex),
+          retainedUserMsg,
+        ];
+      }
       return {
         rawText: "",
         bubbles: [],
@@ -1835,6 +1874,29 @@ export class PersonaRuntime {
       channel: params.channel,
       role: "executed_event",
       content: `已通过 ${params.toolName} 发送文件到 ${params.channel.toUpperCase()}: ${name} (${resolvedPath})${captionNote}`,
+      createdAt: Date.now(),
+    });
+    this.turnPendingExecutedEvents.push(rec);
+  }
+
+  private recordDispatchedTaskEvent(params: {
+    canonicalUserId: string;
+    channel: InboundBatch["originChannel"];
+    toolName: "delegate" | "image_gen";
+    ticketId: string;
+    status: string;
+    summary: string;
+  }): void {
+    const clippedSummary = params.summary.replace(/\s+/g, " ").trim().slice(0, 80);
+    const actionLabel =
+      params.toolName === "delegate"
+        ? `已通过 delegate 转交后台处理 (${params.ticketId}, status=${params.status})`
+        : `已通过 image_gen 启动后台生图 (${params.ticketId}, status=${params.status})`;
+    const rec = this.repo.appendRawMessage({
+      canonicalUserId: params.canonicalUserId,
+      channel: params.channel,
+      role: "executed_event",
+      content: clippedSummary ? `${actionLabel}: ${clippedSummary}` : actionLabel,
       createdAt: Date.now(),
     });
     this.turnPendingExecutedEvents.push(rec);

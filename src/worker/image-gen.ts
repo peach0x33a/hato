@@ -18,6 +18,8 @@ export interface OpenAiImageGenParams {
   apiKey: string;
   proxyRouter: ScopedProxyRouter;
   timeoutMs?: number;
+  maxRetries?: number;
+  sleepFn?: (ms: number) => Promise<void>;
 }
 
 export interface GeneratedImageFile {
@@ -96,6 +98,15 @@ function resolveWorkspaceImagePath(workspaceDir: string, relPath: string): strin
     throw new Error(`Image output path escapes workspace boundary: ${relPath}`);
   }
   return abs;
+}
+
+const TRANSIENT_IMAGE_HTTP_STATUSES = new Set([429, 500, 502, 503, 504, 520, 522, 523, 524]);
+
+function isTransientImageNetworkError(err: unknown): boolean {
+  const text = err instanceof Error ? `${err.name} ${err.message}` : String(err ?? "");
+  return /ECONNRESET|ETIMEDOUT|EPIPE|ECONNREFUSED|UND_ERR_|socket|fetch failed|other side closed|timed? out/i.test(
+    text,
+  );
 }
 
 /**
@@ -181,10 +192,27 @@ export async function generateOpenAiImage(
     return { res, raw };
   };
 
+  const maxRetries = Math.max(0, Math.floor(params.maxRetries ?? 2));
+  const sleep = params.sleepFn ?? ((ms: number) => new Promise((r) => setTimeout(r, ms)));
+
   try {
-    let { res, raw } = await callApi(true);
-    if (!res.ok && res.status === 400 && /response_format/i.test(raw)) {
-      ({ res, raw } = await callApi(false));
+    let res!: Response;
+    let raw = "";
+    for (let attempt = 0; ; attempt++) {
+      try {
+        ({ res, raw } = await callApi(true));
+        if (!res.ok && res.status === 400 && /response_format/i.test(raw)) {
+          ({ res, raw } = await callApi(false));
+        }
+        if (res.ok || !TRANSIENT_IMAGE_HTTP_STATUSES.has(res.status) || attempt >= maxRetries) {
+          break;
+        }
+      } catch (err) {
+        if (!isTransientImageNetworkError(err) || attempt >= maxRetries) {
+          throw err;
+        }
+      }
+      await sleep(1500 * (attempt + 1));
     }
 
     if (!res.ok) {

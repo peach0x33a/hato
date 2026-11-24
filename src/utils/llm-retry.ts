@@ -57,6 +57,7 @@ const RETRYABLE_PATTERNS = [
   /service.?(?:is.?)?(?:temporarily.?)?unavailable|bad gateway|gateway timeout/i,
   /ECONNRESET|ECONNREFUSED|ETIMEDOUT|EPIPE|ENOTFOUND|EAI_AGAIN|ECONNABORTED|UND_ERR_/i,
   /fetch failed|socket hang up|premature close|connection closed|other side closed|network.?error|timed? out/i,
+  /incomplete json segment|unexpected end of json input|unterminated string in json|unexpected eof|stream ended unexpectedly/i,
 ];
 
 function extractErrorText(err: unknown): string {
