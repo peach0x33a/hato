@@ -53,7 +53,7 @@ export function splitIntoBubbles(rawText: string, options: BubbleSplitOptions): 
 
   const delimiterPattern = buildDelimiterPattern(options.delimiter);
   const cleanText = stripDelimiterArtifacts(trimmed, delimiterPattern);
-  if (!options.enabled || options.maxPerTurn <= 1 || hasStructuredContent(trimmed)) {
+  if (!options.enabled || options.maxPerTurn === 1 || hasStructuredContent(trimmed)) {
     return [cleanText];
   }
 
@@ -71,7 +71,7 @@ export function splitIntoBubbles(rawText: string, options: BubbleSplitOptions): 
     return [cleanText];
   }
 
-  if (rawParts.length <= options.maxPerTurn) {
+  if (options.maxPerTurn <= 0 || rawParts.length <= options.maxPerTurn) {
     return rawParts;
   }
 

@@ -197,6 +197,102 @@ export function GatewaySection({ draft, setDraft, retryCfg }: GatewaySectionProp
         </SettingsRow>
       </SettingsCardGroup>
 
+      <SettingsCardGroup
+        title="回复气泡"
+        description="控制聊天回复是否拆分为多条连续气泡发送"
+      >
+        <SettingsRow
+          title="启用多气泡分段"
+          description="开启后按段落或分隔符拆分为多条消息依次发送，模拟真人聊天节奏"
+        >
+          <Switch
+            ariaLabel="启用多气泡分段"
+            checked={draft.gateway.bubbles.enabled}
+            onCheckedChange={(on) =>
+              setDraft((p) => ({
+                ...p,
+                gateway: {
+                  ...p.gateway,
+                  bubbles: { ...p.gateway.bubbles, enabled: on },
+                },
+              }))
+            }
+          />
+        </SettingsRow>
+        <SettingsRow
+          title="单轮最多气泡数"
+          description="填 0 表示不限制数量，1 表示合并为单条；QQ 官方私聊单条被动回复上限为 4 条"
+        >
+          <div className="w-full sm:w-32">
+            <NumericConsoleInput
+              size="sm"
+              value={draft.gateway.bubbles.max_per_turn}
+              fallback={3}
+              min={0}
+              onCommit={(max_per_turn) =>
+                setDraft((p) => ({
+                  ...p,
+                  gateway: {
+                    ...p.gateway,
+                    bubbles: { ...p.gateway.bubbles, max_per_turn },
+                  },
+                }))
+              }
+            />
+          </div>
+        </SettingsRow>
+        <SettingsRow
+          title="气泡发送间隔（毫秒）"
+          description="多条气泡依次发送时的随机停顿范围（最小 – 最大）"
+        >
+          <div className="flex w-full items-center gap-2 sm:w-64">
+            <NumericConsoleInput
+              size="sm"
+              value={draft.gateway.bubbles.delay_ms_range[0]}
+              fallback={0}
+              min={0}
+              onCommit={(minDelay) =>
+                setDraft((p) => {
+                  const curMax = p.gateway.bubbles.delay_ms_range[1];
+                  return {
+                    ...p,
+                    gateway: {
+                      ...p.gateway,
+                      bubbles: {
+                        ...p.gateway.bubbles,
+                        delay_ms_range: [minDelay, Math.max(minDelay, curMax)],
+                      },
+                    },
+                  };
+                })
+              }
+            />
+            <span className="text-muted-foreground text-xs">~</span>
+            <NumericConsoleInput
+              size="sm"
+              value={draft.gateway.bubbles.delay_ms_range[1]}
+              fallback={0}
+              min={0}
+              onCommit={(maxDelay) =>
+                setDraft((p) => {
+                  const curMin = p.gateway.bubbles.delay_ms_range[0];
+                  return {
+                    ...p,
+                    gateway: {
+                      ...p.gateway,
+                      bubbles: {
+                        ...p.gateway.bubbles,
+                        delay_ms_range: [Math.min(curMin, maxDelay), maxDelay],
+                      },
+                    },
+                  };
+                })
+              }
+            />
+          </div>
+        </SettingsRow>
+      </SettingsCardGroup>
+
       <SettingsCardGroup title="断线重连策略" description="各消息网关共用的重试与退避配置">
         <SettingsRow title="最大重试次数" description="连接或发送异常后的最大自动重试次数">
           <div className="w-full sm:w-32">

@@ -34,12 +34,12 @@ import type {
 } from "./types.js";
 
 const QQ_MAX_MESSAGE_LENGTH = 2000;
-const QQ_PASSIVE_WINDOW_MS = 5 * 60 * 1000;
+const QQ_PASSIVE_WINDOW_MS = 60 * 60 * 1000;
 const QQ_MAX_PASSIVE_SEQ = 4;
 
 export const QQ_CAPABILITIES: ChannelCapabilities = {
   channel: "qq",
-  maxBubblesPerTurn: 3,
+  maxBubblesPerTurn: 4,
   supportsInlineConfirm: false,
   supportsDirectFileUpload: true,
   proactiveSupported: true,
@@ -416,8 +416,7 @@ export class QqAdapter implements ChannelAdapter {
     replyToPlatformMsgId?: string,
   ): Promise<void> {
     const filtered = bubbles.filter((b) => b.trim() && !isNoReplyOutput(b));
-    const capped = filtered.slice(0, this.capabilities.maxBubblesPerTurn);
-    for (let i = 0; i < capped.length; i++) {
+    for (let i = 0; i < filtered.length; i++) {
       if (i > 0) {
         const [minMs, maxMs] = delayRangeMs;
         const delayMs =
@@ -426,7 +425,7 @@ export class QqAdapter implements ChannelAdapter {
           await new Promise((r) => setTimeout(r, delayMs));
         }
       }
-      await this.sendText(platformUserId, capped[i]!, i === 0 ? replyToPlatformMsgId : undefined);
+      await this.sendText(platformUserId, filtered[i]!, i === 0 ? replyToPlatformMsgId : undefined);
     }
   }
 

@@ -93,6 +93,10 @@ export const SETTINGS_NAV_ITEMS: SettingsNavItem[] = [
       "退避",
       "retry",
       "jitter",
+      "气泡",
+      "bubbles",
+      "max_per_turn",
+      "分段",
     ],
   },
   {

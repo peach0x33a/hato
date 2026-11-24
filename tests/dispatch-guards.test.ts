@@ -3,6 +3,7 @@ import test from "node:test";
 import { createDefaultHatoConfig } from "../src/setup/presets.js";
 import { ScopedProxyRouter } from "../src/config/proxy.js";
 import { isNoReplyOutput } from "../src/persona/agent.js";
+import { splitIntoBubbles } from "../src/persona/bubbles.js";
 import { createPersonaReadOnlyTools } from "../src/persona/tools.js";
 
 test("isNoReplyOutput matches [NO_REPLY] variants with whitespace or backticks", () => {
@@ -75,4 +76,20 @@ test("inspect_tickets respects onBeforeInspectTickets guard (Option A)", async (
   const pollNewRes = await inspectTool.execute("c_poll_new", { ticket_id: "t_new12345" });
   assert.equal((pollNewRes.details as any).blocked, true);
   assert.equal(repoQueried, 3);
+});
+
+test("splitIntoBubbles supports maxPerTurn=0 (unlimited), 1 (single), and N (merge tail)", () => {
+  const sample = "第一段\n\n第二段\n\n第三段\n\n第四段\n\n第五段";
+  assert.deepEqual(
+    splitIntoBubbles(sample, { enabled: true, maxPerTurn: 0, delimiter: "---" }),
+    ["第一段", "第二段", "第三段", "第四段", "第五段"],
+  );
+  assert.deepEqual(
+    splitIntoBubbles(sample, { enabled: true, maxPerTurn: 1, delimiter: "---" }),
+    [sample],
+  );
+  assert.deepEqual(
+    splitIntoBubbles(sample, { enabled: true, maxPerTurn: 3, delimiter: "---" }),
+    ["第一段", "第二段", "第三段\n\n第四段\n\n第五段"],
+  );
 });

@@ -131,7 +131,7 @@ export const HatoConfigSchema = Type.Object({
     retry: Type.Optional(RetryPolicySchema),
     bubbles: Type.Object({
       enabled: Type.Boolean(),
-      max_per_turn: Type.Number({ minimum: 1 }),
+      max_per_turn: Type.Number({ minimum: 0 }),
       delay_ms_range: Type.Tuple([Type.Number({ minimum: 0 }), Type.Number({ minimum: 0 })]),
       delimiter: Type.String({ minLength: 1 }),
     }),
