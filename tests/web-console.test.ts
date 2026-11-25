@@ -367,7 +367,7 @@ hindsight_llm = "faux-provider/faux-persona-1"
     // 5. Chat SSE (normal reply + slash command)
     faux.setResponses([
       () => fauxAssistantMessage([fauxToolCall("calc", { expression: "6 * 7" })], { stopReason: "toolUse" }),
-      () => fauxAssistantMessage("算出来了\n---\n答案是 42"),
+      () => fauxAssistantMessage("算出来了\n[SPLIT]\n答案是 42"),
     ]);
 
     const chatRes = await fetch(`${baseUrl}/api/chat/send`, {

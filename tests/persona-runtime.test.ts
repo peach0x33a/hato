@@ -75,7 +75,7 @@ hindsight_llm = "faux-provider/faux-persona-1"
       (ctx) => {
         const lastToolResult = ctx.messages[ctx.messages.length - 1];
         assert.equal(lastToolResult?.role, "toolResult");
-        return fauxAssistantMessage("帮你想好了\n---\n356 * 24 = 8544 呀");
+        return fauxAssistantMessage("帮你想好了\n[SPLIT]\n356 * 24 = 8544 呀");
       },
       () => fauxAssistantMessage("用户询问了乘法计算，助手已给出结果 8544。"),
     ]);

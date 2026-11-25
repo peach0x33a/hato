@@ -79,17 +79,17 @@ test("inspect_tickets respects onBeforeInspectTickets guard (Option A)", async (
 });
 
 test("splitIntoBubbles supports maxPerTurn=0 (unlimited), 1 (single), and N (merge tail)", () => {
-  const sample = "第一段\n\n第二段\n\n第三段\n\n第四段\n\n第五段";
+  const sample = "第一段\n[SPLIT]\n第二段\n[SPLIT]\n第三段\n[SPLIT]\n第四段\n[SPLIT]\n第五段";
   assert.deepEqual(
-    splitIntoBubbles(sample, { enabled: true, maxPerTurn: 0, delimiter: "---" }),
+    splitIntoBubbles(sample, { enabled: true, maxPerTurn: 0, delimiter: "[SPLIT]" }),
     ["第一段", "第二段", "第三段", "第四段", "第五段"],
   );
   assert.deepEqual(
-    splitIntoBubbles(sample, { enabled: true, maxPerTurn: 1, delimiter: "---" }),
-    [sample],
+    splitIntoBubbles(sample, { enabled: true, maxPerTurn: 1, delimiter: "[SPLIT]" }),
+    ["第一段\n\n第二段\n\n第三段\n\n第四段\n\n第五段"],
   );
   assert.deepEqual(
-    splitIntoBubbles(sample, { enabled: true, maxPerTurn: 3, delimiter: "---" }),
+    splitIntoBubbles(sample, { enabled: true, maxPerTurn: 3, delimiter: "[SPLIT]" }),
     ["第一段", "第二段", "第三段\n\n第四段\n\n第五段"],
   );
 });

@@ -203,7 +203,7 @@ export function GatewaySection({ draft, setDraft, retryCfg }: GatewaySectionProp
       >
         <SettingsRow
           title="启用多气泡分段"
-          description="开启后按段落或分隔符拆分为多条消息依次发送，模拟真人聊天节奏"
+          description="开启后按分隔符（默认 [SPLIT]）拆分为多条消息依次发送，模拟真人聊天节奏"
         >
           <Switch
             ariaLabel="启用多气泡分段"

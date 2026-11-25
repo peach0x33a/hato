@@ -825,7 +825,7 @@ export async function promptFullGatewayStep(
     const delimiter = await promptText({
       message: "气泡分隔符 (delimiter)",
       defaultValue: baseConfig.gateway.bubbles.delimiter,
-      placeholder: "---",
+      placeholder: "[SPLIT]",
       validate: (v) => (!v.trim() ? "不能为空" : undefined),
     });
     bubblesCfg = {

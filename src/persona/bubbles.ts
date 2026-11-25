@@ -4,10 +4,13 @@ export interface BubbleSplitOptions {
   delimiter: string;
 }
 
+export const DEFAULT_BUBBLE_DELIMITER = "[SPLIT]";
+
 const MARKDOWN_TABLE_LINE = /^\s*\|.+\|\s*$/;
 const MARKDOWN_HEADING_LINE = /^\s*#{1,6}\s+\S/;
 const ORDERED_LIST_LINE = /^\s*\d+\.\s+\S/;
 const UNORDERED_LIST_LINE = /^\s*[-*+]\s+\S/;
+const MARKDOWN_RULE_DELIMITER = /^[-_*=]{3,}$/;
 
 /**
  * Check whether content contains structured technical blocks that must remain intact
@@ -15,7 +18,6 @@ const UNORDERED_LIST_LINE = /^\s*[-*+]\s+\S/;
  */
 export function hasStructuredContent(text: string): boolean {
   if (text.includes("```")) return true;
-  if (MARKDOWN_HEADING_LINE.test(text)) return true;
 
   const lines = text.split(/\r?\n/);
   let tableLineCount = 0;
@@ -23,6 +25,7 @@ export function hasStructuredContent(text: string): boolean {
   let totalListCount = 0;
 
   for (const line of lines) {
+    if (MARKDOWN_HEADING_LINE.test(line)) return true;
     if (MARKDOWN_TABLE_LINE.test(line)) {
       tableLineCount++;
       if (tableLineCount >= 2) return true;
@@ -43,29 +46,26 @@ export function hasStructuredContent(text: string): boolean {
  * Normalize Persona output into clean outbound chat bubbles while preserving intact
  * technical blocks and honoring per-channel bubble limits.
  *
- * Explicit delimiter lines (e.g. `\n---\n`) take precedence when present so the model
- * can keep blank lines inside a single bubble; otherwise, casual multi-paragraph
- * replies separated by blank lines (`\n\n`) are split into separate bubbles.
+ * Only the configured explicit delimiter (default `[SPLIT]`) splits bubbles; blank lines
+ * (`\n\n`) and Markdown rules (`---`) stay intact inside a single bubble.
  */
 export function splitIntoBubbles(rawText: string, options: BubbleSplitOptions): string[] {
   const trimmed = rawText.trim();
   if (!trimmed) return [];
 
-  const delimiterPattern = buildDelimiterPattern(options.delimiter);
-  const cleanText = stripDelimiterArtifacts(trimmed, delimiterPattern);
+  const token = options.delimiter.trim() || DEFAULT_BUBBLE_DELIMITER;
+  const splitRegex = buildDelimiterRegex(token);
+  const rawParts = trimmed
+    .split(splitRegex)
+    .map((part) => part.trim())
+    .filter((part) => part.length > 0);
+
+  if (rawParts.length === 0) return [];
+
+  const cleanText = rawParts.join("\n\n");
   if (!options.enabled || options.maxPerTurn === 1 || hasStructuredContent(trimmed)) {
     return [cleanText];
   }
-
-  const hasExplicitDelimiter = new RegExp(delimiterPattern).test(trimmed);
-  const splitRegex = hasExplicitDelimiter
-    ? new RegExp(delimiterPattern, "g")
-    : /\r?\n\s*\r?\n+/g;
-
-  const rawParts = trimmed
-    .split(splitRegex)
-    .map((part) => (hasExplicitDelimiter ? part.trim() : stripDelimiterArtifacts(part, delimiterPattern)))
-    .filter((part) => part.length > 0);
 
   if (rawParts.length <= 1) {
     return [cleanText];
@@ -81,14 +81,11 @@ export function splitIntoBubbles(rawText: string, options: BubbleSplitOptions): 
   return [...head, tail];
 }
 
-function buildDelimiterPattern(delimiter: string): string {
-  const token = delimiter.trim() || "---";
-  return `(?:\\r?\\n)\\s*${escapeRegExp(token)}\\s*(?:\\r?\\n)`;
-}
-
-function stripDelimiterArtifacts(text: string, delimiterPattern: string): string {
-  const regex = new RegExp(delimiterPattern, "g");
-  return text.replace(regex, "\n\n").trim();
+function buildDelimiterRegex(token: string): RegExp {
+  if (MARKDOWN_RULE_DELIMITER.test(token)) {
+    return new RegExp(`(?:^|\\r?\\n)[ \\t]*${escapeRegExp(token)}[ \\t]*(?=\\r?\\n|$)`, "g");
+  }
+  return new RegExp(escapeRegExp(token), "g");
 }
 
 function escapeRegExp(literal: string): string {
@@ -107,6 +104,6 @@ export function joinPersistedBubbles(
   if (!options.enabled || bubbles.length === 1) {
     return bubbles.join("\n\n");
   }
-  const token = options.delimiter.trim() || "---";
+  const token = options.delimiter.trim() || DEFAULT_BUBBLE_DELIMITER;
   return bubbles.join(`\n\n${token}\n\n`);
 }

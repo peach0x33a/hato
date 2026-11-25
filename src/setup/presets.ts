@@ -1,5 +1,6 @@
 import type { KnownApi } from "@earendil-works/pi-ai";
 import type { HatoConfig } from "../config/app.js";
+import { DEFAULT_BUBBLE_DELIMITER } from "../persona/bubbles.js";
 import { getSystemTimezone } from "./timezone.js";
 
 export interface ProviderPreset {
@@ -146,7 +147,7 @@ export function createDefaultHatoConfig(): HatoConfig {
         enabled: true,
         max_per_turn: 3,
         delay_ms_range: [500, 1500],
-        delimiter: "---",
+        delimiter: DEFAULT_BUBBLE_DELIMITER,
       },
       telegram: {
         enabled: true,
