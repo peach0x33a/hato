@@ -50,6 +50,10 @@ cp "${ROOT_DIR}/.env.example" "${PKG_DIR}/.env.example"
 cp "${ROOT_DIR}/config/mcp.example.toml" "${PKG_DIR}/config/mcp.example.toml"
 cp "${ROOT_DIR}/scripts/install.sh" "${PKG_DIR}/scripts/install.sh"
 chmod +x "${PKG_DIR}/scripts/install.sh"
+if [[ -f "${ROOT_DIR}/scripts/migrate-bubble-delimiter.ts" ]]; then
+  cp "${ROOT_DIR}/scripts/migrate-bubble-delimiter.ts" "${PKG_DIR}/scripts/migrate-bubble-delimiter.ts"
+  chmod +x "${PKG_DIR}/scripts/migrate-bubble-delimiter.ts"
+fi
 chmod +x "${PKG_DIR}/src/cli/hato.ts"
 
 if [[ -f "${ROOT_DIR}/docs/architecture.md" ]]; then
