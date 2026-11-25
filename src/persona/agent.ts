@@ -53,7 +53,11 @@ import {
 } from "../utils/llm-retry.js";
 import { formatLocalDateTime } from "../time/clock.js";
 import { logWarn, summarizeError } from "../utils/logger.js";
-import { joinPersistedBubbles, splitIntoBubbles } from "./bubbles.js";
+import {
+  joinPersistedBubbles,
+  splitIntoBubbles,
+  type BubbleSplitOptions,
+} from "./bubbles.js";
 import {
   buildEphemeralContextBlock,
   buildStaticSystemPrompt,
@@ -298,6 +302,7 @@ export class PersonaRuntime {
           this.repo,
           this.personalSkillsIndexText,
           this.toolIndexText,
+          this.getBubbleOptions(),
         ),
         model: resolved.model,
         thinkingLevel: this.modelRegistry.resolveSlotThinkingLevel("persona"),
@@ -668,6 +673,14 @@ export class PersonaRuntime {
     return this.basePersonaPrompt;
   }
 
+  private getBubbleOptions(): BubbleSplitOptions {
+    return {
+      enabled: this.hatoConfig.gateway.bubbles.enabled,
+      maxPerTurn: this.hatoConfig.gateway.bubbles.max_per_turn,
+      delimiter: this.hatoConfig.gateway.bubbles.delimiter,
+    };
+  }
+
   refreshTranscriptFromDb(options?: { force?: boolean }): void {
     if (this.activeTurn && !options?.force) {
       this.pendingTranscriptRefresh = true;
@@ -679,6 +692,7 @@ export class PersonaRuntime {
       this.repo,
       this.personalSkillsIndexText,
       this.toolIndexText,
+      this.getBubbleOptions(),
     );
     const leadingSystem = createInitialSystemMessage(
       systemPromptText,
@@ -1420,6 +1434,7 @@ export class PersonaRuntime {
         this.repo,
         this.personalSkillsIndexText,
         this.toolIndexText,
+        this.getBubbleOptions(),
       );
       const refreshedLeading = createInitialSystemMessage(
         systemPromptText,
@@ -2417,6 +2432,7 @@ export class PersonaRuntime {
           this.repo,
           this.personalSkillsIndexText,
           this.toolIndexText,
+          this.getBubbleOptions(),
         ),
         this.agent.state.tools.map(toToolDeclaration),
       );

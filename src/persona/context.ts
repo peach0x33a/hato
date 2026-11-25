@@ -5,6 +5,7 @@ import type { ChannelName } from "../gateway/types.js";
 import { formatRecalledMemoriesBlock, type MemoryRecallItem } from "../memory/store.js";
 import { formatLocalDateTime } from "../time/clock.js";
 import { formatGapMarker, renderTimeCard } from "../time/timecard.js";
+import { buildBubbleOutputPromptBlock, type BubbleSplitOptions } from "./bubbles.js";
 
 export interface HatoUserBatchMessage {
   role: "hato_user_batch";
@@ -73,6 +74,7 @@ export function buildSystemInjectedPromptText(
   repo: HatoRepository,
   personalSkillsIndexText = "",
   toolIndexText = "",
+  bubbles?: BubbleSplitOptions,
 ): string {
   const parts: string[] = [];
   const facts = repo.listRelationshipFacts();
@@ -86,20 +88,29 @@ export function buildSystemInjectedPromptText(
   if (toolIndexText.trim().length > 0) {
     parts.push(toolIndexText.trim());
   }
+  if (bubbles) {
+    parts.push(buildBubbleOutputPromptBlock(bubbles));
+  }
   return parts.join("\n\n");
 }
 
 /**
  * Assemble Layer 1 static system prompt from persona markdown, static relationship facts,
- * the deterministic Level 1 Personal Skills index, and the on-demand tool index.
+ * the deterministic Level 1 Personal Skills index, the on-demand tool index, and active bubble rules.
  */
 export function buildStaticSystemPrompt(
   basePersonaPrompt: string,
   repo: HatoRepository,
   personalSkillsIndexText = "",
   toolIndexText = "",
+  bubbles?: BubbleSplitOptions,
 ): string {
-  const injected = buildSystemInjectedPromptText(repo, personalSkillsIndexText, toolIndexText);
+  const injected = buildSystemInjectedPromptText(
+    repo,
+    personalSkillsIndexText,
+    toolIndexText,
+    bubbles,
+  );
   return [basePersonaPrompt.trim(), injected].filter(Boolean).join("\n\n");
 }
 

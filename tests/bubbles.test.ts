@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  buildBubbleOutputPromptBlock,
   DEFAULT_BUBBLE_DELIMITER,
   joinPersistedBubbles,
   splitIntoBubbles,
@@ -170,4 +171,38 @@ test("splitIntoBubbles supports custom --- delimiter on standalone lines without
     }),
     [inlineHyphens],
   );
+});
+
+test("buildBubbleOutputPromptBlock renders active delimiter examples or single-bubble guidance", () => {
+  const multiBlock = buildBubbleOutputPromptBlock({
+    enabled: true,
+    maxPerTurn: 3,
+    delimiter: "[SPLIT]",
+  });
+  assert.ok(multiBlock.includes("Active Delimiter: `[SPLIT]`"));
+  assert.ok(multiBlock.includes("at most 3 bubbles per turn"));
+  assert.ok(multiBlock.includes("深表赞同，围巾就是冬季性价比最高的萌系装备了\n  [SPLIT]\n  尤其把半张脸埋进去只露眼睛那一下"));
+
+  const customBlock = buildBubbleOutputPromptBlock({
+    enabled: true,
+    maxPerTurn: 0,
+    delimiter: "[BUBBLE]",
+  });
+  assert.ok(customBlock.includes("Active Delimiter: `[BUBBLE]`"));
+  assert.ok(!customBlock.includes("at most"));
+
+  const disabledBlock = buildBubbleOutputPromptBlock({
+    enabled: false,
+    maxPerTurn: 3,
+    delimiter: "[SPLIT]",
+  });
+  assert.ok(disabledBlock.includes("Single-Bubble Mode"));
+  assert.ok(disabledBlock.includes("do **NOT** output `[SPLIT]`"));
+
+  const singleTurnBlock = buildBubbleOutputPromptBlock({
+    enabled: true,
+    maxPerTurn: 1,
+    delimiter: "[SPLIT]",
+  });
+  assert.ok(singleTurnBlock.includes("Single-Bubble Mode"));
 });

@@ -1185,6 +1185,11 @@ export class WebConsoleServer {
       this.deps.getRepo(),
       formatSkillsIndexBlock(personalSkills),
       toolIndexText,
+      {
+        enabled: hatoConfig.gateway.bubbles.enabled,
+        maxPerTurn: hatoConfig.gateway.bubbles.max_per_turn,
+        delimiter: hatoConfig.gateway.bubbles.delimiter,
+      },
     );
     return {
       layered,

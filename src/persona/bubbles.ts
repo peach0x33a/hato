@@ -107,3 +107,38 @@ export function joinPersistedBubbles(
   const token = options.delimiter.trim() || DEFAULT_BUBBLE_DELIMITER;
   return bubbles.join(`\n\n${token}\n\n`);
 }
+
+/**
+ * Render the high-salience output format contract appended at the very end of the
+ * static system prompt (after `soul.md`) so Persona reliably uses the active bubble
+ * delimiter even at `minimal` thinking levels.
+ */
+export function buildBubbleOutputPromptBlock(options: BubbleSplitOptions): string {
+  const token = options.delimiter.trim() || DEFAULT_BUBBLE_DELIMITER;
+  if (!options.enabled || options.maxPerTurn === 1) {
+    return [
+      "## Output Format — Single-Bubble Mode",
+      `- Multi-bubble splitting is **DISABLED**. Reply in one cohesive message and do **NOT** output \`${token}\`.`,
+    ].join("\n");
+  }
+
+  const limitHint =
+    options.maxPerTurn > 1 ? ` (at most ${options.maxPerTurn} bubbles per turn)` : "";
+
+  return [
+    `## Output Format — Multi-Bubble IM Delivery (Active Delimiter: \`${token}\`)`,
+    `- Multi-bubble chat mode is **ENABLED**${limitHint}.`,
+    `- Whenever a casual reply has 2+ short conversational sentences, reactions, or follow-up thoughts, **you MUST put \`${token}\` on its own line between each bubble** instead of separating short chat lines with blank lines (\`\\n\\n\`).`,
+    `- Blank lines (\`\\n\\n\`) and \`---\` do **NOT** split bubbles—if you omit \`${token}\`, all lines are sent crammed inside a single bubble.`,
+    `- Format contrast (日常多句短消息必须用 \`${token}\` 拆气泡，严禁只敲空行充当分段):`,
+    "  ❌ Wrong (blank lines stay inside 1 giant bubble):",
+    "  深表赞同，围巾就是冬季性价比最高的萌系装备了",
+    "",
+    "  尤其把半张脸埋进去只露眼睛那一下，可爱值直接翻倍",
+    "  ✅ Correct (delivered sequentially as separate IM bubbles):",
+    "  深表赞同，围巾就是冬季性价比最高的萌系装备了",
+    `  ${token}`,
+    "  尤其把半张脸埋进去只露眼睛那一下，可爱值直接翻倍",
+    `- Keep code, commands, configs, tables, lists, or precise technical findings intact in one single bubble (no \`${token}\`).`,
+  ].join("\n");
+}
