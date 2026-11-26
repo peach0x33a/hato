@@ -384,7 +384,7 @@ export async function runSelfConfigAction(
         external_cli: {
           "codex-cli": {
             enabled: isWorkerBackendEnabled(cfg, "codex-cli"),
-            command: cfg.worker.external_cli.codex_cli?.command ?? "codex",
+            command: cfg.worker.external_cli.codex_cli?.command ?? "codex-acp",
             effort: cfg.worker.external_cli.codex_cli?.effort ?? null,
             model: cfg.worker.external_cli.codex_cli?.model ?? null,
           },
@@ -402,13 +402,13 @@ export async function runSelfConfigAction(
           },
           "external-pi": {
             enabled: isWorkerBackendEnabled(cfg, "external-pi"),
-            command: cfg.worker.external_cli.external_pi?.command ?? "pi",
+            command: cfg.worker.external_cli.external_pi?.command ?? "pi-acp",
             effort: cfg.worker.external_cli.external_pi?.effort ?? null,
             model: cfg.worker.external_cli.external_pi?.model ?? null,
           },
           "claude-code": {
             enabled: isWorkerBackendEnabled(cfg, "claude-code"),
-            command: cfg.worker.external_cli.claude_code?.command ?? "claude",
+            command: cfg.worker.external_cli.claude_code?.command ?? "claude-agent-acp",
             effort: cfg.worker.external_cli.claude_code?.effort ?? null,
             model: cfg.worker.external_cli.claude_code?.model ?? null,
           },

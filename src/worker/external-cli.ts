@@ -1,35 +1,30 @@
-import { createWriteStream, existsSync, mkdirSync, writeFileSync } from "node:fs";
-import { spawn, type ChildProcess } from "node:child_process";
+import { createWriteStream, existsSync, mkdirSync } from "node:fs";
+import type { spawn } from "node:child_process";
 import { dirname, join, resolve } from "node:path";
-import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
-import { isWorkerBackendEnabled, resolveSkillsDir, type HatoConfig } from "../config/app.js";
+import {
+  isWorkerBackendEnabled,
+  resolveSkillsDir,
+  resolveWorkerExternalCliConfig,
+  type HatoConfig,
+} from "../config/app.js";
 import type { McpConfig } from "../config/mcp.js";
 import type { ScopedProxyRouter } from "../config/proxy.js";
 import { computeContextToken, getProcessContextSecret } from "../dispatch/context-slice.js";
 import type { WorkerMandate, WorkerResult } from "../dispatch/schema.js";
 import { selectWorkerSkills } from "../skills/loader.js";
 import { logInfo, logWarn, summarizeError } from "../utils/logger.js";
-import { antigravityCliAdapter } from "./adapters/antigravity-cli.js";
-import { claudeCodeCliAdapter } from "./adapters/claude-code.js";
-import { codexCliAdapter } from "./adapters/codex-cli.js";
-import { externalPiCliAdapter } from "./adapters/external-pi.js";
-import { openCodeV2CliAdapter } from "./adapters/opencode-v2.js";
-import type { ExternalCliAdapter } from "./adapters/types.js";
+import { AcpSessionConnection } from "./acp/client.js";
+import { evaluateAcpPermissionRequest } from "./acp/permission-policy.js";
+import type { WorkerExecutionMode } from "./acp/types.js";
 import { workerActivityHub } from "./activity-stream.js";
-import {
-  verifyExternalCliBackend,
-  type ExternalCliBackend,
-} from "./cli-probe.js";
+import { verifyExternalCliBackend, type ExternalCliBackend } from "./cli-probe.js";
 import {
   prepareExternalCliOverlay,
   resolveBackendCommand,
   type ContextMcpSpec,
 } from "./overlay.js";
-import {
-  normalizeExternalCliResult,
-  snapshotWorkspaceFiles,
-} from "./result-normalizer.js";
+import { normalizeExternalCliResult, snapshotWorkspaceFiles } from "./result-normalizer.js";
 import type {
   ExecutionProgressCallback,
   ExecutionRunner,
@@ -41,79 +36,30 @@ export interface ExternalCliRunnerDeps {
   getMcpConfig: () => McpConfig;
   proxyRouter: ScopedProxyRouter;
   spawnProcess?: typeof spawn;
-  verifyOpenCodeV2?: (command: string) => Promise<{ ok: boolean; reason?: string }>;
   verifyBackendCapabilities?: (
     backend: ExternalCliBackend,
     command: string,
   ) => Promise<{ ok: boolean; reason?: string }>;
 }
 
-const ADAPTERS: Record<ExternalCliBackend, ExternalCliAdapter> = {
-  "codex-cli": codexCliAdapter,
-  "antigravity-cli": antigravityCliAdapter,
-  "opencode-v2": openCodeV2CliAdapter,
-  "external-pi": externalPiCliAdapter,
-  "claude-code": claudeCodeCliAdapter,
-};
+interface PooledAcpSession {
+  conn: AcpSessionConnection;
+  sessionId: string;
+  backend: ExternalCliBackend;
+  timer: ReturnType<typeof setTimeout>;
+}
 
-const WORKER_RESULT_JSON_SCHEMA = {
-  type: "object",
-  additionalProperties: false,
-  properties: {
-    status: { type: "string", enum: ["done", "needs_input", "awaiting_confirm", "failed"] },
-    narration_hint: { type: "string" },
-    verbatim_blocks: {
-      type: "array",
-      items: {
-        type: "object",
-        additionalProperties: false,
-        properties: {
-          title: { type: "string" },
-          format: { type: "string", enum: ["code", "text", "markdown"] },
-          content: { type: "string" },
-        },
-        required: ["title", "format", "content"],
-      },
-    },
-    artifacts: {
-      type: "array",
-      items: {
-        type: "object",
-        additionalProperties: false,
-        properties: {
-          path: { type: "string" },
-          filename: { type: "string" },
-          send_as: { type: "string", enum: ["file", "photo"] },
-        },
-        required: ["path", "filename", "send_as"],
-      },
-    },
-    required_secrets: { type: "array", items: { type: "string" } },
-    caveats: { type: "array", items: { type: "string" } },
-    question: { type: ["string", "null"] },
-    confirm_action: { type: ["string", "null"] },
-  },
-  required: [
-    "status",
-    "narration_hint",
-    "verbatim_blocks",
-    "artifacts",
-    "required_secrets",
-    "caveats",
-    "question",
-  ],
-};
-
-const PROGRESS_THROTTLE_MS = 1200;
-const MAX_BUFFER_CHARS = 512 * 1024;
+const SESSION_POOL_TTL_MS = 15 * 60 * 1000;
 
 /**
- * Unified ExecutionRunner for `codex`, `agy`, `opencode-v2`, `external-pi`, and `claude-code`.
- * Handles OpenCode V2 gating, host config overlay, scoped `hato_context` MCP injection,
- * live NDJSON progress streaming, and 4-signal result normalization.
+ * Unified ACP ExecutionRunner for external coding agents:
+ * `codex-cli`, `antigravity-cli`, `opencode-v2`, `external-pi`, and `claude-code`.
+ * Uses Agent Client Protocol (JSON-RPC 2.0 over stdio) for session lifecycle,
+ * MCP injection, permission mediation, live activity streaming, and cancellation.
  */
 export class ExternalCliRunner implements ExecutionRunner {
-  private readonly activeProcesses = new Map<string, ChildProcess>();
+  private readonly activeConnections = new Map<string, AcpSessionConnection>();
+  private readonly pooledSessions = new Map<string, PooledAcpSession>();
   private readonly abortedTickets = new Set<string>();
 
   constructor(private readonly deps: ExternalCliRunnerDeps) {}
@@ -123,7 +69,7 @@ export class ExternalCliRunner implements ExecutionRunner {
     mandate: WorkerMandate,
     callbacks?: ExecutionProgressCallback,
   ): Promise<WorkerResult> {
-    return this.runCli({
+    return this.runAcp({
       mode: "start",
       ticket,
       mandate,
@@ -137,8 +83,8 @@ export class ExternalCliRunner implements ExecutionRunner {
     userReply: string,
     callbacks?: ExecutionProgressCallback,
   ): Promise<WorkerResult> {
-    if (!ticket.externalSessionId) {
-      return this.runCli({
+    if (!ticket.externalSessionId && !this.pooledSessions.has(ticket.ticketId)) {
+      return this.runAcp({
         mode: "start",
         ticket,
         mandate,
@@ -146,7 +92,7 @@ export class ExternalCliRunner implements ExecutionRunner {
         callbacks,
       });
     }
-    return this.runCli({
+    return this.runAcp({
       mode: "resume",
       ticket,
       mandate,
@@ -157,21 +103,65 @@ export class ExternalCliRunner implements ExecutionRunner {
 
   async abort(ticketId: string): Promise<void> {
     this.abortedTickets.add(ticketId);
-    const child = this.activeProcesses.get(ticketId);
-    if (!child) return;
-    child.kill("SIGTERM");
-    setTimeout(() => {
-      if (!child.killed && child.exitCode === null) {
-        child.kill("SIGKILL");
-      }
-    }, 3000).unref();
+    const pooled = this.pooledSessions.get(ticketId);
+    if (pooled) {
+      clearTimeout(pooled.timer);
+      this.pooledSessions.delete(ticketId);
+      await pooled.conn.close().catch(() => undefined);
+    }
+    const active = this.activeConnections.get(ticketId);
+    if (active) {
+      await active.cancel().catch(() => undefined);
+      await active.close().catch(() => undefined);
+    }
   }
 
   async abortAll(): Promise<void> {
-    await Promise.all([...this.activeProcesses.keys()].map((id) => this.abort(id)));
+    const ids = new Set<string>([
+      ...this.activeConnections.keys(),
+      ...this.pooledSessions.keys(),
+    ]);
+    await Promise.all([...ids].map((id) => this.abort(id)));
   }
 
-  private async runCli(params: {
+  private takePooledSession(
+    ticketId: string,
+    backend: ExternalCliBackend,
+  ): PooledAcpSession | null {
+    const entry = this.pooledSessions.get(ticketId);
+    if (!entry) return null;
+    clearTimeout(entry.timer);
+    this.pooledSessions.delete(ticketId);
+    if (entry.backend !== backend || !entry.conn.isAlive) {
+      void entry.conn.close().catch(() => undefined);
+      return null;
+    }
+    return entry;
+  }
+
+  private parkPooledSession(
+    ticketId: string,
+    backend: ExternalCliBackend,
+    conn: AcpSessionConnection,
+    sessionId: string,
+  ): void {
+    const existing = this.pooledSessions.get(ticketId);
+    if (existing) {
+      clearTimeout(existing.timer);
+      void existing.conn.close().catch(() => undefined);
+    }
+    const timer = setTimeout(() => {
+      const cur = this.pooledSessions.get(ticketId);
+      if (cur && cur.conn === conn) {
+        this.pooledSessions.delete(ticketId);
+        void conn.close().catch(() => undefined);
+      }
+    }, SESSION_POOL_TTL_MS);
+    timer.unref();
+    this.pooledSessions.set(ticketId, { conn, sessionId, backend, timer });
+  }
+
+  private async runAcp(params: {
     mode: "start" | "resume";
     ticket: TicketExecutionHandle;
     mandate: WorkerMandate;
@@ -185,11 +175,6 @@ export class ExternalCliRunner implements ExecutionRunner {
     }
 
     const backend = ticket.backend as ExternalCliBackend;
-    const adapter = ADAPTERS[backend];
-    if (!adapter) {
-      throw new Error(`Unsupported external CLI backend: ${ticket.backend}`);
-    }
-
     const hatoConfig = this.deps.getHatoConfig();
     if (!isWorkerBackendEnabled(hatoConfig, backend)) {
       return {
@@ -206,7 +191,7 @@ export class ExternalCliRunner implements ExecutionRunner {
     const capCheck = await this.checkBackendCapabilitiesGate(backend, hatoConfig);
     if (!capCheck.ok) {
       const reason =
-        capCheck.reason || `外部 CLI 后端 "${backend}" 未通过基础能力或版本兼容性校验。`;
+        capCheck.reason || `外部 CLI 后端 "${backend}" 未通过 ACP 协议握手校验。`;
       return {
         ticket_id: ticket.ticketId,
         status: "failed",
@@ -218,7 +203,9 @@ export class ExternalCliRunner implements ExecutionRunner {
       };
     }
 
-    const isVmUnrestricted = mandate.execution_mode === "vm_unrestricted";
+    const executionMode: WorkerExecutionMode =
+      mandate.execution_mode === "vm_unrestricted" ? "vm_unrestricted" : "isolated";
+    const isVmUnrestricted = executionMode === "vm_unrestricted";
     mkdirSync(mandate.workspace_dir, { recursive: true });
     const beforeSnapshot = isVmUnrestricted
       ? undefined
@@ -241,6 +228,7 @@ export class ExternalCliRunner implements ExecutionRunner {
       ticketId: ticket.ticketId,
       workspaceDir: mandate.workspace_dir,
       isHostRepo: mandate.is_host_repo,
+      executionMode,
       hatoConfig,
       mcpConfig: this.deps.getMcpConfig(),
       allowedMcpServers: mandate.allowed_mcp_servers,
@@ -249,50 +237,15 @@ export class ExternalCliRunner implements ExecutionRunner {
       workerProxyEnv,
     });
 
-    let schemaPath: string | undefined;
-    if (backend === "codex-cli" || backend === "antigravity-cli" || backend === "claude-code") {
-      const runtimeDir = resolve(
-        dirname(hatoConfig.paths.workspaces_dir),
-        "worker-cli",
-        backend,
-        ticket.ticketId.replace(/[^A-Za-z0-9._-]+/g, "_"),
-      );
-      mkdirSync(runtimeDir, { recursive: true });
-      schemaPath = join(runtimeDir, "_hato_result_schema.json");
-      writeFileSync(schemaPath, `${JSON.stringify(WORKER_RESULT_JSON_SCHEMA, null, 2)}\n`, "utf8");
-    }
-
-    const args =
-      params.mode === "resume" && ticket.externalSessionId
-        ? adapter.buildResumeArgs({
-            sessionId: ticket.externalSessionId,
-            reply: params.userReply ?? "",
-            workspaceDir: mandate.workspace_dir,
-            overlay,
-            schemaPath,
-          })
-        : adapter.buildStartArgs({
-            prompt: buildWorkerStartPrompt({
-              ticket,
-              mandate,
-              stagedSkillsDir: overlay.stagedSkillsDir,
-              skillNames: selectedSkills.map((s) => s.name),
-              extraUserNote: params.userReplyFallback,
-            }),
-            workspaceDir: mandate.workspace_dir,
-            overlay,
-            schemaPath,
-          });
-
-    const spawnFn = this.deps.spawnProcess ?? spawn;
+    const extCfg = resolveWorkerExternalCliConfig(hatoConfig);
     const workerCliRoot = resolve(dirname(hatoConfig.paths.workspaces_dir), "worker-cli");
     const activityPersistDir = join(workerCliRoot, "activity");
-    const streamLogPath = join(
+    const acpLogPath = join(
       workerCliRoot,
       "logs",
-      `${ticket.ticketId.replace(/[^A-Za-z0-9._-]+/g, "_")}.jsonl`,
+      `${ticket.ticketId.replace(/[^A-Za-z0-9._-]+/g, "_")}.acp.jsonl`,
     );
-    mkdirSync(dirname(streamLogPath), { recursive: true });
+    mkdirSync(dirname(acpLogPath), { recursive: true });
 
     const runEpoch = Date.now();
     workerActivityHub.upsert(
@@ -302,8 +255,8 @@ export class ExternalCliRunner implements ExecutionRunner {
         state: "done",
         title:
           params.mode === "resume"
-            ? `继续执行 ${backend} 会话`
-            : `已启动 ${backend} Worker`,
+            ? `继续执行 ${backend} (ACP)`
+            : `已启动 ${backend} Worker (ACP)`,
         text: `工作目录: ${mandate.workspace_dir}`,
       },
       { persistDir: activityPersistDir },
@@ -311,153 +264,147 @@ export class ExternalCliRunner implements ExecutionRunner {
 
     logInfo(
       "WORKER",
-      `starting ${backend} ticket=${ticket.ticketId} cwd=${mandate.workspace_dir} modeArgs=${overlay.modeArgs.join(" ")}`,
+      `starting ACP ${backend} ticket=${ticket.ticketId} cwd=${mandate.workspace_dir} cmd=${overlay.command} args=${overlay.args.join(" ")}`,
     );
 
-    const child = spawnFn(overlay.command, args, {
-      cwd: mandate.workspace_dir,
-      env: overlay.env,
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-    this.activeProcesses.set(ticket.ticketId, child);
-
-    let lastProgressAt = 0;
-    let recordedSessionId = ticket.externalSessionId;
-    let finalText = "";
-    const textDeltas: string[] = [];
-    let textDeltaChars = 0;
-    let structuredError: string | undefined;
-    let permissionDeniedReason: string | undefined;
-    const stderrChunks: string[] = [];
-    let stderrChars = 0;
-    let timedOut = false;
-
-    const logStream = createWriteStream(streamLogPath, { flags: "a", encoding: "utf8" });
+    const logStream = createWriteStream(acpLogPath, { flags: "a", encoding: "utf8" });
     logStream.on("error", () => {
-      // best-effort trace logging
+      // best-effort protocol trace logging
     });
 
-    let killFallbackTimer: ReturnType<typeof setTimeout> | null = null;
-    const timeoutTimer = setTimeout(() => {
-      timedOut = true;
-      child.kill("SIGTERM");
-      killFallbackTimer = setTimeout(() => {
-        if (!child.killed && child.exitCode === null) {
-          child.kill("SIGKILL");
-        }
-        child.stdout?.destroy();
-        child.stderr?.destroy();
-      }, 3000);
-      killFallbackTimer.unref();
-    }, mandate.timeout_ms);
-    timeoutTimer.unref();
+    const pooled =
+      params.mode === "resume" ? this.takePooledSession(ticket.ticketId, backend) : null;
 
-    const rl = child.stdout
-      ? createInterface({ input: child.stdout, crlfDelay: Infinity })
-      : null;
+    let conn: AcpSessionConnection;
+    let promptText: string;
 
-    rl?.on("line", (line) => {
-      logStream.write(`${line}\n`);
-      const ev = adapter.parseStreamLine(line);
-      if (!ev) return;
-
-      if (ev.sessionId && ev.sessionId !== recordedSessionId) {
-        recordedSessionId = ev.sessionId;
-        callbacks?.onSessionId?.(ev.sessionId);
-      }
-
-      if (ev.activities) {
-        for (const act of ev.activities) {
-          workerActivityHub.upsert(ticket.ticketId, act, { persistDir: activityPersistDir });
-        }
-      }
-
-      if (ev.progressNote) {
-        const now = Date.now();
-        if (now - lastProgressAt >= PROGRESS_THROTTLE_MS) {
-          lastProgressAt = now;
-          callbacks?.onProgress?.(ev.progressNote);
-        }
-      }
-
-      if (ev.textDelta && textDeltaChars < MAX_BUFFER_CHARS) {
-        const remaining = MAX_BUFFER_CHARS - textDeltaChars;
-        const piece = ev.textDelta.slice(0, remaining);
-        textDeltas.push(piece);
-        textDeltaChars += piece.length;
-      }
-      if (ev.finalText !== undefined) finalText = ev.finalText.slice(0, MAX_BUFFER_CHARS);
-      if (ev.error) structuredError = ev.error;
-      if (ev.permissionDenied) permissionDeniedReason = ev.permissionDenied;
-    });
-
-    child.stderr?.on("data", (chunk: Buffer | string) => {
-      if (stderrChars >= MAX_BUFFER_CHARS) return;
-      const strChunk = String(chunk).slice(0, MAX_BUFFER_CHARS - stderrChars);
-      stderrChunks.push(strChunk);
-      stderrChars += strChunk.length;
-
-      const filteredLines = strChunk
-        .split(/\r?\n/)
-        .filter(
-          (l) =>
-            l.trim().length > 0 &&
-            !l.includes("UNDICI-EHPA") &&
-            !l.includes("--trace-warnings"),
-        )
-        .join("\n");
-      if (filteredLines) {
-        workerActivityHub.upsert(
-          ticket.ticketId,
-          {
-            stepKey: `stderr_${runEpoch}`,
-            kind: "stderr",
-            state: "done",
-            title: "CLI 诊断输出",
-            appendOutput: `${filteredLines}\n`,
+    if (pooled) {
+      conn = pooled.conn;
+      promptText = params.userReply ?? "";
+      logInfo("WORKER", `reusing pooled ACP session=${pooled.sessionId} ticket=${ticket.ticketId}`);
+    } else {
+      conn = new AcpSessionConnection({
+        command: overlay.command,
+        args: overlay.args,
+        cwd: mandate.workspace_dir,
+        env: overlay.env,
+        spawnProcess: this.deps.spawnProcess,
+        callbacks: {
+          onSessionId: (sessionId) => {
+            callbacks?.onSessionId?.(sessionId);
           },
-          { persistDir: activityPersistDir },
-        );
+          onProgress: (note) => {
+            callbacks?.onProgress?.(note);
+          },
+          onActivity: (patch) => {
+            workerActivityHub.upsert(ticket.ticketId, patch, { persistDir: activityPersistDir });
+          },
+          onProtocolLog: (direction, line) => {
+            logStream.write(`[${direction}] ${line}\n`);
+          },
+          onStderr: (strChunk) => {
+            const filteredLines = strChunk
+              .split(/\r?\n/)
+              .filter(
+                (l) =>
+                  l.trim().length > 0 &&
+                  !l.includes("UNDICI-EHPA") &&
+                  !l.includes("--trace-warnings"),
+              )
+              .join("\n");
+            if (filteredLines) {
+              workerActivityHub.upsert(
+                ticket.ticketId,
+                {
+                  stepKey: `stderr_${runEpoch}`,
+                  kind: "stderr",
+                  state: "done",
+                  title: "CLI 诊断输出",
+                  appendOutput: `${filteredLines}\n`,
+                },
+                { persistDir: activityPersistDir },
+              );
+            }
+          },
+          onPermissionRequest: (request) => {
+            const decision = evaluateAcpPermissionRequest({
+              request,
+              permissionPreset: extCfg.permissionPreset,
+              executionMode,
+              confirmBefore: mandate.confirm_before,
+            });
+            if (decision.deniedReason) {
+              conn.recordPermissionDenied(decision.deniedReason);
+            }
+            return decision.response;
+          },
+        },
+      });
+      promptText = "";
+    }
+
+    this.activeConnections.set(ticket.ticketId, conn);
+
+    let promptResult: {
+      finalText: string;
+      stopReason?: string;
+      permissionDeniedReason?: string;
+      timedOut: boolean;
+      structuredError?: string;
+    } = {
+      finalText: "",
+      timedOut: false,
+    };
+
+    try {
+      if (!pooled) {
+        await conn.initialize();
+
+        if (
+          params.mode === "resume" &&
+          ticket.externalSessionId &&
+          conn.capabilities.loadSession
+        ) {
+          await conn.loadSession({
+            sessionId: ticket.externalSessionId,
+            cwd: mandate.workspace_dir,
+            mcpServers: overlay.mcpServers,
+            desiredModel: overlay.desiredModel,
+            desiredEffort: overlay.desiredEffort,
+            desiredMode: overlay.desiredMode,
+          });
+          promptText = params.userReply ?? "";
+        } else {
+          await conn.startSession({
+            cwd: mandate.workspace_dir,
+            mcpServers: overlay.mcpServers,
+            desiredModel: overlay.desiredModel,
+            desiredEffort: overlay.desiredEffort,
+            desiredMode: overlay.desiredMode,
+          });
+          promptText = buildWorkerStartPrompt({
+            ticket,
+            mandate,
+            stagedSkillsDir: overlay.stagedSkillsDir,
+            skillNames: selectedSkills.map((s) => s.name),
+            extraUserNote:
+              params.mode === "resume" ? params.userReply : params.userReplyFallback,
+          });
+        }
       }
-    });
 
-    let closeDrainTimer: ReturnType<typeof setTimeout> | null = null;
-    const { exitCode, signal } = await new Promise<{
-      exitCode: number | null;
-      signal: NodeJS.Signals | null;
-    }>((resolveExit) => {
-      let settled = false;
-      const finish = (res: { exitCode: number | null; signal: NodeJS.Signals | null }) => {
-        if (settled) return;
-        settled = true;
-        if (closeDrainTimer) clearTimeout(closeDrainTimer);
-        resolveExit(res);
-      };
-      child.once("error", (err) => {
-        structuredError = summarizeError(err);
-        finish({ exitCode: 1, signal: null });
-      });
-      child.once("exit", (code, sig) => {
-        closeDrainTimer = setTimeout(() => {
-          child.stdout?.destroy();
-          child.stderr?.destroy();
-          finish({ exitCode: code, signal: sig });
-        }, 1500);
-        closeDrainTimer.unref();
-      });
-      child.once("close", (code, sig) => {
-        finish({ exitCode: code, signal: sig });
-      });
-    });
-
-    clearTimeout(timeoutTimer);
-    if (killFallbackTimer) clearTimeout(killFallbackTimer);
-    rl?.close();
-    logStream.end();
-    this.activeProcesses.delete(ticket.ticketId);
+      promptResult = await conn.prompt(promptText, mandate.timeout_ms);
+    } catch (err) {
+      const exitInfo = conn.getExitInfo();
+      promptResult.structuredError = exitInfo.spawnError || summarizeError(err);
+    } finally {
+      this.activeConnections.delete(ticket.ticketId);
+      logStream.end();
+    }
 
     const aborted = this.abortedTickets.delete(ticket.ticketId);
-    if (aborted && !timedOut) {
+    if (aborted && !promptResult.timedOut) {
+      await conn.close().catch(() => undefined);
       workerActivityHub.upsert(
         ticket.ticketId,
         {
@@ -478,13 +425,13 @@ export class ExternalCliRunner implements ExecutionRunner {
       };
     }
 
-    const effectiveFinalText = finalText || textDeltas.join("");
-    const stderrText = stderrChunks.join("");
+    const exitInfo = conn.getExitInfo();
+    const stderrText = conn.getStderrText();
 
-    if (exitCode !== 0 && !structuredError) {
+    if (exitInfo.exitCode !== null && exitInfo.exitCode !== 0 && !promptResult.structuredError) {
       logWarn(
         "WORKER",
-        `${backend} ticket=${ticket.ticketId} exited code=${String(exitCode)} sig=${String(signal)}`,
+        `ACP ${backend} ticket=${ticket.ticketId} exited code=${String(exitInfo.exitCode)} sig=${String(exitInfo.signal)}`,
       );
     }
 
@@ -493,14 +440,25 @@ export class ExternalCliRunner implements ExecutionRunner {
       workspaceDir: mandate.workspace_dir,
       isHostRepo: mandate.is_host_repo,
       beforeFilesSnapshot: beforeSnapshot,
-      exitCode,
-      signal,
-      finalText: effectiveFinalText,
+      exitCode: exitInfo.exitCode,
+      signal: exitInfo.signal,
+      finalText: promptResult.finalText,
       stderrText,
-      structuredError,
-      permissionDeniedReason,
-      timedOut,
+      structuredError: promptResult.structuredError,
+      permissionDeniedReason: promptResult.permissionDeniedReason,
+      stopReason: promptResult.stopReason,
+      timedOut: promptResult.timedOut,
     });
+
+    if (
+      (normalized.status === "needs_input" || normalized.status === "awaiting_confirm") &&
+      conn.isAlive &&
+      conn.sessionId
+    ) {
+      this.parkPooledSession(ticket.ticketId, backend, conn, conn.sessionId);
+    } else {
+      await conn.close().catch(() => undefined);
+    }
 
     workerActivityHub.upsert(
       ticket.ticketId,
@@ -530,9 +488,6 @@ export class ExternalCliRunner implements ExecutionRunner {
     const command = resolveBackendCommand(backend, config);
     if (this.deps.verifyBackendCapabilities) {
       return this.deps.verifyBackendCapabilities(backend, command);
-    }
-    if (backend === "opencode-v2" && this.deps.verifyOpenCodeV2) {
-      return this.deps.verifyOpenCodeV2(command);
     }
     if (this.deps.spawnProcess) {
       return { ok: true };

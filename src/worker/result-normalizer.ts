@@ -15,6 +15,7 @@ export interface NormalizeExternalCliResultParams {
   stderrText: string;
   structuredError?: string;
   permissionDeniedReason?: string;
+  stopReason?: string;
   timedOut?: boolean;
 }
 
@@ -22,7 +23,6 @@ export const IMAGE_EXTENSIONS = new Set([".png", ".jpg", ".jpeg", ".webp", ".gif
 const IGNORED_ARTIFACT_NAMES = new Set([
   "_hato_result.json",
   "_hato_stream.jsonl",
-  "_hato_result_schema.json",
 ]);
 const IGNORED_ARTIFACT_EXTENSIONS = new Set([".jsonl", ".log", ".tmp", ".bak"]);
 
@@ -103,7 +103,7 @@ export function normalizeExternalCliResult(
     };
   }
 
-  if (params.exitCode !== 0 || params.signal || params.structuredError) {
+  if ((params.exitCode !== null && params.exitCode !== 0) || params.signal || params.structuredError) {
     const reason =
       params.structuredError ||
       params.stderrText.trim().split(/\r?\n/).slice(-3).join(" | ") ||
@@ -116,6 +116,30 @@ export function normalizeExternalCliResult(
       artifacts: newFiles,
       required_secrets: [],
       caveats: [reason.slice(0, 240)],
+    };
+  }
+
+  if (params.stopReason === "refusal") {
+    return {
+      ticket_id: params.ticketId,
+      status: "failed",
+      narration_hint: "后台执行被代理拒绝。",
+      verbatim_blocks: buildDiagnosticBlocks(params.finalText, params.stderrText, diffStat),
+      artifacts: newFiles,
+      required_secrets: [],
+      caveats: ["ACP stopReason=refusal"],
+    };
+  }
+
+  if (params.stopReason === "cancelled") {
+    return {
+      ticket_id: params.ticketId,
+      status: "failed",
+      narration_hint: "后台任务已被取消。",
+      verbatim_blocks: buildDiagnosticBlocks(params.finalText, params.stderrText, diffStat),
+      artifacts: newFiles,
+      required_secrets: [],
+      caveats: ["ACP stopReason=cancelled"],
     };
   }
 

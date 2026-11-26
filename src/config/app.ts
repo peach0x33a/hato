@@ -257,6 +257,7 @@ export const HatoConfigSchema = Type.Object({
         Type.Object({
           enabled: Type.Optional(Type.Boolean()),
           command: Type.Optional(Type.String({ minLength: 1 })),
+          acp_args: Type.Optional(Type.Array(Type.String())),
           sandbox: Type.Optional(Type.String({ minLength: 1 })),
           approval: Type.Optional(Type.String({ minLength: 1 })),
           effort: Type.Optional(Type.String({ minLength: 1 })),
@@ -267,6 +268,7 @@ export const HatoConfigSchema = Type.Object({
         Type.Object({
           enabled: Type.Optional(Type.Boolean()),
           command: Type.Optional(Type.String({ minLength: 1 })),
+          acp_args: Type.Optional(Type.Array(Type.String())),
           mode: Type.Optional(Type.String({ minLength: 1 })),
           skip_permissions: Type.Optional(Type.Boolean()),
           sandbox: Type.Optional(Type.Boolean()),
@@ -278,6 +280,7 @@ export const HatoConfigSchema = Type.Object({
         Type.Object({
           enabled: Type.Optional(Type.Boolean()),
           command: Type.Optional(Type.String({ minLength: 1 })),
+          acp_args: Type.Optional(Type.Array(Type.String())),
           permission_mode: Type.Optional(Type.String({ minLength: 1 })),
           auto: Type.Optional(Type.Boolean()),
           agent: Type.Optional(Type.String()),
@@ -289,6 +292,7 @@ export const HatoConfigSchema = Type.Object({
         Type.Object({
           enabled: Type.Optional(Type.Boolean()),
           command: Type.Optional(Type.String({ minLength: 1 })),
+          acp_args: Type.Optional(Type.Array(Type.String())),
           effort: Type.Optional(Type.String({ minLength: 1 })),
           model: Type.Optional(Type.String({ minLength: 1 })),
         }),
@@ -297,6 +301,7 @@ export const HatoConfigSchema = Type.Object({
         Type.Object({
           enabled: Type.Optional(Type.Boolean()),
           command: Type.Optional(Type.String({ minLength: 1 })),
+          acp_args: Type.Optional(Type.Array(Type.String())),
           permission_mode: Type.Optional(Type.String({ minLength: 1 })),
           skip_permissions: Type.Optional(Type.Boolean()),
           effort: Type.Optional(Type.String({ minLength: 1 })),
