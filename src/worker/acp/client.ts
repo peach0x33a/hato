@@ -237,7 +237,7 @@ export class AcpSessionConnection {
         AGENT_METHODS.initialize,
         {
           protocolVersion: PROTOCOL_VERSION,
-          clientInfo: { name: "hato", version: "0.1.8" },
+          clientInfo: { name: "hato", version: "0.1.9" },
           clientCapabilities: {},
         },
         { cancellationSignal: controller.signal, stopWaitingOnCancel: true },
