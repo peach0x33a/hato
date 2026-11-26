@@ -20,6 +20,7 @@ import {
 } from "../src/config/store.js";
 import { openDatabase } from "../src/db/client.js";
 import { HatoRepository } from "../src/db/repo.js";
+import { ConfirmationService } from "../src/gateway/confirmation.js";
 import { TicketCoordinator } from "../src/dispatch/coordinator.js";
 import { NeutralRouter } from "../src/dispatch/router.js";
 import { buildSanitizedScriptEnv } from "../src/dispatch/script-scheduler.js";
@@ -328,19 +329,10 @@ test("Persona send_file allows normal host files but requires extra confirmation
     });
 
     const delivered: string[] = [];
-    const coordinator = new TicketCoordinator({
-      getHatoConfig: () => cfg,
-      repo,
-      router: {} as NeutralRouter,
-      dispatcher: new WorkerDispatcher(
-        {} as unknown as BuiltinPiRunner,
-        {} as unknown as ExternalCliRunner,
-      ),
-      bus,
-      executeSensitiveFileConfirm: async (_uid, payload) => {
-        delivered.push(payload.path);
-        return { ok: true, message: `sent ${payload.path}` };
-      },
+    const confirmService = new ConfirmationService({ repo, bus });
+    confirmService.registerHandler<{ path: string }>("send_env_file", async (_uid, payload) => {
+      delivered.push(payload.path);
+      return { ok: true, message: `sent ${payload.path}` };
     });
 
     const directSent: string[] = [];
@@ -354,14 +346,24 @@ test("Persona send_file allows normal host files but requires extra confirmation
         directSent.push(path);
         return { ok: true, message: `direct ${path}` };
       },
-      onRequestSensitiveFileConfirm: async (input) =>
-        coordinator.enqueueSensitiveFileConfirm({
+      onRequestSensitiveFileConfirm: async (input) => {
+        const ch = input.channel === "current" ? "tg" : input.channel;
+        return confirmService.requestConfirm({
           canonicalUserId: "owner",
-          channel: input.channel === "current" ? "tg" : input.channel,
-          path: input.path,
-          caption: input.caption,
-          text: input.text,
-        }),
+          channel: ch,
+          kind: "send_env_file",
+          briefTitle: `确认发送敏感文件: ${input.path}`,
+          progressNote: "等待主人确认外发敏感 .env 文件",
+          promptText: `请求外发敏感凭据文件：${input.path}`,
+          payload: {
+            kind: "send_env_file",
+            channel: ch,
+            path: input.path,
+            caption: input.caption,
+            text: input.text,
+          },
+        });
+      },
     });
 
     const sendFileTool = tools.find((t) => t.name === "send_file")!;
@@ -377,7 +379,7 @@ test("Persona send_file allows normal host files but requires extra confirmation
     assert.equal(delivered.length, 0);
 
     // Owner confirms via text reply ("确认 <ticketId>") -> now delivered!
-    const confirmReply = await coordinator.tryHandleConfirmText(
+    const confirmReply = await confirmService.tryHandleConfirmText(
       "owner",
       `确认 ${confirmEvents[0]!.ticketId}`,
     );

@@ -10,7 +10,7 @@ import {
   readTaskContext,
   verifyContextToken,
   type ContextLookbackLimits,
-} from "../dispatch/context-slice.js";
+} from "./context-slice.js";
 
 /**
  * Create a scoped read-only MCP Server exposing `read_task_context` and `expand_earlier_context`

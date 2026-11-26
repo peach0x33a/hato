@@ -23,6 +23,7 @@ import { ModelRegistry } from "./config/models.js";
 import { ScopedProxyRouter } from "./config/proxy.js";
 import { getOptionalSecret, loadSecretEnv, reloadSecretEnv, requireSecret } from "./config/secrets.js";
 import { ensureHatoHomeConfig } from "./config/paths.js";
+import { ConfigMutationService } from "./config/mutation.js";
 import {
   bindQqHomeChannel,
   bindTelegramHomeChannel,
@@ -33,7 +34,8 @@ import {
 } from "./config/store.js";
 import { openDatabase } from "./db/client.js";
 import { HatoRepository } from "./db/repo.js";
-import { runSelfConfigAction } from "./persona/self-config.js";
+import { runSelfConfigAction, type SelfConfigInput } from "./persona/self-config.js";
+import { ImageGenJobRunner } from "./persona/image-gen-runner.js";
 import {
   filterPendingAutoArtifacts,
   formatTicketArtifactPromptHint,
@@ -47,6 +49,7 @@ import { cleanupExpiredWorkspaces } from "./dispatch/workspace-gc.js";
 import { NeutralRouter } from "./dispatch/router.js";
 import { parseWorkerMandate } from "./dispatch/schema.js";
 import { MessageDebouncer, mergeInboundBatches } from "./gateway/debouncer.js";
+import { ConfirmationService } from "./gateway/confirmation.js";
 import { QqAdapter } from "./gateway/qq.js";
 import { QqOpenApiClient } from "./gateway/qq-client.js";
 import { TelegramAdapter } from "./gateway/tg.js";
@@ -81,6 +84,7 @@ import {
   summarizeError,
 } from "./utils/logger.js";
 import { WebConsoleServer } from "./web-console/server.js";
+import { workerActivityHub } from "./worker/activity-stream.js";
 import { WorkerDispatcher } from "./worker/backend.js";
 import { BuiltinPiRunner } from "./worker/builtin-pi.js";
 import {
@@ -195,86 +199,150 @@ async function main(): Promise<void> {
     getHatoConfig: () => hatoConfig,
     getMemoryStore: () => memoryStore,
   });
+  const configMutation = new ConfigMutationService({
+    hatoConfigPath: HATO_CONFIG_PATH,
+    envPath: APP_PATHS.envPath,
+    getFallbackConfig: () => hatoConfig,
+    onReload: () => reloadAll(),
+  });
   const ticketCoordinator = new TicketCoordinator({
     getHatoConfig: () => hatoConfig,
     repo,
     router: neutralRouter,
     dispatcher: workerDispatcher,
+    activitySink: workerActivityHub,
     bus,
     getModelRegistry: () => modelRegistry,
     proxyRouter,
     liveTraceTracker,
     runDetached: (fn) => actorLock.runDetached(fn),
-    executeSelfConfigConfirm: async (_canonicalUserId, payload) => {
-      const out = await runSelfConfigAction(
-        {
-          hatoConfigPath: HATO_CONFIG_PATH,
-          getHatoConfig: () => hatoConfig,
-          getModelRegistry: () => modelRegistry,
-          repo,
-          onReloadRuntime: async () => {
-            await reloadAll();
-          },
-          onThinkingUpdated: () => {
-            personaRuntime.syncThinkingLevelFromRegistry();
-          },
+  });
+  const imageGenRunner = new ImageGenJobRunner({
+    getHatoConfig: () => hatoConfig,
+    repo,
+    bus,
+    getModelRegistry: () => modelRegistry,
+    proxyRouter,
+    liveTraceTracker,
+    activitySink: workerActivityHub,
+    runDetached: (fn) => actorLock.runDetached(fn),
+  });
+  const confirmationService = new ConfirmationService({
+    repo,
+    bus,
+    onFallbackConfirm: (ticketId, approved) =>
+      ticketCoordinator.handleConfirmAction(ticketId, approved),
+  });
+  confirmationService.registerHandler<{
+    kind: "self_config";
+    action: SelfConfigInput;
+    summaryTitle: string;
+  }>("self_config", async (_canonicalUserId, payload) => {
+    const out = await runSelfConfigAction(
+      {
+        hatoConfigPath: HATO_CONFIG_PATH,
+        getHatoConfig: () => hatoConfig,
+        getModelRegistry: () => modelRegistry,
+        repo,
+        configMutation,
+        onReloadRuntime: async () => {
+          await reloadAll();
         },
-        payload.action,
-      );
-      return { ok: out.ok, message: out.summary };
-    },
-    executeSensitiveFileConfirm: async (canonicalUserId, payload) => {
-      if (payload.channel === "web") {
-        if (payload.text?.trim()) {
-          repo.appendRawMessage({
-            canonicalUserId,
-            channel: "web",
-            role: "assistant",
-            content: payload.text.trim(),
-            createdAt: Date.now(),
-          });
-          personaRuntime.refreshTranscriptFromDb();
-        }
-        return {
-          ok: false,
-          message: `Web Console 暂不支持直接发送文件附件，本地路径为: ${payload.path}`,
-        };
-      }
-      const outbound = payload.strictChannel
-        ? resolveStrictOutboundTarget(payload.channel)
-        : resolveOutboundTarget(payload.channel);
-      if (!outbound?.adapter.sendFile) {
-        return {
-          ok: false,
-          message: `${payload.channel.toUpperCase()} 网关未就绪或未绑定 owner，无法发送文件: ${payload.path}`,
-        };
-      }
+        onThinkingUpdated: () => {
+          personaRuntime.syncThinkingLevelFromRegistry();
+        },
+      },
+      payload.action,
+    );
+    return { ok: out.ok, message: out.summary };
+  });
+  confirmationService.registerHandler<{
+    kind: "send_env_file";
+    channel: ChannelName;
+    strictChannel?: boolean;
+    path: string;
+    caption?: string;
+    text?: string;
+  }>("send_env_file", async (canonicalUserId, payload) => {
+    if (payload.channel === "web") {
       if (payload.text?.trim()) {
-        await outbound.adapter.sendText(outbound.targetId, payload.text.trim());
+        repo.appendRawMessage({
+          canonicalUserId,
+          channel: "web",
+          role: "assistant",
+          content: payload.text.trim(),
+          createdAt: Date.now(),
+        });
+        personaRuntime.refreshTranscriptFromDb();
       }
-      await outbound.adapter.sendFile(
-        outbound.targetId,
-        payload.path,
-        basename(payload.path),
-        payload.caption,
-      );
       return {
-        ok: true,
-        message: `已发送敏感文件到 ${outbound.channel.toUpperCase()}: ${basename(payload.path)}`,
+        ok: false,
+        message: `Web Console 暂不支持直接发送文件附件，本地路径为: ${payload.path}`,
       };
-    },
+    }
+    const outbound = payload.strictChannel
+      ? resolveStrictOutboundTarget(payload.channel)
+      : resolveOutboundTarget(payload.channel);
+    if (!outbound?.adapter.sendFile) {
+      return {
+        ok: false,
+        message: `${payload.channel.toUpperCase()} 网关未就绪或未绑定 owner，无法发送文件: ${payload.path}`,
+      };
+    }
+    if (payload.text?.trim()) {
+      await outbound.adapter.sendText(outbound.targetId, payload.text.trim());
+    }
+    await outbound.adapter.sendFile(
+      outbound.targetId,
+      payload.path,
+      basename(payload.path),
+      payload.caption,
+    );
+    return {
+      ok: true,
+      message: `已发送敏感文件到 ${outbound.channel.toUpperCase()}: ${basename(payload.path)}`,
+    };
   });
   const recoveredTickets = ticketCoordinator.recoverStaleTickets();
   if (recoveredTickets > 0) {
     logWarn("DISPATCH", `recovered ${recoveredTickets} stale in-flight ticket(s) from previous run`);
   }
   personaRuntime.setDelegateHandler((input) => ticketCoordinator.enqueueDelegation(input));
-  personaRuntime.setImageGenHandler((input) => ticketCoordinator.enqueueImageGeneration(input));
+  personaRuntime.setImageGenHandler((input) => imageGenRunner.enqueue(input));
   personaRuntime.setSensitiveFileConfirmHandler((input) =>
-    ticketCoordinator.enqueueSensitiveFileConfirm(input),
+    confirmationService.requestConfirm({
+      canonicalUserId: input.canonicalUserId,
+      channel: input.channel,
+      kind: "send_env_file",
+      briefTitle: `确认发送敏感文件: ${basename(input.path)}`,
+      progressNote: "等待主人确认外发敏感 .env 文件",
+      promptText: `请求外发敏感凭据文件：${input.path}（目标通道：${input.channel.toUpperCase()}）。请确认是否允许发送该 .env 文件。`,
+      payload: {
+        kind: "send_env_file",
+        channel: input.channel,
+        strictChannel: input.strictChannel,
+        path: input.path,
+        caption: input.caption,
+        text: input.text,
+      },
+      returnMessage: `目标文件 ${basename(input.path)} 属于敏感 .env 凭据文件，已发送二次确认请求，需主人显式确认后才会发出。`,
+    }),
   );
   personaRuntime.setSelfConfigConfirmHandler((input) =>
-    ticketCoordinator.enqueueSelfConfigConfirm(input),
+    confirmationService.requestConfirm({
+      canonicalUserId: input.canonicalUserId,
+      channel: input.channel,
+      kind: "self_config",
+      briefTitle: input.summaryTitle,
+      progressNote: "等待主人确认修改设置",
+      promptText: input.promptText,
+      payload: {
+        kind: "self_config",
+        action: input.action,
+        summaryTitle: input.summaryTitle,
+      },
+      returnMessage: `已发送设置修改确认请求：${input.summaryTitle.slice(0, 48)}，需主人点击确认按钮后才会生效。`,
+    }),
   );
   personaRuntime.setStickerHandlers({
     onSearch: async ({ canonicalUserId, query, emotion, limit }) => {
@@ -704,8 +772,22 @@ async function main(): Promise<void> {
     actorLock,
     {
       summarizeBlock: (params) => personaRuntime.summarizeCompactionBlock(params),
-      ensureRetained: async (canonicalUserId, messages) => {
-        await memoryCurator.retainBeforeCompaction(canonicalUserId, messages);
+      onCompactionCommitted: (canonicalUserId) => {
+        void memoryCurator.retainPending(canonicalUserId).catch((err) => {
+          logError("CURATOR", `post-compaction background retain failed for ${canonicalUserId}`, err);
+        });
+      },
+      resolvePreCompactAfterMinutes: () => {
+        try {
+          const ttl = modelRegistry.resolveSlot("persona").cacheTtlMinutes;
+          const configured = buildCompactionConfig(hatoConfig).preCompactAfterMinutes;
+          if (Number.isFinite(ttl) && ttl > 0) {
+            return Math.min(configured, Math.max(1, Math.floor(ttl * 0.85)));
+          }
+        } catch {
+          // ignore if slot temporarily unavailable
+        }
+        return undefined;
       },
       clearHotZoneAndArchive: async (canonicalUserId) => {
         const res = await archiveAndResetHotZone(canonicalUserId);
@@ -951,10 +1033,11 @@ async function main(): Promise<void> {
             : undefined,
           shouldSuppressSend: hasNewerQueuedInput,
           sendBubblesToUser: async (earlyBubbles) => {
-            if (earlyBubbles.length === 0 || hasNewerQueuedInput()) return;
+            const safeEarly = earlyBubbles.filter((b) => b.trim() && !isNoReplyOutput(b));
+            if (safeEarly.length === 0 || hasNewerQueuedInput()) return;
             await adapter.sendBubbles(
               targetId,
-              earlyBubbles,
+              safeEarly,
               hatoConfig.gateway.bubbles.delay_ms_range,
             );
             await adapter.sendTyping?.(targetId).catch(() => undefined);
@@ -981,10 +1064,11 @@ async function main(): Promise<void> {
       }
 
       try {
-        if (bubblesToSend.length > 0) {
+        const outboundBubbles = bubblesToSend.filter((b) => b.trim() && !isNoReplyOutput(b));
+        if (outboundBubbles.length > 0) {
           await adapter.sendBubbles(
             targetId,
-            bubblesToSend,
+            outboundBubbles,
             hatoConfig.gateway.bubbles.delay_ms_range,
           );
         }
@@ -1257,7 +1341,7 @@ async function main(): Promise<void> {
       botToken,
       proxyRouter,
       onConfirmAction: (ticketId, approved) =>
-        ticketCoordinator.handleConfirmAction(ticketId, approved),
+        confirmationService.handleConfirmAction(ticketId, approved),
       onClaimHome: async ({ platformUserId, code, username }) => {
         const currentHome = resolvePlatformHomeBinding("tg", hatoConfig, repo);
         if (currentHome.bound) {
@@ -1328,7 +1412,7 @@ async function main(): Promise<void> {
           }
         }
 
-        const confirmTextRes = await ticketCoordinator.tryHandleConfirmText(
+        const confirmTextRes = await confirmationService.tryHandleConfirmText(
           msg.canonicalUserId,
           msg.text,
         );
@@ -1446,7 +1530,7 @@ async function main(): Promise<void> {
           }
         }
 
-        const confirmTextRes = await ticketCoordinator.tryHandleConfirmText(
+        const confirmTextRes = await confirmationService.tryHandleConfirmText(
           msg.canonicalUserId,
           msg.text,
         );
@@ -1495,6 +1579,9 @@ async function main(): Promise<void> {
     getMemoryCurator: () => memoryCurator,
     getMemoryStore: () => memoryStore,
     getTicketCoordinator: () => ticketCoordinator,
+    onConfirmAction: (ticketId, approved) =>
+      confirmationService.handleConfirmAction(ticketId, approved),
+    configMutation,
     getLiveTraceTracker: () => liveTraceTracker,
     getActorLock: () => actorLock,
     getSlashDeps: (uid) => buildSlashDeps(uid),

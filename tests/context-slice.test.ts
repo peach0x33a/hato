@@ -8,7 +8,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { openDatabase } from "../src/db/client.js";
 import { HatoRepository } from "../src/db/repo.js";
 import { expandEarlierContext, readTaskContext } from "../src/dispatch/context-slice.js";
-import { createScopedContextMcpServer } from "../src/mcp/context-server.js";
+import { createScopedContextMcpServer } from "../src/dispatch/context-server.js";
 
 test("context-slice pulls verbatim interval with reply_to penetration and enforces lookback limits", () => {
   const dbHandle = openDatabase(":memory:");

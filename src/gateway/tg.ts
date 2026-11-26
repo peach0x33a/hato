@@ -11,7 +11,6 @@ import {
 import type { ScopedProxyRouter } from "../config/proxy.js";
 import { logError, logInfo, logWarn, summarizeError } from "../utils/logger.js";
 import { retryWithBackoff } from "../utils/retry.js";
-import { isNoReplyOutput } from "../persona/agent.js";
 import {
   convertBufferToModelImage,
   formatTelegramStickerSummary,
@@ -300,7 +299,7 @@ export class TelegramAdapter implements ChannelAdapter {
     delayRangeMs: [number, number],
     replyToPlatformMsgId?: string,
   ): Promise<void> {
-    const filtered = bubbles.filter((b) => b.trim() && !isNoReplyOutput(b));
+    const filtered = bubbles.filter((b) => b.trim());
     for (let i = 0; i < filtered.length; i++) {
       const bubble = filtered[i]!;
       if (i > 0) {

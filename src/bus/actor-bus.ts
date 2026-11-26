@@ -1,5 +1,5 @@
 import { AsyncLocalStorage } from "node:async_hooks";
-import type { WorkerResult } from "../dispatch/schema.js";
+import type { WorkerResult } from "../contracts/worker.js";
 import type { ChannelName, InboundBatch } from "../gateway/types.js";
 
 export type BusEvent =

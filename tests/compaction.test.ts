@@ -38,7 +38,7 @@ test("CompactionManager promotes pre-computed draft on idle commit without calli
           summarizeCalls++;
           return `摘要(${messagesToSummarize.length}条)`;
         },
-        async ensureRetained(_user, messages) {
+        onCompactionCommitted(_user, messages) {
           retainedCount += messages.length;
         },
       },
@@ -54,6 +54,7 @@ test("CompactionManager promotes pre-computed draft on idle commit without calli
 
     const committed = await manager.runIdleCommit("owner");
     assert.equal(committed, true);
+    await new Promise((r) => setTimeout(r, 0));
     // Stage 2 reuses the draft without an extra summarizeBlock call!
     assert.equal(summarizeCalls, 1);
     assert.equal(retainedCount, 8);
@@ -161,6 +162,77 @@ test("CompactionManager scheduled mode defers active chat and clears/archives qu
     );
     assert.equal(nowQuiet, true);
     assert.deepEqual(clearedUsers, ["user_quiet", "user_active"]);
+
+    manager.dispose();
+  } finally {
+    handle.close();
+  }
+});
+
+test("CompactionManager commits locally even when onCompactionCommitted fails and discards stale lock-free draft", async () => {
+  const handle = openDatabase(":memory:");
+  try {
+    const repo = new HatoRepository(handle.db);
+    const lock = new ActorLock();
+
+    for (let i = 1; i <= 10; i++) {
+      repo.appendRawMessage({
+        canonicalUserId: "owner",
+        channel: "tg",
+        role: i % 2 === 1 ? "user" : "assistant",
+        content: `msg ${i}`,
+        createdAt: i * 1000,
+      });
+    }
+
+    let resolveSummarize: ((value: string) => void) | undefined;
+    const manager = new CompactionManager(
+      {
+        hotMessagesHighWatermark: 60,
+        hotMessagesKeepAfterCompact: 4,
+        minMessagesToCompact: 8,
+        preCompactAfterMinutes: 50,
+        idleCommitAfterMinutes: 60,
+      },
+      repo,
+      lock,
+      {
+        summarizeBlock() {
+          if (!resolveSummarize) {
+            return new Promise<string>((r) => {
+              resolveSummarize = r;
+            });
+          }
+          return Promise.resolve("fresh summary");
+        },
+        async onCompactionCommitted() {
+          throw new Error("cloud memory down");
+        },
+      },
+    );
+
+    // Start pre-compact draft: summarizeBlock is pending, actorLock must NOT be held
+    const draftPromise = manager.runPreCompactDraft("owner");
+    await new Promise((r) => setTimeout(r, 0));
+    assert.equal(lock.isBusy("owner"), false);
+
+    // A new message arrives while summarizeBlock is in-flight
+    repo.appendRawMessage({
+      canonicalUserId: "owner",
+      channel: "tg",
+      role: "user",
+      content: "new message mid-flight",
+      createdAt: 11_000,
+    });
+    resolveSummarize!("stale draft");
+    const drafted = await draftPromise;
+    assert.equal(drafted, false);
+    assert.equal(repo.getWorkingMemory("owner").draftSummary, null);
+
+    // Now commit locally despite onCompactionCommitted rejecting
+    const committed = await manager.runIdleCommit("owner");
+    assert.equal(committed, true);
+    assert.equal(repo.getWorkingMemory("owner").summaryText, "fresh summary");
 
     manager.dispose();
   } finally {

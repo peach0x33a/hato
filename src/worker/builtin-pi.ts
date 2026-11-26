@@ -23,7 +23,7 @@ import {
   generateOpenAiImage,
   resolveImageGenProvider,
   resolveProviderApiKey,
-} from "./image-gen.js";
+} from "../media/image-gen.js";
 import {
   collectNewArtifacts,
   IMAGE_EXTENSIONS,

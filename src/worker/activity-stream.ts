@@ -1,5 +1,6 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
+import type { TicketActivitySink } from "../contracts/worker.js";
 
 export type WorkerActivityKind =
   | "lifecycle"
@@ -82,7 +83,7 @@ interface TicketActivityBucket {
   dirty: boolean;
 }
 
-export class WorkerActivityHub {
+export class WorkerActivityHub implements TicketActivitySink {
   private readonly buckets = new Map<string, TicketActivityBucket>();
   private readonly listeners = new Set<(ev: WorkerActivityStreamEvent) => void>();
   private defaultPersistDir: string | null = null;

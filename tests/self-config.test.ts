@@ -5,7 +5,7 @@ import { join } from "node:path";
 import test from "node:test";
 import { fauxAssistantMessage, fauxProvider, fauxToolCall } from "@earendil-works/pi-ai";
 import { EventBus } from "../src/bus/actor-bus.js";
-import { TicketCoordinator } from "../src/dispatch/coordinator.js";
+import { ConfirmationService } from "../src/gateway/confirmation.js";
 import { loadHatoConfig } from "../src/config/app.js";
 import { ModelRegistry } from "../src/config/models.js";
 import { ScopedProxyRouter } from "../src/config/proxy.js";
@@ -240,20 +240,28 @@ name = "m"
     bus.on("ticket_confirm_required", (ev) => {
       confirmEvents.push(ev.ticketId);
     });
-    const coordinator = new TicketCoordinator({
-      getHatoConfig: () => cfg,
-      repo,
-      router: {} as never,
-      dispatcher: {} as never,
-      bus,
-      getModelRegistry: () => registry,
-      executeSelfConfigConfirm: async (_canonicalUserId, payload) => {
+    const confirmService = new ConfirmationService({ repo, bus });
+    confirmService.registerHandler<{ action: Parameters<typeof runSelfConfigAction>[1] }>(
+      "self_config",
+      async (_canonicalUserId, payload) => {
         const out = await runSelfConfigAction(deps, payload.action);
         return { ok: out.ok, message: out.summary };
       },
-    });
+    );
     runtime.setSelfConfigConfirmHandler((input) =>
-      coordinator.enqueueSelfConfigConfirm(input),
+      confirmService.requestConfirm({
+        canonicalUserId: input.canonicalUserId,
+        channel: input.channel,
+        kind: "self_config",
+        briefTitle: input.summaryTitle,
+        progressNote: "等待主人确认修改设置",
+        promptText: input.promptText,
+        payload: {
+          kind: "self_config",
+          action: input.action,
+          summaryTitle: input.summaryTitle,
+        },
+      }),
     );
 
     faux.setResponses([
@@ -290,7 +298,7 @@ name = "m"
     assert.doesNotMatch(readFileSync(join(promptsDir, "soul.md"), "utf8"), /以后少用波浪号/);
 
     // Reject first ticket -> soul.md remains unchanged
-    await coordinator.handleConfirmAction(firstTicketId, false);
+    await confirmService.handleConfirmAction(firstTicketId, false);
     assert.equal(repo.getTicket(firstTicketId)?.status, "cancelled");
     assert.doesNotMatch(readFileSync(join(promptsDir, "soul.md"), "utf8"), /以后少用波浪号/);
 
@@ -322,7 +330,7 @@ name = "m"
     });
     assert.equal(confirmEvents.length, 2);
     const secondTicketId = confirmEvents[1]!;
-    const confirmReply = await coordinator.handleConfirmAction(secondTicketId, true);
+    const confirmReply = await confirmService.handleConfirmAction(secondTicketId, true);
     assert.match(confirmReply, /^已确认并执行/);
     assert.equal(repo.getTicket(secondTicketId)?.status, "done");
     assert.match(readFileSync(join(promptsDir, "soul.md"), "utf8"), /以后少用波浪号/);

@@ -11,7 +11,7 @@ import {
   DEFAULT_IMAGE_DOWNLOAD_TIMEOUT_MS,
   DEFAULT_IMAGE_GEN_TIMEOUT_MS,
   generateOpenAiImage,
-} from "../src/worker/image-gen.js";
+} from "../src/media/image-gen.js";
 
 describe("OpenAI-compatible image_gen", () => {
   it("uses relaxed default generation and download timeouts", () => {

@@ -1,41 +1,23 @@
-import type { WorkerBackend, WorkerMandate, WorkerResult } from "../dispatch/schema.js";
+import type {
+  ExecutionProgressCallback,
+  ExecutionRunner,
+  TicketExecutionHandle,
+  WorkerBackend,
+  WorkerExecutionDispatcher,
+  WorkerMandate,
+  WorkerResult,
+} from "../contracts/worker.js";
 
-export interface TicketExecutionHandle {
-  ticketId: string;
-  canonicalUserId: string;
-  backend: WorkerBackend;
-  briefTitle: string;
-  contextId: string;
-  externalSessionId: string | null;
-}
-
-export interface ExecutionProgressCallback {
-  onProgress?: (note: string) => void;
-  onSessionId?: (sessionId: string) => void;
-}
-
-export interface ExecutionRunner {
-  execute(
-    ticket: TicketExecutionHandle,
-    mandate: WorkerMandate,
-    callbacks?: ExecutionProgressCallback,
-  ): Promise<WorkerResult>;
-
-  resume(
-    ticket: TicketExecutionHandle,
-    mandate: WorkerMandate,
-    userReply: string,
-    callbacks?: ExecutionProgressCallback,
-  ): Promise<WorkerResult>;
-
-  abort(ticketId: string): Promise<void>;
-  abortAll?(): Promise<void>;
-}
+export type {
+  ExecutionProgressCallback,
+  ExecutionRunner,
+  TicketExecutionHandle,
+};
 
 /**
  * Routes ticket execution and resume requests to `builtin-pi` or `external-cli` runners.
  */
-export class WorkerDispatcher {
+export class WorkerDispatcher implements WorkerExecutionDispatcher {
   constructor(
     private readonly builtinRunner: ExecutionRunner,
     private readonly externalRunner: ExecutionRunner,

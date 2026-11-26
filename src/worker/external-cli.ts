@@ -547,8 +547,8 @@ export function buildContextMcpSpec(params: {
   contextId: string;
 }): ContextMcpSpec {
   const selfDir = dirname(fileURLToPath(import.meta.url));
-  const jsEntry = resolve(selfDir, "../mcp/context-server.js");
-  const tsEntry = resolve(selfDir, "../mcp/context-server.ts");
+  const jsEntry = resolve(selfDir, "../dispatch/context-server.js");
+  const tsEntry = resolve(selfDir, "../dispatch/context-server.ts");
   const isCompiledJs = existsSync(jsEntry) && selfDir.includes(`${join("dist", "worker")}`);
 
   const contextSecret = getProcessContextSecret();

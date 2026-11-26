@@ -191,6 +191,7 @@ hindsight_llm = "faux-provider/faux-model-1"
     const curator = new MemoryCurator(hatoConfig, registry, proxyRouter, repo, store);
     const runtime = new PersonaRuntime(hatoConfig, registry, proxyRouter, repo, undefined, store);
     const actorLock = new ActorLock();
+    let retainDone: Promise<void> | undefined;
     const compaction = new CompactionManager(
       {
         hotMessagesHighWatermark: 60,
@@ -203,8 +204,9 @@ hindsight_llm = "faux-provider/faux-model-1"
       actorLock,
       {
         summarizeBlock: async () => "过渡摘要",
-        ensureRetained: async (uid, msgs) => {
-          await curator.retainBeforeCompaction(uid, msgs);
+        onCompactionCommitted: (uid, msgs) => {
+          retainDone = curator.retainBeforeCompaction(uid, msgs);
+          return retainDone;
         },
       },
     );
@@ -252,6 +254,7 @@ hindsight_llm = "faux-provider/faux-model-1"
 
     const compacted = await compaction.runIdleCommit("owner");
     assert.equal(compacted, true);
+    await retainDone;
 
     // Persona synced, tech degraded on first try; the 2 kept hot messages remain pending retain
     const stats1 = repo.getMemorySyncStats("owner");

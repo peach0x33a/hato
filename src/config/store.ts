@@ -12,7 +12,7 @@ import { dirname, join, resolve } from "node:path";
 import dotenv from "dotenv";
 import { parse as parseToml, stringify as stringifyToml } from "smol-toml";
 import type { HatoRepository } from "../db/repo.js";
-import type { HomeChannelPlatform, ProactiveChannelOption } from "../gateway/types.js";
+import type { HomeChannelPlatform, ProactiveChannelOption } from "./types.js";
 import { loadHatoConfig, validateHatoConfigObject, type HatoConfig } from "./app.js";
 import { validateModelsConfigObject, type ModelsFileConfig } from "./models.js";
 

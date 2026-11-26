@@ -1,7 +1,8 @@
 import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import http, { type IncomingMessage, type ServerResponse } from "node:http";
 import { dirname, join, resolve } from "node:path";
-import { getSupportedThinkingLevels, type ImageContent } from "@earendil-works/pi-ai";
+import { getSupportedThinkingLevels } from "@earendil-works/pi-ai";
+import { WebChatGateway } from "../gateway/web.js";
 import type { BrowserRuntime } from "../browser/runtime.js";
 import type { ActorLock } from "../bus/actor-bus.js";
 import { tryExecuteSlashCommand, type SlashCommandDeps } from "../commands/slash.js";
@@ -24,7 +25,8 @@ import type { ModelRegistry } from "../config/models.js";
 import { ModelsDevRegistry } from "../config/models-dev.js";
 import { fetchUpstreamModels } from "../config/upstream-models.js";
 import type { ScopedProxyRouter } from "../config/proxy.js";
-import { getOptionalSecret, reloadSecretEnv } from "../config/secrets.js";
+import { ConfigMutationService } from "../config/mutation.js";
+import { getOptionalSecret } from "../config/secrets.js";
 import {
   isForbiddenSecretEnvName,
   mergeEnvFile,
@@ -33,7 +35,6 @@ import {
   resolvePlatformHomeBinding,
   unbindHomeChannel,
   updateProactiveChannel,
-  writeHatoConfig,
   writeModelsConfig,
   type PlatformHomeBinding,
 } from "../config/store.js";
@@ -146,10 +147,12 @@ export interface WebConsoleServerDeps {
   getMemoryCurator?: () => MemoryCurator;
   getMemoryStore?: () => MemoryStore | null;
   getTicketCoordinator?: () => TicketCoordinator;
+  onConfirmAction?: (ticketId: string, approved: boolean) => Promise<string>;
   getLiveTraceTracker?: () => LiveTraceTracker;
   getActorLock: () => ActorLock;
   getSlashDeps: (canonicalUserId: string) => SlashCommandDeps;
   reloadAll: () => Promise<WebConsoleReloadResult>;
+  configMutation?: ConfigMutationService<WebConsoleReloadResult>;
   modelsDevRegistry?: ModelsDevRegistry;
   probeExternalClis?: (config: HatoConfig) => Promise<ExternalCliProbeEntry[]>;
   getGatewayStatus?: () => {
@@ -185,6 +188,8 @@ export class WebConsoleServer {
   private readonly envPath: string;
   private readonly staticDir: string;
   private readonly modelsDevRegistry: ModelsDevRegistry;
+  private readonly configMutation: ConfigMutationService<WebConsoleReloadResult>;
+  private readonly webChatGateway: WebChatGateway;
   private readonly tgProfileCache = new Map<
     string,
     { expiresAt: number; profile: TelegramUserProfileResult }
@@ -203,6 +208,110 @@ export class WebConsoleServer {
         cacheFilePath: resolve("data/models-dev-cache.json"),
         getProxyRouter: deps.getProxyRouter,
       });
+    this.configMutation =
+      deps.configMutation ??
+      new ConfigMutationService<WebConsoleReloadResult>({
+        hatoConfigPath: deps.hatoConfigPath,
+        envPath: this.envPath,
+        getFallbackConfig: deps.getConfig,
+        onReload: deps.reloadAll,
+      });
+    this.webChatGateway = new WebChatGateway({
+      getOwnerUserId: () => deps.getConfig().owner.canonical_user_id,
+      getTimezone: () => deps.getConfig().owner.timezone,
+      getBubbleConfig: () => {
+        const b = deps.getConfig().gateway.bubbles;
+        return { enabled: b.enabled, maxPerTurn: b.max_per_turn, delimiter: b.delimiter };
+      },
+      splitBubbles: (text, opts) => splitIntoBubbles(text, opts),
+      getRepo: deps.getRepo,
+      isPendingTakeover: () => deps.getBrowserRuntime().isPendingTakeover(),
+      getSlotViews: () => this.buildSlotViews(deps.getModelRegistry()),
+      getAvailableModels: () => deps.getModelRegistry().listTargets(),
+      trySlashCommand: ({ canonicalUserId, text }) =>
+        tryExecuteSlashCommand({
+          canonicalUserId,
+          text,
+          channel: "web",
+          platformUserId: canonicalUserId,
+          deps: deps.getSlashDeps(canonicalUserId),
+        }),
+      handleChatTurn: async ({ batch, images, emit }) => {
+        const uid = batch.canonicalUserId;
+        const compactionManager = deps.getCompactionManager();
+        const personaRuntime = deps.getPersonaRuntime();
+        const actorLock = deps.getActorLock();
+        const ticketCoordinator = deps.getTicketCoordinator?.();
+
+        await actorLock.run(uid, async () => {
+          if (ticketCoordinator) {
+            const routed = await ticketCoordinator
+              .tryRouteInboundToTicket(batch)
+              .catch(() => ({ handledByTicket: false as const }));
+            if (routed.handledByTicket) {
+              const ackBubbles = [`已收到补充说明，正在继续执行工单 ${routed.ticketId ?? ""}…`];
+              emit({ type: "assistant_bubbles", bubbles: ackBubbles });
+              return;
+            }
+          }
+
+          const output = await personaRuntime.handleUserBatch(batch, images, {
+            sendPhotoToUser: async (photo, caption) => {
+              const dataUrl = `data:image/png;base64,${photo.toString("base64")}`;
+              emit({ type: "photo", dataUrl, caption });
+            },
+            sendBubblesToUser: async (earlyBubbles) => {
+              if (earlyBubbles.length === 0) return;
+              for (const bubble of earlyBubbles) {
+                console.log(
+                  formatGatewayMessageLog({
+                    direction: "outbound",
+                    channel: "web",
+                    timeZone: deps.getConfig().owner.timezone,
+                    userSlug: uid,
+                    text: bubble,
+                  }),
+                );
+              }
+              emit({ type: "early_bubbles", bubbles: earlyBubbles });
+            },
+            onRetryNotice: async (noticeText) => {
+              emit({ type: "early_bubbles", bubbles: [noticeText] });
+            },
+          });
+
+          for (const bubble of output.bubbles) {
+            console.log(
+              formatGatewayMessageLog({
+                direction: "outbound",
+                channel: "web",
+                timeZone: deps.getConfig().owner.timezone,
+                userSlug: uid,
+                text: bubble,
+              }),
+            );
+          }
+
+          emit({
+            type: "assistant_bubbles",
+            bubbles: output.bubbles,
+            telemetry: {
+              latencyMs: output.latencyMs,
+              ttftMs: output.ttftMs,
+              cacheHitRate: output.cacheHitRate,
+              tps: output.tps,
+              toolCalls: output.toolCalls,
+            },
+          });
+
+          compactionManager.recordInteraction(uid);
+          deps.getMemoryCurator?.().recordInteraction(uid);
+          void compactionManager.checkHighWatermark(uid).catch(() => undefined);
+        });
+      },
+      readJsonBody,
+      sendJson,
+    });
   }
 
   getAddress(): { host: string; port: number } | null {
@@ -380,11 +489,11 @@ export class WebConsoleServer {
           return;
         }
         if (pathname === "/api/chat/history" && method === "GET") {
-          await this.handleChatHistory(parsedUrl, res);
+          await this.webChatGateway.handleHistory(parsedUrl, res);
           return;
         }
         if (pathname === "/api/chat/send" && method === "POST") {
-          await this.handleChatSend(req, res);
+          await this.webChatGateway.handleSend(req, res);
           return;
         }
         if (pathname === "/api/config" && method === "GET") {
@@ -440,7 +549,7 @@ export class WebConsoleServer {
           return;
         }
         if (pathname === "/api/config/reload" && method === "POST") {
-          const reloadRes = await this.deps.reloadAll();
+          const reloadRes = await this.configMutation.reloadRuntime();
           sendJson(res, 200, { ok: true, ...reloadRes });
           return;
         }
@@ -911,70 +1020,6 @@ export class WebConsoleServer {
     sendJson(res, 200, { ok: true, sessions });
   }
 
-  private async handleChatHistory(url: URL, res: ServerResponse): Promise<void> {
-    const hato = this.deps.getConfig();
-    const repo = this.deps.getRepo();
-    const registry = this.deps.getModelRegistry();
-    const uid = hato.owner.canonical_user_id;
-    const bubbleCfg = hato.gateway.bubbles;
-    const sessionId = url.searchParams.get("sessionId")?.trim() || "";
-
-    let readonly = false;
-    let session = null;
-    let summaryText = "";
-    let compactedUntilTs = 0;
-    let rawMessages;
-
-    if (sessionId) {
-      const archived = repo.getSessionMessages(uid, sessionId);
-      if (!archived) {
-        sendJson(res, 404, { ok: false, error: `未找到历史会话 ${sessionId}` });
-        return;
-      }
-      readonly = true;
-      session = archived.session;
-      summaryText = archived.session.summaryText;
-      compactedUntilTs = archived.session.endedAt;
-      rawMessages = archived.messages;
-    } else {
-      const wm = repo.getWorkingMemory(uid);
-      summaryText = wm.summaryText;
-      compactedUntilTs = wm.compactedUntilTs;
-      rawMessages = repo.getHotMessages(uid, wm.compactedUntilTs);
-    }
-
-    const visibleMessages = rawMessages.filter(
-      (m) => !(m.role === "executed_event" && /^\[?工单\s/.test(m.content)),
-    );
-
-    const messages = visibleMessages.map((m) => ({
-      ...m,
-      bubbles:
-        m.role === "assistant"
-          ? splitIntoBubbles(m.content, {
-              enabled: bubbleCfg.enabled,
-              maxPerTurn: bubbleCfg.max_per_turn,
-              delimiter: bubbleCfg.delimiter,
-            })
-          : m.content
-            ? [m.content]
-            : [],
-    }));
-
-    sendJson(res, 200, {
-      ok: true,
-      canonicalUserId: uid,
-      readonly,
-      session,
-      summaryText,
-      compactedUntilTs,
-      pendingTakeover: this.deps.getBrowserRuntime().isPendingTakeover(),
-      messages,
-      slots: this.buildSlotViews(registry),
-      availableModels: registry.listTargets(),
-    });
-  }
-
   private buildSlotViews(registry: ModelRegistry) {
     return registry.listSlots().map((s) => ({
       slot: s.slot,
@@ -985,192 +1030,6 @@ export class WebConsoleServer {
       supportedThinkingLevels: getSupportedThinkingLevels(s.model),
       reasoning: Boolean(s.model.reasoning),
     }));
-  }
-
-  private async handleChatSend(req: IncomingMessage, res: ServerResponse): Promise<void> {
-    const body = (await readJsonBody(req)) as {
-      text?: unknown;
-      images?: Array<{ data?: unknown; mimeType?: unknown }>;
-    };
-
-    const text = typeof body.text === "string" ? body.text.trim() : "";
-    const rawImages = Array.isArray(body.images) ? body.images : [];
-    const loadedImages: ImageContent[] = rawImages
-      .filter(
-        (img): img is { data: string; mimeType: string } =>
-          typeof img?.data === "string" &&
-          img.data.length > 0 &&
-          typeof img?.mimeType === "string" &&
-          img.mimeType.startsWith("image/"),
-      )
-      .slice(0, 4)
-      .map((img) => ({
-        type: "image",
-        data: img.data,
-        mimeType: img.mimeType,
-      }));
-
-    if (!text && loadedImages.length === 0) {
-      sendJson(res, 400, { ok: false, error: "消息内容与图片不能同时为空" });
-      return;
-    }
-
-    const hato = this.deps.getConfig();
-    const uid = hato.owner.canonical_user_id;
-    const attachments = loadedImages.map((img, i) => ({
-      kind: "image" as const,
-      filename: `web-image-${i + 1}`,
-      mimeType: img.mimeType,
-    }));
-
-    console.log(
-      formatGatewayMessageLog({
-        direction: "inbound",
-        channel: "web",
-        timeZone: hato.owner.timezone,
-        userSlug: uid,
-        text,
-        attachments,
-      }),
-    );
-
-    res.writeHead(200, {
-      "Content-Type": "text/event-stream; charset=utf-8",
-      "Cache-Control": "no-cache, no-transform",
-      Connection: "keep-alive",
-    });
-
-    const emit = (payload: Record<string, unknown>) => {
-      if (!res.writableEnded) {
-        res.write(`data: ${JSON.stringify(payload)}\n\n`);
-      }
-    };
-
-    try {
-      if (text.startsWith("/")) {
-        const slashOut = await tryExecuteSlashCommand({
-          canonicalUserId: uid,
-          text,
-          channel: "web",
-          platformUserId: uid,
-          deps: this.deps.getSlashDeps(uid),
-        });
-        if (slashOut !== null) {
-          if (slashOut.photo) {
-            const dataUrl = `data:image/png;base64,${slashOut.photo.buffer.toString("base64")}`;
-            emit({ type: "photo", dataUrl, caption: slashOut.photo.caption });
-          }
-          if (slashOut.text !== undefined) {
-            console.log(
-              formatGatewayMessageLog({
-                direction: "outbound",
-                channel: "web",
-                timeZone: hato.owner.timezone,
-                userSlug: uid,
-                text: slashOut.text,
-              }),
-            );
-            emit({ type: "slash_reply", text: slashOut.text });
-          }
-          emit({ type: "done", pendingTakeover: this.deps.getBrowserRuntime().isPendingTakeover() });
-          res.end();
-          return;
-        }
-      }
-
-      const now = Date.now();
-      const msgId = `web_${now}`;
-      const batch = {
-        canonicalUserId: uid,
-        originChannel: "web" as const,
-        originPlatformUserId: uid,
-        platformMsgIds: [msgId],
-        latestPlatformMsgId: msgId,
-        combinedText: text,
-        attachments,
-        images: loadedImages.length > 0 ? loadedImages : undefined,
-        firstTimestampMs: now,
-        lastTimestampMs: now,
-      };
-
-      const compactionManager = this.deps.getCompactionManager();
-      const personaRuntime = this.deps.getPersonaRuntime();
-      const actorLock = this.deps.getActorLock();
-      const ticketCoordinator = this.deps.getTicketCoordinator?.();
-
-      await actorLock.run(uid, async () => {
-        if (ticketCoordinator) {
-          const routed = await ticketCoordinator
-            .tryRouteInboundToTicket(batch)
-            .catch(() => ({ handledByTicket: false as const }));
-          if (routed.handledByTicket) {
-            const ackBubbles = [`已收到补充说明，正在继续执行工单 ${routed.ticketId ?? ""}…`];
-            emit({ type: "assistant_bubbles", bubbles: ackBubbles });
-            return;
-          }
-        }
-
-        const output = await personaRuntime.handleUserBatch(batch, loadedImages, {
-          sendPhotoToUser: async (photo, caption) => {
-            const dataUrl = `data:image/png;base64,${photo.toString("base64")}`;
-            emit({ type: "photo", dataUrl, caption });
-          },
-          sendBubblesToUser: async (earlyBubbles) => {
-            if (earlyBubbles.length === 0) return;
-            for (const bubble of earlyBubbles) {
-              console.log(
-                formatGatewayMessageLog({
-                  direction: "outbound",
-                  channel: "web",
-                  timeZone: this.deps.getConfig().owner.timezone,
-                  userSlug: uid,
-                  text: bubble,
-                }),
-              );
-            }
-            emit({ type: "early_bubbles", bubbles: earlyBubbles });
-          },
-          onRetryNotice: async (noticeText) => {
-            emit({ type: "early_bubbles", bubbles: [noticeText] });
-          },
-        });
-
-        for (const bubble of output.bubbles) {
-          console.log(
-            formatGatewayMessageLog({
-              direction: "outbound",
-              channel: "web",
-              timeZone: this.deps.getConfig().owner.timezone,
-              userSlug: uid,
-              text: bubble,
-            }),
-          );
-        }
-
-        emit({
-          type: "assistant_bubbles",
-          bubbles: output.bubbles,
-          telemetry: {
-            latencyMs: output.latencyMs,
-            ttftMs: output.ttftMs,
-            cacheHitRate: output.cacheHitRate,
-            tps: output.tps,
-            toolCalls: output.toolCalls,
-          },
-        });
-
-        compactionManager.recordInteraction(uid);
-        this.deps.getMemoryCurator?.().recordInteraction(uid);
-        void compactionManager.checkHighWatermark(uid).catch(() => undefined);
-      });
-
-      emit({ type: "done", pendingTakeover: this.deps.getBrowserRuntime().isPendingTakeover() });
-    } catch (err) {
-      logError("WEB", "chat turn failed", err);
-      emit({ type: "error", message: summarizeError(err) });
-    } finally {
-      if (!res.writableEnded) res.end();
-    }
   }
 
   private buildPromptLayersSnapshot(hatoConfig: HatoConfig) {
@@ -1253,13 +1112,12 @@ export class WebConsoleServer {
   private async handleSaveHato(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const payload = (await readJsonBody(req)) as { config?: unknown };
     const validated = validateHatoConfigObject(payload.config, this.deps.hatoConfigPath);
-    const writeRes = writeHatoConfig(this.deps.hatoConfigPath, validated, { backup: true });
-    const reloadRes = await this.deps.reloadAll();
+    const writeRes = await this.configMutation.writeHatoConfigAndReload(validated, { backup: true });
     sendJson(res, 200, {
       ok: true,
       path: writeRes.path,
       backupPath: writeRes.backupPath,
-      ...reloadRes,
+      ...writeRes.reload,
     });
   }
 
@@ -1272,7 +1130,7 @@ export class WebConsoleServer {
     );
     this.deps.getModelRegistry().clearSlotOverrides();
     this.deps.getModelRegistry().clearSlotThinkingOverrides();
-    const reloadRes = await this.deps.reloadAll();
+    const reloadRes = await this.configMutation.reloadRuntime();
     sendJson(res, 200, {
       ok: true,
       path: writeRes.path,
@@ -1373,26 +1231,27 @@ export class WebConsoleServer {
     });
   }
 
-  private persistPromptsSection(nextPrompts: { order: string[]; disabled: string[] }): {
+  private async persistPromptsSectionAndReload(nextPrompts: { order: string[]; disabled: string[] }): Promise<{
     path: string;
     backupPath?: string;
     config: HatoConfig;
-  } {
-    const base = existsSync(resolve(this.deps.hatoConfigPath))
-      ? loadHatoConfig(this.deps.hatoConfigPath)
-      : this.deps.getConfig();
+    reload: WebConsoleReloadResult;
+  }> {
     const cleanedOrder = nextPrompts.order.map((s) => s.trim()).filter(Boolean);
     const cleanedDisabled = nextPrompts.disabled.map((s) => s.trim()).filter(Boolean);
-    const nextConfig: HatoConfig = {
-      ...base,
-      prompts: {
-        order: cleanedOrder,
-        ...(cleanedDisabled.length > 0 ? { disabled: cleanedDisabled } : {}),
-      },
-    };
-    const validated = validateHatoConfigObject(nextConfig, this.deps.hatoConfigPath);
-    const writeRes = writeHatoConfig(this.deps.hatoConfigPath, validated, { backup: true });
-    return { ...writeRes, config: validated };
+    let validated!: HatoConfig;
+    const res = await this.configMutation.patchHatoConfigAndReload((base) => {
+      const nextConfig: HatoConfig = {
+        ...base,
+        prompts: {
+          order: cleanedOrder,
+          ...(cleanedDisabled.length > 0 ? { disabled: cleanedDisabled } : {}),
+        },
+      };
+      validated = validateHatoConfigObject(nextConfig, this.deps.hatoConfigPath);
+      return validated;
+    }, { backup: true });
+    return { path: res.path, backupPath: res.backupPath, config: validated, reload: res.reload };
   }
 
   private async handleSavePromptOrder(req: IncomingMessage, res: ServerResponse): Promise<void> {
@@ -1417,8 +1276,8 @@ export class WebConsoleServer {
         ? (payload.disabled as string[]).map((s) => s.trim())
         : resolvePromptDisabled(cur);
 
-    const writeRes = this.persistPromptsSection({ order: nextOrder, disabled: nextDisabled });
-    const reloadRes = await this.deps.reloadAll();
+    const writeRes = await this.persistPromptsSectionAndReload({ order: nextOrder, disabled: nextDisabled });
+    const reloadRes = writeRes.reload;
     const nextHato = this.deps.getConfig();
     const nextSnapshot = this.buildPromptLayersSnapshot(nextHato);
     sendJson(res, 200, {
@@ -1471,14 +1330,15 @@ export class WebConsoleServer {
       }
     }
 
+    let reloadRes: WebConsoleReloadResult;
     if (
       nextOrder.length !== currentOrder.length ||
       typeof payload.enabled === "boolean"
     ) {
-      this.persistPromptsSection({ order: nextOrder, disabled: nextDisabled });
+      reloadRes = (await this.persistPromptsSectionAndReload({ order: nextOrder, disabled: nextDisabled })).reload;
+    } else {
+      reloadRes = await this.configMutation.reloadRuntime();
     }
-
-    const reloadRes = await this.deps.reloadAll();
     const nextHato = this.deps.getConfig();
     const nextSnapshot = this.buildPromptLayersSnapshot(nextHato);
     sendJson(res, 200, {
@@ -1527,17 +1387,20 @@ export class WebConsoleServer {
       t === token || t === `block:${bare}` || t === filename || t === bare;
     const nextOrder = currentOrder.filter((t) => !isMatch(t));
     const nextDisabled = currentDisabled.filter((t) => !isMatch(t));
+    let reloadRes: WebConsoleReloadResult;
     if (
       nextOrder.length !== currentOrder.length ||
       nextDisabled.length !== currentDisabled.length
     ) {
-      this.persistPromptsSection({
-        order: nextOrder.length > 0 ? nextOrder : ["blocks", "system", "soul"],
-        disabled: nextDisabled,
-      });
+      reloadRes = (
+        await this.persistPromptsSectionAndReload({
+          order: nextOrder.length > 0 ? nextOrder : ["blocks", "system", "soul"],
+          disabled: nextDisabled,
+        })
+      ).reload;
+    } else {
+      reloadRes = await this.configMutation.reloadRuntime();
     }
-
-    const reloadRes = await this.deps.reloadAll();
     const nextHato = this.deps.getConfig();
     const nextSnapshot = this.buildPromptLayersSnapshot(nextHato);
     sendJson(res, 200, {
@@ -1570,8 +1433,7 @@ export class WebConsoleServer {
     }
 
     const merged = mergeEnvFile(this.envPath, updates);
-    reloadSecretEnv(this.envPath, merged.deletedKeys);
-    const reloadRes = await this.deps.reloadAll();
+    const reloadRes = await this.configMutation.reloadSecretsAndRuntime(merged.deletedKeys);
 
     const envMap = readEnvMap(this.envPath);
     const knownKeys = this.collectKnownSecretEnvNames(this.deps.getConfig(), this.deps.getModelRegistry());
@@ -2139,7 +2001,9 @@ export class WebConsoleServer {
       sendJson(res, 404, { ok: false, error: `未找到工单 ${ticketId}` });
       return;
     }
-    const message = await coordinator.handleConfirmAction(ticketId, Boolean(body.approved));
+    const message = this.deps.onConfirmAction
+      ? await this.deps.onConfirmAction(ticketId, Boolean(body.approved))
+      : await coordinator.handleConfirmAction(ticketId, Boolean(body.approved));
     sendJson(res, 200, { ok: true, message });
   }
 

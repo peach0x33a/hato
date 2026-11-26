@@ -20,7 +20,7 @@ import {
   type HatoConfig,
 } from "../config/app.js";
 import type { ModelRegistry } from "../config/models.js";
-import { writeHatoConfig } from "../config/store.js";
+import { ConfigMutationService } from "../config/mutation.js";
 import type { HatoRepository } from "../db/repo.js";
 import { logInfo } from "../utils/logger.js";
 import {
@@ -97,6 +97,7 @@ export interface SelfConfigDeps {
   getModelRegistry: () => ModelRegistry;
   repo: HatoRepository;
   onReloadRuntime: () => Promise<void>;
+  configMutation?: ConfigMutationService;
   onThinkingUpdated?: (slot: string, effectiveLevel: string) => void;
 }
 
@@ -477,12 +478,17 @@ export async function runSelfConfigAction(
       };
     }
 
-    const baseCfg = existsSync(resolve(deps.hatoConfigPath))
-      ? loadHatoConfig(deps.hatoConfigPath)
-      : cfg;
-    const merged = deepMergeAllowedConfig(baseCfg, input.config_patch) as HatoConfig;
-    const writeRes = writeHatoConfig(deps.hatoConfigPath, merged, { backup: true });
-    await deps.onReloadRuntime();
+    const mutation =
+      deps.configMutation ??
+      new ConfigMutationService({
+        hatoConfigPath: deps.hatoConfigPath,
+        getFallbackConfig: () => cfg,
+        onReload: deps.onReloadRuntime,
+      });
+    const writeRes = await mutation.patchHatoConfigAndReload(
+      (baseCfg) => deepMergeAllowedConfig(baseCfg, input.config_patch!) as HatoConfig,
+      { backup: true },
+    );
 
     logInfo("SELF_CONFIG", `patched hato.toml (${leafPaths.join(", ")}) -> ${writeRes.path}`);
     return {

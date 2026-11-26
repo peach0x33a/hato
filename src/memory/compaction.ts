@@ -24,8 +24,13 @@ export interface CompactionHooks {
     previousSummary: string;
     messagesToSummarize: RawMessageRecord[];
   }): Promise<string>;
-  /** Ensure messages leaving the hot zone have been retained in long-term memory (Phase 4). */
-  ensureRetained?(canonicalUserId: string, messages: RawMessageRecord[]): Promise<void>;
+  /**
+   * Fire-and-forget notification after hot-zone compaction commits locally.
+   * Long-term memory (FR_3) consumes `raw_messages` asynchronously without blocking FR_2.
+   */
+  onCompactionCommitted?(canonicalUserId: string, messages: RawMessageRecord[]): void | Promise<void>;
+  /** Resolve dynamic pre-compaction delay (minutes) based on active persona model cache TTL. */
+  resolvePreCompactAfterMinutes?(): number | undefined;
   /** Retain pending memories and archive/clear the entire hot zone (used in scheduled mode). */
   clearHotZoneAndArchive?(canonicalUserId: string): Promise<boolean>;
   /** List known user IDs that may have un-cleared working memory at scheduled clear time. */
@@ -108,7 +113,12 @@ export class CompactionManager {
     this.clearUserTimers(canonicalUserId);
     this.repo.invalidateDraftCompaction(canonicalUserId);
 
-    const preMs = Math.max(1, this.config.preCompactAfterMinutes) * 60_000;
+    const resolvedPre = this.hooks.resolvePreCompactAfterMinutes?.();
+    const preMinutes =
+      typeof resolvedPre === "number" && Number.isFinite(resolvedPre) && resolvedPre > 0
+        ? resolvedPre
+        : this.config.preCompactAfterMinutes;
+    const preMs = Math.max(1, preMinutes) * 60_000;
     const commitMs = Math.max(preMs, this.config.idleCommitAfterMinutes * 60_000);
 
     const preTimer = setTimeout(() => {
@@ -130,28 +140,39 @@ export class CompactionManager {
 
   /**
    * Stage 1: While prompt cache is still warm, generate a draft summary without
-   * mutating the live hot prefix.
+   * holding `actorLock` or mutating the live hot prefix. Discards if hot messages change mid-flight.
    */
   async runPreCompactDraft(canonicalUserId: string): Promise<boolean> {
+    const state = this.repo.getWorkingMemory(canonicalUserId);
+    const hot = this.repo.getHotMessages(canonicalUserId, state.compactedUntilTs);
+    if (hot.length < this.config.minMessagesToCompact) return false;
+
+    const keepCount = Math.min(this.config.hotMessagesKeepAfterCompact, Math.max(1, hot.length - 1));
+    const sliceToCompact = hot.slice(0, hot.length - keepCount);
+    if (sliceToCompact.length === 0) return false;
+
+    const lastCompactMsg = sliceToCompact[sliceToCompact.length - 1]!;
+    const snapshotLastHotMsgId = hot[hot.length - 1]?.id;
+    if (state.draftUntilMsgId === lastCompactMsg.id && state.draftSummary) {
+      return false;
+    }
+
+    const draftSummary = await this.hooks.summarizeBlock({
+      canonicalUserId,
+      previousSummary: state.summaryText,
+      messagesToSummarize: sliceToCompact,
+    });
+
     return this.actorLock.run(canonicalUserId, async () => {
-      const state = this.repo.getWorkingMemory(canonicalUserId);
-      const hot = this.repo.getHotMessages(canonicalUserId, state.compactedUntilTs);
-      if (hot.length < this.config.minMessagesToCompact) return false;
-
-      const keepCount = Math.min(this.config.hotMessagesKeepAfterCompact, Math.max(1, hot.length - 1));
-      const sliceToCompact = hot.slice(0, hot.length - keepCount);
-      if (sliceToCompact.length === 0) return false;
-
-      const lastCompactMsg = sliceToCompact[sliceToCompact.length - 1]!;
-      if (state.draftUntilMsgId === lastCompactMsg.id && state.draftSummary) {
+      const latestState = this.repo.getWorkingMemory(canonicalUserId);
+      const latestHot = this.repo.getHotMessages(canonicalUserId, latestState.compactedUntilTs);
+      const latestLastHotMsgId = latestHot[latestHot.length - 1]?.id;
+      if (
+        latestState.compactedUntilTs !== state.compactedUntilTs ||
+        latestLastHotMsgId !== snapshotLastHotMsgId
+      ) {
         return false;
       }
-
-      const draftSummary = await this.hooks.summarizeBlock({
-        canonicalUserId,
-        previousSummary: state.summaryText,
-        messagesToSummarize: sliceToCompact,
-      });
 
       this.repo.saveDraftCompaction({
         canonicalUserId,
@@ -324,19 +345,16 @@ export class CompactionManager {
   }
 
   private async commitSlice(canonicalUserId: string, minTriggerLength: number): Promise<boolean> {
-    return this.actorLock.run(canonicalUserId, async () => {
+    const committedSlice = await this.actorLock.run(canonicalUserId, async () => {
       const state = this.repo.getWorkingMemory(canonicalUserId);
       const hot = this.repo.getHotMessages(canonicalUserId, state.compactedUntilTs);
-      if (hot.length < minTriggerLength) return false;
+      if (hot.length < minTriggerLength) return null;
 
       const keepCount = Math.min(this.config.hotMessagesKeepAfterCompact, Math.max(1, hot.length - 1));
       const sliceToCompact = hot.slice(0, hot.length - keepCount);
-      if (sliceToCompact.length === 0) return false;
+      if (sliceToCompact.length === 0) return null;
 
       const lastCompactMsg = sliceToCompact[sliceToCompact.length - 1]!;
-      if (this.hooks.ensureRetained) {
-        await this.hooks.ensureRetained(canonicalUserId, sliceToCompact);
-      }
 
       let summaryText: string;
       if (state.draftSummary && state.draftUntilMsgId === lastCompactMsg.id) {
@@ -355,8 +373,17 @@ export class CompactionManager {
         compactedUntilMsgId: lastCompactMsg.id,
         compactedUntilTs: lastCompactMsg.createdAt,
       });
-      return true;
+      return sliceToCompact;
     });
+
+    if (!committedSlice) return false;
+
+    if (this.hooks.onCompactionCommitted) {
+      void Promise.resolve(this.hooks.onCompactionCommitted(canonicalUserId, committedSlice)).catch((err) => {
+        logError("COMPACTION", `post-compaction hook failed for ${canonicalUserId}`, err);
+      });
+    }
+    return true;
   }
 
   private clearUserTimers(canonicalUserId: string): void {

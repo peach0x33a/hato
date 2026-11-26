@@ -1,8 +1,7 @@
 import type { ImageContent } from "@earendil-works/pi-ai";
+import type { ChannelName, HomeChannelPlatform, ProactiveChannelOption } from "../config/types.js";
 
-export type ChannelName = "tg" | "qq" | "web";
-export type HomeChannelPlatform = "tg" | "qq";
-export type ProactiveChannelOption = "tg" | "qq" | "last_active";
+export type { ChannelName, HomeChannelPlatform, ProactiveChannelOption };
 
 export interface ChannelCapabilities {
   channel: ChannelName;
