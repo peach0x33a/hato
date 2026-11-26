@@ -703,6 +703,7 @@ hindsight_llm = "faux-provider/faux-persona-1"
 
     let step1UserContent: unknown = null;
     let step2UserContent: unknown = null;
+    let turn2FirstUserContent: unknown = null;
     let turn2UserContent: unknown = null;
 
     faux.setResponses([
@@ -726,7 +727,9 @@ hindsight_llm = "faux-provider/faux-persona-1"
         return fauxAssistantMessage("算好了，是 2");
       },
       (ctx) => {
-        // Next turn after release must pick up the new ticket in <ticket_board>
+        // Next turn must preserve Turn 1's user content byte-for-byte (append-only KV cache)
+        // while Turn 2's own user message picks up the new ticket in <ticket_board>
+        turn2FirstUserContent = ctx.messages[0]?.content;
         const lastUser = [...ctx.messages].reverse().find((m) => m.role === "user");
         turn2UserContent = lastUser?.content;
         return fauxAssistantMessage("好的");
@@ -761,6 +764,7 @@ hindsight_llm = "faux-provider/faux-persona-1"
       lastTimestampMs: Date.now() + 100,
     });
 
+    assert.deepEqual(turn2FirstUserContent, step1UserContent);
     const turn2Text = JSON.stringify(turn2UserContent);
     assert.ok(turn2Text.includes("新工单-缓存测试"));
   } finally {

@@ -14,6 +14,7 @@ export interface HatoUserBatchMessage {
   text: string;
   images: ImageContent[];
   replyToSummary?: string;
+  ephemeralTail?: string;
   timestamp: number;
 }
 
@@ -354,6 +355,15 @@ export function convertHatoMessagesToLlm(
       );
       for (const img of msg.images) {
         pushOrMergeUserPart(out, userLastPartKind, img, "user", msg.timestamp);
+      }
+      if (msg.ephemeralTail) {
+        pushOrMergeUserPart(
+          out,
+          userLastPartKind,
+          { type: "text", text: msg.ephemeralTail },
+          "ephemeral",
+          msg.timestamp,
+        );
       }
       trackAnchor(msg, idx);
       prevConvTimestamp = msg.timestamp;

@@ -244,3 +244,54 @@ test("convertHatoMessagesToLlm merges same-kind user parts, splits cross-kind pa
   });
   assert.ok(Array.isArray(foldedWithImage[0]!.content));
 });
+
+test("convertHatoMessagesToLlm renders pinned HatoUserBatchMessage.ephemeralTail append-only", () => {
+  const t0 = Date.parse("2026-11-21T02:00:00Z");
+  const pinnedMessages = [
+    {
+      role: "hato_user_batch" as const,
+      id: "u1",
+      channel: "qq" as const,
+      text: "第一轮问题",
+      images: [],
+      ephemeralTail: "<time>\n现在: 2026-11-21 10:00\n</time>",
+      timestamp: t0,
+    },
+    {
+      role: "hato_persona_turn" as const,
+      id: "a1",
+      channel: "qq" as const,
+      text: "第一轮回答",
+      timestamp: t0 + 1000,
+    },
+    {
+      role: "hato_user_batch" as const,
+      id: "u2",
+      channel: "qq" as const,
+      text: "第二轮追问",
+      images: [],
+      ephemeralTail: "<time>\n现在: 2026-11-21 10:05\n</time>",
+      timestamp: t0 + 5 * 60_000,
+    },
+  ];
+
+  const structured = convertHatoMessagesToLlm(pinnedMessages, {
+    getTimezone: () => "Asia/Shanghai",
+    gapMarkerThresholdMinutes: 120,
+    modelApi: "anthropic-messages",
+  });
+  assert.equal(structured.length, 3);
+  const u1Parts = structured[0]!.content as Array<{ type: string; text?: string }>;
+  assert.equal(u1Parts.length, 2);
+  assert.equal(u1Parts[1]!.text, "<time>\n现在: 2026-11-21 10:00\n</time>");
+
+  const folded = convertHatoMessagesToLlm(pinnedMessages, {
+    getTimezone: () => "Asia/Shanghai",
+    gapMarkerThresholdMinutes: 120,
+    modelApi: "openai-completions",
+  });
+  assert.equal(typeof folded[0]!.content, "string");
+  assert.ok((folded[0]!.content as string).endsWith("<time>\n现在: 2026-11-21 10:00\n</time>"));
+  assert.equal(typeof folded[2]!.content, "string");
+  assert.ok((folded[2]!.content as string).endsWith("<time>\n现在: 2026-11-21 10:05\n</time>"));
+});

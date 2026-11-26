@@ -135,6 +135,8 @@ export class PersonaRuntime {
   private activeRetryNoticeHook: ((notice: LlmRetryNotice) => Promise<void>) | null = null;
   private activeTurnRecalledMemories: MemoryRecallItem[] = [];
   private activeTurnRecalledIds = new Set<string>();
+  private readonly sessionInjectedMemoryIds = new Set<string>();
+  private activeTurnTailPinnedOnMessage = false;
   private activeTurn: ActivePersonaTurnState | null = null;
   private activeTurnEphemeralTail: {
     tailText: string;
@@ -366,6 +368,9 @@ export class PersonaRuntime {
         );
       },
       transformContext: async (messages) => {
+        if (this.activeTurnTailPinnedOnMessage) {
+          return messages;
+        }
         const frozen = this.activeTurnEphemeralTail;
         if (frozen) {
           return [
@@ -703,6 +708,7 @@ export class PersonaRuntime {
     this.syncedCompactedUntilTs = this.repo.getWorkingMemory(canonicalUserId).compactedUntilTs;
     this.pendingTranscriptRefresh = false;
     this.lastCompletedEphemeralTail = null;
+    this.sessionInjectedMemoryIds.clear();
   }
 
   private syncTranscriptIfDrifted(canonicalUserId: string): void {
@@ -1138,6 +1144,7 @@ export class PersonaRuntime {
   resetSession(): void {
     this.lastTimeCardSnapshot = "";
     this.lastCompletedEphemeralTail = null;
+    this.sessionInjectedMemoryIds.clear();
     this.pendingSupersededImages.clear();
     this.agent.clearAllQueues();
     this.agent.state.tools = this.allTools;
@@ -1409,10 +1416,16 @@ export class PersonaRuntime {
         if (!recallRes.ok && recallRes.errorCode) {
           logWarn("MEMORY", `auto recall denied (${recallRes.errorCode}): ${recallRes.errorMessage ?? ""}`);
         } else if (recallRes.items.length > 0) {
-          this.activeTurnRecalledMemories = recallRes.items;
+          const freshItems: MemoryRecallItem[] = [];
           for (const item of recallRes.items) {
-            this.activeTurnRecalledIds.add(`${item.bank}:${item.id}`);
+            const key = `${item.bank}:${item.id}`;
+            this.activeTurnRecalledIds.add(key);
+            if (!this.sessionInjectedMemoryIds.has(key)) {
+              this.sessionInjectedMemoryIds.add(key);
+              freshItems.push(item);
+            }
           }
+          this.activeTurnRecalledMemories = freshItems;
         }
       } catch (err) {
         logWarn(
@@ -1454,12 +1467,18 @@ export class PersonaRuntime {
       recalledMemories: this.activeTurnRecalledMemories,
     });
     this.lastTimeCardSnapshot = frozenEphemeral.tailText;
-    this.activeTurnEphemeralTail = {
-      tailText: frozenEphemeral.tailText,
-      timeCardText: frozenEphemeral.tailText,
-      timestamp: frozenNowMs,
-      anchorMessageId: userAgentMsg.role === "hato_user_batch" ? userAgentMsg.id : undefined,
-    };
+    if (userAgentMsg.role === "hato_user_batch") {
+      userAgentMsg.ephemeralTail = frozenEphemeral.tailText;
+      this.activeTurnTailPinnedOnMessage = true;
+      this.activeTurnEphemeralTail = null;
+    } else {
+      this.activeTurnTailPinnedOnMessage = false;
+      this.activeTurnEphemeralTail = {
+        tailText: frozenEphemeral.tailText,
+        timeCardText: frozenEphemeral.tailText,
+        timestamp: frozenNowMs,
+      };
+    }
 
     let promptErr: unknown = null;
     try {
@@ -1475,6 +1494,7 @@ export class PersonaRuntime {
       promptErr = err;
     } finally {
       turnState.promptSettled = true;
+      this.activeTurnTailPinnedOnMessage = false;
       this.activeBeforeToolHook = null;
       this.activeRetryNoticeHook = null;
       this.activePhotoSender = null;
@@ -1821,25 +1841,26 @@ export class PersonaRuntime {
       quietHours: this.hatoConfig.owner.quiet_hours,
     });
     this.lastTimeCardSnapshot = frozenEphemeral.tailText;
-    this.activeTurnEphemeralTail = {
-      tailText: frozenEphemeral.tailText,
-      timeCardText: frozenEphemeral.tailText,
-      timestamp: frozenNowMs,
-      anchorAgentIndex: startIndex,
-    };
+    this.activeTurnTailPinnedOnMessage = true;
+    this.activeTurnEphemeralTail = null;
 
     let promptErr: unknown = null;
     try {
       const attachedImages = params.images?.slice(0, 4) ?? [];
-      if (attachedImages.length > 0) {
-        await this.agent.prompt(params.promptInstruction, attachedImages);
-      } else {
-        await this.agent.prompt(params.promptInstruction);
-      }
+      await this.agent.prompt({
+        role: "user",
+        content: [
+          { type: "text", text: params.promptInstruction },
+          ...attachedImages,
+          { type: "text", text: frozenEphemeral.tailText },
+        ],
+        timestamp: frozenNowMs,
+      });
     } catch (err) {
       promptErr = err;
     } finally {
       telemetry.unsubscribe();
+      this.activeTurnTailPinnedOnMessage = false;
       this.activeCallStartPerf = null;
       if (!promptErr && !this.agent.state.errorMessage && this.activeTurnEphemeralTail) {
         this.lastCompletedEphemeralTail = this.activeTurnEphemeralTail;
