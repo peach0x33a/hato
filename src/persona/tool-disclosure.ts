@@ -149,7 +149,7 @@ export function selectToolsForTurn(params: {
     hasPersonalSkills: params.hasPersonalSkills,
   };
 
-  const unlockedToolNames = new Set<string>([ACTIVATE_TOOLS_NAME]);
+  const unlockedToolNames = new Set<string>([ACTIVATE_TOOLS_NAME, "cancel_ticket"]);
   if (params.previouslyActivated) {
     for (const name of params.previouslyActivated) {
       unlockedToolNames.add(name);

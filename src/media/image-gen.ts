@@ -20,6 +20,7 @@ export interface OpenAiImageGenParams {
   timeoutMs?: number;
   maxRetries?: number;
   sleepFn?: (ms: number) => Promise<void>;
+  signal?: AbortSignal;
 }
 
 export interface GeneratedImageFile {
@@ -176,6 +177,9 @@ export async function generateOpenAiImage(
       });
     }
 
+    const requestSignal = params.signal
+      ? AbortSignal.any([AbortSignal.timeout(timeoutMs), params.signal])
+      : AbortSignal.timeout(timeoutMs);
     const res = await params.proxyRouter.runWithScope(scope, () =>
       params.proxyRouter.scopedFetch(
         endpoint,
@@ -183,7 +187,7 @@ export async function generateOpenAiImage(
           method: "POST",
           headers,
           body: reqBody,
-          signal: AbortSignal.timeout(timeoutMs),
+          signal: requestSignal,
         },
         scope,
       ),
@@ -199,6 +203,11 @@ export async function generateOpenAiImage(
     let res!: Response;
     let raw = "";
     for (let attempt = 0; ; attempt++) {
+      if (params.signal?.aborted) {
+        throw params.signal.reason instanceof Error
+          ? params.signal.reason
+          : new Error("Image generation aborted");
+      }
       try {
         ({ res, raw } = await callApi(true));
         if (!res.ok && res.status === 400 && /response_format/i.test(raw)) {
@@ -208,7 +217,7 @@ export async function generateOpenAiImage(
           break;
         }
       } catch (err) {
-        if (!isTransientImageNetworkError(err) || attempt >= maxRetries) {
+        if (params.signal?.aborted || !isTransientImageNetworkError(err) || attempt >= maxRetries) {
           throw err;
         }
       }
@@ -216,6 +225,15 @@ export async function generateOpenAiImage(
     }
 
     if (!res.ok) {
+      if (isEdit && refPaths.length > 1 && res.status === 400 && /duplicate parameter.*image/i.test(raw)) {
+        return {
+          ok: false,
+          providerSlug: params.providerSlug,
+          model,
+          files: [],
+          error: `Model ${model} only supports a single reference image (received ${refPaths.length} reference_image_paths). Combine into a single reference image or switch to a model that supports multi-image editing.`,
+        };
+      }
       return {
         ok: false,
         providerSlug: params.providerSlug,

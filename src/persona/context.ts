@@ -161,8 +161,24 @@ export function rawRecordToAgentMessage(row: RawMessageRecord, repo?: HatoReposi
   if (row.replyToId && repo) {
     const referenced = repo.findMessageByPlatformId(row.channel, row.replyToId);
     if (referenced) {
-      const preview = referenced.content.replace(/\s+/g, " ").slice(0, 140);
-      replyToSummary = `[引用 ${referenced.role === "assistant" ? "你的话" : "用户原话"}: "${preview}"]`;
+      const who = referenced.role === "assistant" ? "your message" : "user";
+      const preview = referenced.content.replace(/\s+/g, " ").trim().slice(0, 140);
+      const refAtts = referenced.attachments
+        .map((att) => {
+          const pathSuffix = att.localPath ? ` (path: ${att.localPath})` : "";
+          if (att.summary) {
+            return `[Attachment ${att.kind}: ${att.summary}${pathSuffix}]`;
+          }
+          return `[Attachment ${att.kind}${att.filename ? `: ${att.filename}` : ""}${pathSuffix}]`;
+        })
+        .join(" ");
+      if (preview && refAtts) {
+        replyToSummary = `[Reply to ${who}: "${preview}" ${refAtts}]`;
+      } else if (refAtts) {
+        replyToSummary = `[Reply to ${who}: ${refAtts}]`;
+      } else {
+        replyToSummary = `[Reply to ${who}: "${preview}"]`;
+      }
     }
   }
 
@@ -170,9 +186,9 @@ export function rawRecordToAgentMessage(row: RawMessageRecord, repo?: HatoReposi
     .map((att) => {
       const pathSuffix = att.localPath ? ` (path: ${att.localPath})` : "";
       if (att.summary) {
-        return `[附件 ${att.kind}: ${att.summary}${pathSuffix}]`;
+        return `[Attachment ${att.kind}: ${att.summary}${pathSuffix}]`;
       }
-      return `[附件 ${att.kind}${att.filename ? `: ${att.filename}` : ""}${pathSuffix}]`;
+      return `[Attachment ${att.kind}${att.filename ? `: ${att.filename}` : ""}${pathSuffix}]`;
     })
     .join("\n");
 
@@ -226,7 +242,7 @@ export function buildEphemeralContextBlock(input: EphemeralTailBuilderInput): {
     .listOpenLoops(input.canonicalUserId, 10)
     .filter((l) => l.status === "pending" && l.dueAt <= input.nowMs);
   if (loops.length > 0) {
-    sections.push(`<open_loops>\n${loops.map((l) => `- 将跟进: ${l.content}`).join("\n")}\n</open_loops>`);
+    sections.push(`<open_loops>\n${loops.map((l) => `- Follow up: ${l.content}`).join("\n")}\n</open_loops>`);
   }
 
   const activeTickets = input.repo
@@ -306,7 +322,7 @@ export function convertHatoMessagesToLlm(
         userLastPartKind,
         {
           type: "text",
-          text: `[前情对话滚动摘要（截至 ${formatLocalDateTime(msg.compactedUntilTs, tz).compactStamp}）]\n${msg.text}`,
+          text: `[Rolling Summary (through ${formatLocalDateTime(msg.compactedUntilTs, tz).compactStamp})]\n${msg.text}`,
         },
         "summary",
         msg.timestamp,
@@ -327,7 +343,7 @@ export function convertHatoMessagesToLlm(
         userLastPartKind,
         {
           type: "text",
-          text: `${prefix}[事件 ${stamp} 已执行] ${msg.text}`,
+          text: `${prefix}[Executed Event ${stamp}] ${msg.text}`,
         },
         "event",
         msg.timestamp,
@@ -343,7 +359,7 @@ export function convertHatoMessagesToLlm(
           ? formatGapMarker(prevConvTimestamp, msg.timestamp, opts.gapMarkerThresholdMinutes)
           : null;
       const stamp = formatLocalDateTime(msg.timestamp, tz).compactStamp;
-      const channelTag = prevChannel && prevChannel !== msg.channel ? ` [来自 ${msg.channel.toUpperCase()}]` : "";
+      const channelTag = prevChannel && prevChannel !== msg.channel ? ` [via ${msg.channel.toUpperCase()}]` : "";
       const prefix = gap ? `${gap}\n[${stamp}]${channelTag} ` : `[${stamp}]${channelTag} `;
 
       pushOrMergeUserPart(

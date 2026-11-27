@@ -47,12 +47,48 @@ export interface ImageGenJobInput {
  */
 export class ImageGenJobRunner {
   private readonly pendingRuns = new Set<Promise<void>>();
+  private readonly activeControllers = new Map<string, AbortController>();
 
   constructor(private readonly deps: ImageGenJobRunnerDeps) {}
 
   async drainPending(): Promise<void> {
     if (this.pendingRuns.size === 0) return;
     await Promise.allSettled([...this.pendingRuns]);
+  }
+
+  async abortTicket(ticketId: string): Promise<string> {
+    const row = this.deps.repo.getTicket(ticketId);
+    if (!row) {
+      return `未找到生图工单 ${ticketId}`;
+    }
+    if (row.status === "done" || row.status === "failed" || row.status === "cancelled") {
+      return `生图工单 ${ticketId} 已结束（${row.status}）。`;
+    }
+    const controller = this.activeControllers.get(ticketId);
+    if (controller) {
+      controller.abort(new Error("Image generation cancelled by user"));
+    }
+    this.deps.repo.updateTicket(ticketId, {
+      status: "cancelled",
+      progressNote: "已手动中止生图任务",
+    });
+    this.emitLiveMeta(ticketId);
+    return `已中止生图工单 ${ticketId}`;
+  }
+
+  async abortActiveForUser(
+    canonicalUserId: string,
+  ): Promise<Array<{ id: string; briefTitle: string }>> {
+    const activeIds = [...this.activeControllers.keys()];
+    const stopped: Array<{ id: string; briefTitle: string }> = [];
+    for (const ticketId of activeIds) {
+      const row = this.deps.repo.getTicket(ticketId);
+      if (!row || row.canonicalUserId !== canonicalUserId) continue;
+      if (row.status === "done" || row.status === "failed" || row.status === "cancelled") continue;
+      await this.abortTicket(ticketId);
+      stopped.push({ id: row.id, briefTitle: row.briefTitle });
+    }
+    return stopped;
   }
 
   enqueue(params: ImageGenJobInput): { ticketId: string; status: "running" } {
@@ -143,6 +179,9 @@ export class ImageGenJobRunner {
       toolCalls: ["image_gen"],
     });
 
+    const controller = new AbortController();
+    this.activeControllers.set(ticketId, controller);
+
     let result: WorkerResult;
     try {
       if (!provider) {
@@ -172,6 +211,7 @@ export class ImageGenJobRunner {
             baseUrl: provider.baseUrl,
             apiKey,
             proxyRouter,
+            signal: controller.signal,
           });
           if (!gen.ok) {
             result = {
@@ -258,6 +298,7 @@ export class ImageGenJobRunner {
         }
       }
     } finally {
+      this.activeControllers.delete(ticketId);
       this.deps.liveTraceTracker?.finish(liveTraceId);
     }
 

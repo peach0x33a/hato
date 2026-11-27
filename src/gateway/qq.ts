@@ -413,8 +413,9 @@ export class QqAdapter implements ChannelAdapter {
     bubbles: string[],
     delayRangeMs: [number, number],
     replyToPlatformMsgId?: string,
-  ): Promise<void> {
+  ): Promise<string[]> {
     const filtered = bubbles.filter((b) => b.trim());
+    const sentIds: string[] = [];
     for (let i = 0; i < filtered.length; i++) {
       if (i > 0) {
         const [minMs, maxMs] = delayRangeMs;
@@ -424,8 +425,14 @@ export class QqAdapter implements ChannelAdapter {
           await new Promise((r) => setTimeout(r, delayMs));
         }
       }
-      await this.sendText(platformUserId, filtered[i]!, i === 0 ? replyToPlatformMsgId : undefined);
+      const msgId = await this.sendText(
+        platformUserId,
+        filtered[i]!,
+        i === 0 ? replyToPlatformMsgId : undefined,
+      );
+      if (msgId) sentIds.push(msgId);
     }
+    return sentIds;
   }
 
   async sendPhoto(platformUserId: string, photo: Buffer | string, caption?: string): Promise<void> {
@@ -819,9 +826,6 @@ export class QqAdapter implements ChannelAdapter {
     }
 
     const effectiveTextParts: string[] = [];
-    if (evt.message_reference?.message_id) {
-      effectiveTextParts.push(`[引用消息: ${evt.message_reference.message_id}]`);
-    }
     if (text && !parsedContentForward) {
       const cleaned = cleanQqFaceTags(text).trim();
       if (cleaned) {
@@ -852,6 +856,7 @@ export class QqAdapter implements ChannelAdapter {
       platformUserId: userOpenId,
       platformMsgId: evt.id,
       canonicalUserId: this.config.owner.canonical_user_id,
+      replyToPlatformMsgId: evt.message_reference?.message_id || undefined,
       text: effectiveText,
       attachments,
       images: images.length > 0 ? images : undefined,

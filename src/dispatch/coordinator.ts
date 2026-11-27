@@ -97,6 +97,24 @@ export class TicketCoordinator {
     return `已中止工单 ${ticketId}`;
   }
 
+  async abortActiveForUser(
+    canonicalUserId: string,
+  ): Promise<Array<{ id: string; briefTitle: string }>> {
+    const rows = this.deps.repo.listTickets(canonicalUserId, 50);
+    const active = rows.filter(
+      (r) =>
+        r.status === "routing" ||
+        r.status === "running" ||
+        r.status === "waiting_user_confirm",
+    );
+    const stopped: Array<{ id: string; briefTitle: string }> = [];
+    for (const row of active) {
+      await this.abortTicket(row.id);
+      stopped.push({ id: row.id, briefTitle: row.briefTitle });
+    }
+    return stopped;
+  }
+
   enqueueDelegation(params: {
     canonicalUserId: string;
     originChannel: ChannelName;

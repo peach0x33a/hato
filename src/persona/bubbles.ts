@@ -85,6 +85,10 @@ function buildDelimiterRegex(token: string): RegExp {
   if (MARKDOWN_RULE_DELIMITER.test(token)) {
     return new RegExp(`(?:^|\\r?\\n)[ \\t]*${escapeRegExp(token)}[ \\t]*(?=\\r?\\n|$)`, "g");
   }
+  const bracketed = /^\[([^\]]+)\]$/.exec(token);
+  if (bracketed) {
+    return new RegExp(`\\[\\s*${escapeRegExp(bracketed[1]!.trim())}\\s*\\]`, "g");
+  }
   return new RegExp(escapeRegExp(token), "g");
 }
 

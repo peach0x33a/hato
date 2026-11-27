@@ -213,6 +213,8 @@ export interface HatoConfig {
     proxies?: ProxyRuleConfig[];
   };
   web?: {
+    max_tool_calls_per_turn?: number;
+    max_consecutive_failures?: number;
     search?: {
       enabled: boolean;
       provider: "tavily";
@@ -277,7 +279,7 @@ export interface HatoConfig {
     min_messages_to_compact: number;
     pre_compact_after_minutes: number;
     idle_commit_after_minutes: number;
-    clear_mode?: "cache" | "scheduled";
+    clear_mode?: "cache" | "scheduled" | "idle";
     compaction_mode?: "curator" | "reuse_conversation";
     scheduled_clear_time?: string;
     scheduled_defer_minutes?: number;

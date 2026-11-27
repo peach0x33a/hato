@@ -307,8 +307,50 @@ async function main(): Promise<void> {
   if (recoveredTickets > 0) {
     logWarn("DISPATCH", `recovered ${recoveredTickets} stale in-flight ticket(s) from previous run`);
   }
+  const stopTickets = async (
+    canonicalUserId: string,
+    ticketId?: string,
+  ): Promise<{ stopped: Array<{ id: string; briefTitle: string }>; message: string }> => {
+    if (ticketId) {
+      const row = repo.getTicket(ticketId);
+      if (!row) {
+        return { stopped: [], message: `未找到工单 ${ticketId}` };
+      }
+      if (row.status === "done" || row.status === "failed" || row.status === "cancelled") {
+        return { stopped: [], message: `工单 ${ticketId} 已结束（${row.status}）。` };
+      }
+      const imgAbort = await imageGenRunner.abortTicket(ticketId);
+      const msg = imgAbort.startsWith("已中止")
+        ? imgAbort
+        : await ticketCoordinator.abortTicket(ticketId);
+      return {
+        stopped: [{ id: row.id, briefTitle: row.briefTitle }],
+        message: msg,
+      };
+    }
+    const [imgStopped, coordStopped] = await Promise.all([
+      imageGenRunner.abortActiveForUser(canonicalUserId),
+      ticketCoordinator.abortActiveForUser(canonicalUserId),
+    ]);
+    const abortedPersonaTurn = personaRuntime.abortActiveTurn(canonicalUserId);
+    const dedup = new Map<string, { id: string; briefTitle: string }>();
+    for (const item of [...imgStopped, ...coordStopped]) {
+      dedup.set(item.id, item);
+    }
+    if (abortedPersonaTurn) {
+      dedup.set("persona_turn", { id: "persona_turn", briefTitle: "当前主脑回复/工具调用" });
+    }
+    const stopped = [...dedup.values()];
+    const message =
+      stopped.length === 0
+        ? "当前没有运行中的后台任务。"
+        : `已停止 ${stopped.length} 个后台任务：${stopped.map((t) => `${t.id} (${t.briefTitle})`).join("、")}`;
+    return { stopped, message };
+  };
+
   personaRuntime.setDelegateHandler((input) => ticketCoordinator.enqueueDelegation(input));
   personaRuntime.setImageGenHandler((input) => imageGenRunner.enqueue(input));
+  personaRuntime.setStopTicketsHandler(stopTickets);
   personaRuntime.setSensitiveFileConfirmHandler((input) =>
     confirmationService.requestConfirm({
       canonicalUserId: input.canonicalUserId,
@@ -904,6 +946,7 @@ async function main(): Promise<void> {
       memoryCurator.retainPending(uid, { includeDeniedRetries: opts?.includeDenied ?? true }),
     forgetMemory: (uid: string, query: string) => memoryCurator.forgetByQuery(uid, query),
     notebookService,
+    stopTickets,
     ...(platformInfo?.channel === "tg" || platformInfo?.channel === "qq"
       ? {
           setHomeChannel: async () => {
@@ -1026,6 +1069,7 @@ async function main(): Promise<void> {
 
       let bubblesToSend: string[];
       let superseded = false;
+      const earlySentIds: string[] = [];
       try {
         const output = await personaRuntime.handleUserBatch(mergedBatch, mergedBatch.images ?? [], {
           sendPhotoToUser: adapter.sendPhoto
@@ -1035,11 +1079,14 @@ async function main(): Promise<void> {
           sendBubblesToUser: async (earlyBubbles) => {
             const safeEarly = earlyBubbles.filter((b) => b.trim() && !isNoReplyOutput(b));
             if (safeEarly.length === 0 || hasNewerQueuedInput()) return;
-            await adapter.sendBubbles(
+            const ids = await adapter.sendBubbles(
               targetId,
               safeEarly,
               hatoConfig.gateway.bubbles.delay_ms_range,
             );
+            if (Array.isArray(ids)) {
+              earlySentIds.push(...ids);
+            }
             await adapter.sendTyping?.(targetId).catch(() => undefined);
           },
           onRetryNotice: async (noticeText) => {
@@ -1065,12 +1112,20 @@ async function main(): Promise<void> {
 
       try {
         const outboundBubbles = bubblesToSend.filter((b) => b.trim() && !isNoReplyOutput(b));
+        let trailingSentIds: string[] = [];
         if (outboundBubbles.length > 0) {
-          await adapter.sendBubbles(
+          const sentIds = await adapter.sendBubbles(
             targetId,
             outboundBubbles,
             hatoConfig.gateway.bubbles.delay_ms_range,
           );
+          if (Array.isArray(sentIds)) {
+            trailingSentIds = sentIds;
+          }
+        }
+        const allSentIds = [...earlySentIds, ...trailingSentIds];
+        if (allSentIds.length > 0) {
+          repo.updateLatestAssistantPlatformMsgId(uid, mergedBatch.originChannel, allSentIds);
         }
         compactionManager.recordInteraction(uid);
         memoryCurator.recordInteraction(uid);
@@ -1200,14 +1255,18 @@ async function main(): Promise<void> {
       }
       const outboundBubbles = bubbles.filter((b) => b.trim() && !isNoReplyOutput(b));
       if (outbound && outboundBubbles.length > 0) {
-        await outbound.adapter
+        const sentIds = await outbound.adapter
           .sendBubbles(outbound.targetId, outboundBubbles, hatoConfig.gateway.bubbles.delay_ms_range)
           .catch((err) => {
             logWarn(
               outbound.channel.toUpperCase(),
               `failed to send ticket_result narration bubbles: ${summarizeError(err)}`,
             );
+            return undefined;
           });
+        if (Array.isArray(sentIds) && sentIds.length > 0) {
+          repo.updateLatestAssistantPlatformMsgId(canonicalUserId, outbound.channel, sentIds);
+        }
       }
 
       // Wall 3: only send failure diagnostics or explicit code/diff blocks unprompted;
@@ -1277,11 +1336,14 @@ async function main(): Promise<void> {
       });
       const outboundBubbles = bubbles.filter((b) => b.trim() && !isNoReplyOutput(b));
       if (outbound && outboundBubbles.length > 0) {
-        await outbound.adapter.sendBubbles(
+        const sentIds = await outbound.adapter.sendBubbles(
           outbound.targetId,
           outboundBubbles,
           hatoConfig.gateway.bubbles.delay_ms_range,
         );
+        if (Array.isArray(sentIds) && sentIds.length > 0) {
+          repo.updateLatestAssistantPlatformMsgId(canonicalUserId, outbound.channel, sentIds);
+        }
       }
     });
   });
@@ -1762,11 +1824,14 @@ async function main(): Promise<void> {
       if (nonEmpty.length === 0) {
         return "no_reply";
       }
-      await outbound.adapter.sendBubbles(
+      const sentIds = await outbound.adapter.sendBubbles(
         outbound.targetId,
         nonEmpty,
         hatoConfig.gateway.bubbles.delay_ms_range,
       );
+      if (Array.isArray(sentIds) && sentIds.length > 0) {
+        repo.updateLatestAssistantPlatformMsgId(canonicalUserId, outbound.channel, sentIds);
+      }
       return "sent";
     },
   });
@@ -1788,10 +1853,22 @@ async function main(): Promise<void> {
           ? stdoutTail.trim()
           : `退出码=${exitCode}\n${(stderrTail || stdoutTail).trim()}`;
       if (!body) return;
-      await outbound.adapter.sendText(
-        outbound.targetId,
-        `[定时脚本: ${name}] ${exitCode === 0 ? "执行输出" : "执行异常"}\n${body}`,
-      );
+      const deliveredText = `[定时脚本: ${name}] ${exitCode === 0 ? "执行输出" : "执行异常"}\n${body}`;
+      const sentMsgId = await outbound.adapter.sendText(outbound.targetId, deliveredText);
+      const maxContextChars = 2000;
+      const persistedContent =
+        deliveredText.length > maxContextChars
+          ? `${deliveredText.slice(0, maxContextChars)}…(truncated)`
+          : deliveredText;
+      repo.appendRawMessage({
+        canonicalUserId: hatoConfig.owner.canonical_user_id,
+        channel: outbound.channel,
+        platformMsgId: sentMsgId ?? null,
+        role: "executed_event",
+        content: persistedContent,
+        createdAt: Date.now(),
+      });
+      personaRuntime.refreshTranscriptFromDb();
     },
   });
   scriptScheduler.start(15_000);

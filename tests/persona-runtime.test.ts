@@ -149,7 +149,7 @@ hindsight_llm = "faux-provider/faux-persona-1"
       (ctx) => {
         newTurnRoles = ctx.messages.map((m) => m.role);
         sawOldMessage = ctx.messages.some(
-          (m) => typeof m.content === "string" && (m.content.includes("356 * 24") || m.content.includes("前情对话滚动摘要")),
+          (m) => typeof m.content === "string" && (m.content.includes("356 * 24") || m.content.includes("Rolling Summary")),
         );
         return fauxAssistantMessage("开启全新对话啦");
       },
@@ -859,7 +859,7 @@ curator = "minimal"
     });
 
     assert.equal(summary, "用户要求明早八点开会提醒，助手已确认记录。");
-    assert.ok(capturedSystemPrompt.includes("上下文整理助手"));
+    assert.ok(capturedSystemPrompt.includes("context compaction assistant"));
     assert.ok(!capturedSystemPrompt.includes(personaMarker));
 
     const trace = repo.getLatestTurnTrace("owner");
@@ -956,7 +956,7 @@ curator = "minimal"
       },
       (ctx) => {
         nextTurnSawCompactionInstruction = JSON.stringify(ctx.messages).includes(
-          "上下文压缩（禁止调用任何工具",
+          "Context Compaction (NO tools allowed",
         );
         return fauxAssistantMessage("在的呀");
       },

@@ -298,16 +298,23 @@ export class TelegramAdapter implements ChannelAdapter {
     bubbles: string[],
     delayRangeMs: [number, number],
     replyToPlatformMsgId?: string,
-  ): Promise<void> {
+  ): Promise<string[]> {
     const filtered = bubbles.filter((b) => b.trim());
+    const sentIds: string[] = [];
     for (let i = 0; i < filtered.length; i++) {
       const bubble = filtered[i]!;
       if (i > 0) {
         await this.sendTyping(platformUserId).catch(() => undefined);
         await sleep(randomInt(delayRangeMs[0], delayRangeMs[1]));
       }
-      await this.sendText(platformUserId, bubble, i === 0 ? replyToPlatformMsgId : undefined);
+      const msgId = await this.sendText(
+        platformUserId,
+        bubble,
+        i === 0 ? replyToPlatformMsgId : undefined,
+      );
+      if (msgId) sentIds.push(msgId);
     }
+    return sentIds;
   }
 
   async sendFile(platformUserId: string, localPath: string, filename: string, caption?: string): Promise<void> {

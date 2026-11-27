@@ -70,8 +70,8 @@ test("hydrateTranscriptFromDb and convertHatoMessagesToLlm maintain prefix stabi
     const parts = llmMessages[2]!.content as Array<{ type: string; text?: string }>;
     assert.equal(parts.length, 3);
     assert.ok(parts[0]!.text!.includes("—— 2 天 12 小时后 ——"));
-    assert.ok(parts[0]!.text!.includes("[事件 11-16 11:25 已执行] 每日 RSS 推送"));
-    assert.equal(parts[1]!.text, "[11-16 11:35] [来自 QQ] 在吗");
+    assert.ok(parts[0]!.text!.includes("[Executed Event 11-16 11:25] 每日 RSS 推送"));
+    assert.equal(parts[1]!.text, "[11-16 11:35] [via QQ] 在吗");
     assert.equal(parts[2]!.text, "<time>\n现在: 2026-11-16\n</time>");
   } finally {
     handle.close();
@@ -102,7 +102,7 @@ test("rawRecordToAgentMessage exposes attachment localPath to Persona context", 
   if (agentMsg.role === "hato_user_batch") {
     assert.ok(
       agentMsg.text.includes(
-        "[附件 file: 07_服装02_居家休闲.png (path: /mnt/hato-data/media/inbound/1795251376602_f80c53.png)]",
+        "[Attachment file: 07_服装02_居家休闲.png (path: /mnt/hato-data/media/inbound/1795251376602_f80c53.png)]",
       ),
     );
   }

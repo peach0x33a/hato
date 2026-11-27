@@ -120,6 +120,8 @@ export const HatoConfigSchema = Type.Object({
   llm_retry: Type.Optional(LlmRetryPolicySchema),
   web: Type.Optional(
     Type.Object({
+      max_tool_calls_per_turn: Type.Optional(Type.Number({ minimum: 1, maximum: 30 })),
+      max_consecutive_failures: Type.Optional(Type.Number({ minimum: 1, maximum: 10 })),
       search: Type.Optional(TavilySearchConfigSchema),
       fetch: Type.Optional(WebFetchConfigSchema),
       browser: Type.Optional(WebBrowserConfigSchema),
@@ -155,7 +157,9 @@ export const HatoConfigSchema = Type.Object({
     min_messages_to_compact: Type.Number({ minimum: 2 }),
     pre_compact_after_minutes: Type.Number({ minimum: 1 }),
     idle_commit_after_minutes: Type.Number({ minimum: 1 }),
-    clear_mode: Type.Optional(Type.Union([Type.Literal("cache"), Type.Literal("scheduled")])),
+    clear_mode: Type.Optional(
+      Type.Union([Type.Literal("cache"), Type.Literal("scheduled"), Type.Literal("idle")]),
+    ),
     compaction_mode: Type.Optional(
       Type.Union([Type.Literal("curator"), Type.Literal("reuse_conversation")]),
     ),
@@ -390,6 +394,21 @@ export interface ResolvedWebBrowserConfig {
   novncHint?: string;
 }
 
+export interface ResolvedWebToolLimitsConfig {
+  maxToolCallsPerTurn: number;
+  maxConsecutiveFailures: number;
+}
+
+/**
+ * Resolve effective per-turn web tool call budget and consecutive failure circuit breaker.
+ */
+export function resolveWebToolLimitsConfig(config: HatoConfig): ResolvedWebToolLimitsConfig {
+  return {
+    maxToolCallsPerTurn: config.web?.max_tool_calls_per_turn ?? 6,
+    maxConsecutiveFailures: config.web?.max_consecutive_failures ?? 2,
+  };
+}
+
 /**
  * Resolve effective web_fetch config with safe defaults when [web.fetch] is omitted.
  */
@@ -592,7 +611,7 @@ export function resolveMemoryRecallConfig(config: HatoConfig): ResolvedMemoryRec
 }
 
 export interface ResolvedContextClearConfig {
-  clearMode: "cache" | "scheduled";
+  clearMode: "cache" | "scheduled" | "idle";
   scheduledClearTime: string;
   scheduledDeferMinutes: number;
 }
@@ -605,7 +624,7 @@ export function resolveContextClearConfig(config: HatoConfig): ResolvedContextCl
   const validTime = /^([01]?\d|2[0-3]):([0-5]\d)$/.test(rawTime) ? rawTime : "01:00";
   const [hh, mm] = validTime.split(":");
   return {
-    clearMode: config.context.clear_mode ?? "cache",
+    clearMode: config.context.clear_mode ?? "idle",
     scheduledClearTime: `${hh!.padStart(2, "0")}:${mm!}`,
     scheduledDeferMinutes: Math.max(1, config.context.scheduled_defer_minutes ?? 30),
   };

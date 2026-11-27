@@ -44,6 +44,7 @@ export interface InboundBatch {
   platformMsgIds: string[];
   latestPlatformMsgId: string;
   replyToPlatformMsgId?: string;
+  replyToText?: string;
   combinedText: string;
   attachments: InboundAttachment[];
   images?: ImageContent[];
@@ -69,7 +70,7 @@ export interface ChannelAdapter {
     bubbles: string[],
     delayRangeMs: [number, number],
     replyToPlatformMsgId?: string,
-  ): Promise<void>;
+  ): Promise<string[] | void>;
   sendPhoto?(platformUserId: string, photo: Buffer | string, caption?: string): Promise<void>;
   sendSticker?(
     platformUserId: string,

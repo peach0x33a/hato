@@ -3,7 +3,7 @@ import type { HatoRepository, RawMessageRecord } from "../db/repo.js";
 import { formatLocalDateTime, parseLocalDateTimeToEpochMs } from "../time/clock.js";
 import { logError, logInfo } from "../utils/logger.js";
 
-export type HotZoneClearMode = "cache" | "scheduled";
+export type HotZoneClearMode = "cache" | "scheduled" | "idle";
 
 export interface CompactionConfig {
   hotMessagesHighWatermark: number;
@@ -101,8 +101,9 @@ export class CompactionManager {
    */
   recordInteraction(canonicalUserId: string, nowMs = Date.now()): void {
     this.lastInteractionAt.set(canonicalUserId, nowMs);
+    const mode = this.config.clearMode ?? "idle";
 
-    if ((this.config.clearMode ?? "cache") === "scheduled") {
+    if (mode === "scheduled") {
       if (this.scheduledDeferTimers.has(canonicalUserId)) {
         const deferMs = Math.max(1, this.config.scheduledDeferMinutes ?? 30) * 60_000;
         this.scheduleDeferredClear(canonicalUserId, deferMs);
@@ -111,7 +112,20 @@ export class CompactionManager {
     }
 
     this.clearUserTimers(canonicalUserId);
-    this.repo.invalidateDraftCompaction(canonicalUserId);
+
+    if (mode === "idle") {
+      const idleMs = Math.max(1, this.config.idleCommitAfterMinutes) * 60_000;
+      const commitTimer = setTimeout(() => {
+        void this.runSilentIdleClear(canonicalUserId).catch((err) => {
+          logError("COMPACTION", `silent idle clear failed for ${canonicalUserId}`, err);
+        });
+      }, idleMs);
+      commitTimer.unref();
+      this.timers.set(canonicalUserId, { commitTimer });
+      return;
+    }
+
+    this.repo.invalidateDraftCompaction?.(canonicalUserId);
 
     const resolvedPre = this.hooks.resolvePreCompactAfterMinutes?.();
     const preMinutes =
@@ -190,6 +204,26 @@ export class CompactionManager {
    */
   async runIdleCommit(canonicalUserId: string): Promise<boolean> {
     return this.commitSlice(canonicalUserId, this.config.minMessagesToCompact);
+  }
+
+  /**
+   * Silent idle clear: after `idleCommitAfterMinutes` of inactivity in `idle` mode,
+   * archive and clear the entire hot zone without invoking any LLM summarization request.
+   */
+  async runSilentIdleClear(canonicalUserId: string): Promise<boolean> {
+    const state = this.repo.getWorkingMemory(canonicalUserId);
+    const hot = this.repo.getHotMessages(canonicalUserId, state.compactedUntilTs);
+    if (hot.length === 0 && !state.summaryText.trim()) {
+      return false;
+    }
+    if (this.hooks.clearHotZoneAndArchive) {
+      const ok = await this.hooks.clearHotZoneAndArchive(canonicalUserId);
+      if (ok) {
+        logInfo("COMPACTION", `silent idle clear & archive completed for ${canonicalUserId}`);
+      }
+      return ok;
+    }
+    return false;
   }
 
   /**
@@ -287,21 +321,51 @@ export class CompactionManager {
       this.dailyScheduleTimer = undefined;
     }
 
-    if ((this.config.clearMode ?? "cache") === "scheduled") {
+    const mode = this.config.clearMode ?? "idle";
+    if (mode === "scheduled") {
       for (const key of [...this.timers.keys()]) {
         this.clearUserTimers(key);
       }
       this.scheduleNextDailyClear();
-    } else {
-      for (const key of [...this.scheduledDeferTimers.keys()]) {
-        this.clearDeferredClear(key);
+      return;
+    }
+
+    for (const key of [...this.scheduledDeferTimers.keys()]) {
+      this.clearDeferredClear(key);
+    }
+
+    if (mode === "idle" && !this.disposed) {
+      const nowMs = Date.now();
+      const idleMs = Math.max(1, this.config.idleCommitAfterMinutes) * 60_000;
+      const userIds = new Set<string>(this.lastInteractionAt.keys());
+      for (const uid of this.hooks?.listActiveUserIds?.() ?? []) {
+        if (uid) userIds.add(uid);
+      }
+      for (const uid of userIds) {
+        const state = this.repo.getWorkingMemory(uid);
+        const hot = this.repo.getHotMessages(uid, state.compactedUntilTs);
+        if (hot.length === 0 && !state.summaryText.trim()) continue;
+        const lastAt =
+          this.lastInteractionAt.get(uid) ??
+          this.repo.getLastAnyMessage(uid)?.createdAt ??
+          0;
+        const elapsed = lastAt > 0 ? Math.max(0, nowMs - lastAt) : idleMs;
+        const delayMs = elapsed >= idleMs ? 0 : Math.max(1_000, idleMs - elapsed);
+        this.clearUserTimers(uid);
+        const commitTimer = setTimeout(() => {
+          void this.runSilentIdleClear(uid).catch((err) => {
+            logError("COMPACTION", `startup idle clear failed for ${uid}`, err);
+          });
+        }, delayMs);
+        commitTimer.unref();
+        this.timers.set(uid, { commitTimer });
       }
     }
   }
 
   private scheduleNextDailyClear(nowMs = Date.now()): void {
     if (this.disposed) return;
-    if ((this.config.clearMode ?? "cache") !== "scheduled") return;
+    if ((this.config.clearMode ?? "idle") !== "scheduled") return;
     if (this.dailyScheduleTimer) {
       clearTimeout(this.dailyScheduleTimer);
       this.dailyScheduleTimer = undefined;

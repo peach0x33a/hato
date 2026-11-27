@@ -78,6 +78,8 @@ const ALLOWED_SELF_CONFIG_PATHS = new Set<string>([
   "memory.memoryecho.auto_create_vaults",
   "memory.open_loops.defer_after_chat_minutes",
   "memory.open_loops.max_unanswered_streak",
+  "web.max_tool_calls_per_turn",
+  "web.max_consecutive_failures",
   "web.search.enabled",
   "web.search.max_results",
   "web.search.search_depth",

@@ -24,6 +24,7 @@ import {
   resolvePromptDisabled,
   resolvePromptOrder,
   resolveSkillsDir,
+  resolveWebToolLimitsConfig,
   type HatoConfig,
 } from "../config/app.js";
 import { supportsCustomFetchOption, type ModelRegistry } from "../config/models.js";
@@ -110,10 +111,10 @@ export interface PersonaTurnOutput {
 }
 
 const COMPACTION_SYSTEM_PROMPT = [
-  "你是一个客观的上下文整理助手，负责将历史对话压缩为简洁的滚动过渡摘要。",
-  "- 用第三人称（“用户”“助手”）简洁记录：主要讨论的话题、用户明确提到的事实与时间点、尚未解决的事项。",
-  "- 不要延续角色扮演腔调，不要编造未发生的事情，控制在 350 字以内。",
-  "- 只输出整理后的摘要正文，不要额外寒暄或元解释。",
+  "You are an objective context compaction assistant responsible for compressing conversation history into a concise rolling transition summary.",
+  "- Write in the same language as the conversation, using neutral third-person phrasing (e.g., user / assistant) to record: main topics discussed, explicit user facts/preferences and timestamps, and unresolved items.",
+  "- Do NOT adopt any persona tone, do NOT fabricate unstated events, and keep the summary concise (under 350 Chinese characters or equivalent).",
+  "- Output ONLY the summary body with no greetings or meta-commentary.",
 ].join("\n");
 
 /**
@@ -158,8 +159,22 @@ export class PersonaRuntime {
   private syncedCompactedUntilTs = 0;
   private pendingTranscriptRefresh = false;
   private turnPendingExecutedEvents: RawMessageRecord[] = [];
+  private stopTicketsHandler:
+    | ((
+        canonicalUserId: string,
+        ticketId?: string,
+      ) => Promise<{ stopped: Array<{ id: string; briefTitle: string }>; message: string }>)
+    | null = null;
   private readonly turnDispatchedTicketIds = new Set<string>();
   private turnInspectTicketsCount = 0;
+  private turnWebToolCallCount = 0;
+  private turnConsecutiveWebFailures = 0;
+
+  private resetTurnCounters(): void {
+    this.turnInspectTicketsCount = 0;
+    this.turnWebToolCallCount = 0;
+    this.turnConsecutiveWebFailures = 0;
+  }
   private delegateHandler:
     | ((input: {
         canonicalUserId: string;
@@ -560,6 +575,20 @@ export class PersonaRuntime {
     }
   }
 
+  setStopTicketsHandler(
+    handler:
+      | ((
+          canonicalUserId: string,
+          ticketId?: string,
+        ) => Promise<{ stopped: Array<{ id: string; briefTitle: string }>; message: string }>)
+      | null,
+  ): void {
+    this.stopTicketsHandler = handler;
+    if (!this.activeTurn) {
+      this.syncTools();
+    }
+  }
+
   setStickerHandlers(
     handlers: {
       onSearch: (input: { canonicalUserId: string; query: string; emotion?: string; limit?: number }) => Promise<string>;
@@ -781,20 +810,44 @@ export class PersonaRuntime {
       getMemoryStore: () => this.memoryStore,
       enableReadSkillTool: this.personalSkills.length > 0,
       extraTools: [...(this.mcpPool?.getToolsForZone("personal") ?? [])],
+      onBeforeWebTool: (toolName) => {
+        const limits = resolveWebToolLimitsConfig(this.hatoConfig);
+        if (this.turnConsecutiveWebFailures >= limits.maxConsecutiveFailures) {
+          return `Web tool (${toolName}) has failed ${this.turnConsecutiveWebFailures} consecutive times this turn (circuit breaker triggered). Stop searching/fetching and answer directly from existing context or inform the user that external lookup is temporarily unavailable.`;
+        }
+        if (this.turnWebToolCallCount >= limits.maxToolCallsPerTurn) {
+          return `Per-turn web search/fetch limit reached (${limits.maxToolCallsPerTurn} calls). Stop calling ${toolName} and answer now based on already gathered information.`;
+        }
+        this.turnWebToolCallCount += 1;
+        return null;
+      },
+      onAfterWebTool: (_toolName, ok) => {
+        if (ok) {
+          this.turnConsecutiveWebFailures = 0;
+        } else {
+          this.turnConsecutiveWebFailures += 1;
+        }
+      },
       onBeforeInspectTickets: (input) => {
         const targetId = input.ticketId?.trim();
         if (
           this.turnDispatchedTicketIds.size > 0 &&
           (!targetId || this.turnDispatchedTicketIds.has(targetId))
         ) {
-          return `该任务刚刚转交后台异步执行（${[...this.turnDispatchedTicketIds].join(", ")}），完成后系统会自动回调通知结果，禁止通过 inspect_tickets 轮询等待。请立即简短回复用户并结束本轮。`;
+          return `Task (${[...this.turnDispatchedTicketIds].join(", ")}) was just dispatched asynchronously in this turn; the system will notify you automatically upon completion. Do NOT poll with inspect_tickets. Reply briefly to the user and end this turn.`;
         }
         this.turnInspectTicketsCount += 1;
         if (this.turnInspectTicketsCount > MAX_INSPECT_TICKETS_PER_TURN) {
-          return `本轮已查询工单进度达上限（${MAX_INSPECT_TICKETS_PER_TURN} 次）。后台任务仍在异步执行中，完成后系统会自动通知，请停止轮询并直接回复用户。`;
+          return `Per-turn inspect_tickets limit reached (${MAX_INSPECT_TICKETS_PER_TURN} calls). Background tasks are still running asynchronously and will notify you upon completion. Stop polling and reply to the user directly.`;
         }
         return null;
       },
+      ...(this.stopTicketsHandler
+        ? {
+            onCancelTicket: async (input: { ticketId?: string }) =>
+              this.stopTicketsHandler!(canonicalUserId, input.ticketId),
+          }
+        : {}),
       ...(this.delegateHandler
         ? {
             onDelegate: (input: { hint: string; urgency?: "normal" | "high"; deliverFiles?: boolean }) => {
@@ -1211,6 +1264,17 @@ export class PersonaRuntime {
     return true;
   }
 
+  /**
+   * Forcefully abort any currently running Persona turn (used by /stop).
+   */
+  abortActiveTurn(canonicalUserId?: string): boolean {
+    if (!this.activeTurn) return false;
+    if (canonicalUserId && this.activeTurn.canonicalUserId !== canonicalUserId) return false;
+    this.activeTurn.abortedForSupersede = true;
+    this.agent.abort();
+    return true;
+  }
+
   getEffectiveTimezone(canonicalUserId: string): string {
     const override = this.repo.getActiveScheduleOverride(canonicalUserId, Date.now());
     return override?.tempTimezone || this.hatoConfig.owner.timezone;
@@ -1234,7 +1298,7 @@ export class PersonaRuntime {
     this.syncTranscriptIfDrifted(canonicalUserId);
     this.turnPendingExecutedEvents = [];
     this.turnDispatchedTicketIds.clear();
-    this.turnInspectTicketsCount = 0;
+    this.resetTurnCounters();
 
     const wmState = this.repo.getWorkingMemory(canonicalUserId);
     const userCreatedAt = Math.max(
@@ -1243,13 +1307,26 @@ export class PersonaRuntime {
       wmState.compactedUntilTs + 1,
     );
 
+    let persistedContent = batch.combinedText;
+    if (batch.replyToText?.trim()) {
+      const hasDbMatch = batch.replyToPlatformMsgId
+        ? Boolean(this.repo.findMessageByPlatformId(batch.originChannel, batch.replyToPlatformMsgId))
+        : false;
+      if (!hasDbMatch) {
+        const quotedPreview = batch.replyToText.replace(/\s+/g, " ").trim().slice(0, 140);
+        if (quotedPreview) {
+          persistedContent = `[Reply to quoted message: "${quotedPreview}"]\n${persistedContent}`;
+        }
+      }
+    }
+
     const savedUserMsg = this.repo.appendRawMessage({
       canonicalUserId,
       channel: batch.originChannel,
       platformMsgId: batch.latestPlatformMsgId,
       replyToId: batch.replyToPlatformMsgId ?? null,
       role: "user",
-      content: batch.combinedText,
+      content: persistedContent,
       attachments: batch.attachments,
       createdAt: userCreatedAt,
     });
@@ -1354,7 +1431,7 @@ export class PersonaRuntime {
 
     const sendBubblesToUser = options?.sendBubblesToUser;
     this.activeBeforeToolHook = sendBubblesToUser
-      ? async (toolName, input) => {
+      ? async () => {
           if (preReplyState.flushedInTurn) return;
           if (turnState.abortedForSupersede || (!turnState.hasToolActivity && options?.shouldSuppressSend?.())) {
             turnState.abortedForSupersede = true;
@@ -1365,10 +1442,9 @@ export class PersonaRuntime {
           const latestMsg = preReplyState.latestToolUseMsg;
           const rawModelPreText = latestMsg ? extractAssistantText(latestMsg).trim() : "";
           const modelPreText = isNoReplyOutput(rawModelPreText) ? "" : rawModelPreText;
-          const replyText = modelPreText || buildSlowToolPreAck(toolName, input);
-          if (!replyText) return;
+          if (!modelPreText) return;
 
-          const preBubbles = splitIntoBubbles(replyText, {
+          const preBubbles = splitIntoBubbles(modelPreText, {
             enabled: this.hatoConfig.gateway.bubbles.enabled,
             maxPerTurn: this.hatoConfig.gateway.bubbles.max_per_turn,
             delimiter: this.hatoConfig.gateway.bubbles.delimiter,
@@ -1503,7 +1579,7 @@ export class PersonaRuntime {
       this.activeCallStartPerf = null;
       this.activeTurnRecalledMemories = [];
       this.turnDispatchedTicketIds.clear();
-      this.turnInspectTicketsCount = 0;
+      this.resetTurnCounters();
       if (!promptErr && !turnState.abortedForSupersede && this.activeTurnEphemeralTail) {
         this.lastCompletedEphemeralTail = this.activeTurnEphemeralTail;
       }
@@ -1638,9 +1714,14 @@ export class PersonaRuntime {
 
     const trimmedFinal = finalText.trim();
     const isNoReplyFinal = isNoReplyOutput(trimmedFinal);
-    const isSilentNoReply = isNoReplyFinal && preReplyState.sentBubbles.length === 0;
+    const allowSilent = isNoReplyFinal && shouldAllowSilentNoReply(batch.combinedText);
+    const isSilentNoReply = isNoReplyFinal && preReplyState.sentBubbles.length === 0 && allowSilent;
     const trailingReply = isNoReplyFinal
-      ? ""
+      ? allowSilent
+        ? ""
+        : preReplyState.sentBubbles.length > 0
+          ? ""
+          : "嗯……我在，刚刚差点走神了，你刚才说的再跟我说说？"
       : trimmedFinal ||
         (preReplyState.sentBubbles.length > 0 ? "" : "嗯……刚刚走神了一下，你再说一遍？");
 
@@ -1792,7 +1873,7 @@ export class PersonaRuntime {
     this.syncTranscriptIfDrifted(params.canonicalUserId);
     this.turnPendingExecutedEvents = [];
     this.turnDispatchedTicketIds.clear();
-    this.turnInspectTicketsCount = 0;
+    this.resetTurnCounters();
     this.agent.state.tools = this.allTools;
 
     if (params.persistEvent !== false) {
@@ -1867,7 +1948,7 @@ export class PersonaRuntime {
       }
       this.activeTurnEphemeralTail = null;
       this.turnDispatchedTicketIds.clear();
-      this.turnInspectTicketsCount = 0;
+      this.resetTurnCounters();
       this.liveTraceTracker?.finish(liveTraceId);
     }
 
@@ -1933,11 +2014,13 @@ export class PersonaRuntime {
       return [];
     }
     if (isNoReplyOutput(trimmed)) {
-      this.turnPendingExecutedEvents = [];
-      this.refreshTranscriptFromDb();
-      return params.fallbackToSummary === false ? [NO_REPLY_SENTINEL] : [];
+      if (params.fallbackToSummary === false) {
+        this.turnPendingExecutedEvents = [];
+        this.refreshTranscriptFromDb();
+        return [NO_REPLY_SENTINEL];
+      }
     }
-    const reply = trimmed || params.fallbackMessage || params.eventSummary;
+    const reply = (isNoReplyOutput(trimmed) ? "" : trimmed) || params.fallbackMessage || params.eventSummary;
     const bubbles = splitIntoBubbles(reply, {
       enabled: this.hatoConfig.gateway.bubbles.enabled,
       maxPerTurn: this.hatoConfig.gateway.bubbles.max_per_turn,
@@ -2492,17 +2575,17 @@ export class PersonaRuntime {
     const cutoffSnippet = lastCompact?.content.replace(/\s+/g, " ").trim().slice(0, 60) ?? "";
     const scopeLine =
       hasLivePrefix && lastCompact
-        ? `- 压缩范围：整合已有前情摘要（如有）与截至 [${cutoffStamp}]${cutoffSnippet ? `（“${cutoffSnippet}”）` : ""}为止的较早 ${params.messagesToSummarize.length} 条历史对话；该时间点之后仍保留在热区的最近消息不要重复写进摘要。`
-        : `- 压缩范围：整合以上历史对话（含已有前情摘要，如有），共 ${params.messagesToSummarize.length} 条。`;
+        ? `- Compaction scope: merge the existing rolling summary (if any) with the ${params.messagesToSummarize.length} earlier messages up through [${cutoffStamp}]${cutoffSnippet ? ` ("${cutoffSnippet}")` : ""}; do NOT include newer messages still kept in the hot zone after that timestamp.`
+        : `- Compaction scope: summarize the ${params.messagesToSummarize.length} historical messages above (including any existing rolling summary).`;
 
     llmMessages.push({
       role: "user",
       content: [
-        "【系统内部指令：上下文压缩（禁止调用任何工具，仅输出纯文本摘要）】",
-        "- 本请求是只读分支，用于生成后续对话的滚动过渡摘要，绝对不要调用任何工具，不要向用户寒暄或回复。",
+        "[SYSTEM INTERNAL DIRECTIVE: Context Compaction (NO tools allowed; output plain-text summary ONLY)]",
+        "- This is a read-only branch to generate a rolling transition summary for upcoming turns. NEVER call any tools and NEVER greet or reply to the user.",
         scopeLine,
-        "- 用第三人称（“用户”“助手”）客观简洁记录：核心话题与进展、用户明确提到的事实/偏好/约定与具体时间点、尚未解决的待办事项。",
-        "- 不要延续角色扮演腔调，不要编造未发生的事情，严格控制在 350 字以内，只输出摘要正文。",
+        "- Write in the same language as the conversation, using neutral third-person phrasing (e.g., user / assistant) to record: core topics and progress, explicit user facts/preferences/commitments with timestamps, and unresolved items.",
+        "- Do NOT adopt any persona tone, do NOT fabricate unstated events, keep it under 350 Chinese characters (or equivalent), and output ONLY the summary body.",
       ].join("\n"),
       timestamp: Date.now(),
     });
@@ -2693,23 +2776,6 @@ export class PersonaRuntime {
   }
 }
 
-function buildSlowToolPreAck(toolName: string, input: unknown): string {
-  switch (toolName) {
-    case "browser_task": {
-      const rec = input && typeof input === "object" ? (input as { resume?: unknown }) : undefined;
-      return rec?.resume ? "好，那我接着去看" : "好，我去打开浏览器看看";
-    }
-    case "web_search":
-      return "等我一下，我帮你查查看";
-    case "web_fetch":
-      return "我先打开这个链接看看";
-    default:
-      // Fast local/internal lookups (calc, date_math, recall_memory, search_past_sessions,
-      // inspect_tickets, list_schedules) should run silently without spamming a pre-tool ack.
-      return "";
-  }
-}
-
 function extractTurnMetrics(
   messages: AgentMessage[],
   skipTextMessages: ReadonlySet<AssistantMessage> = new Set(),
@@ -2767,4 +2833,15 @@ export function isNoReplyOutput(text: string): boolean {
   if (!text) return false;
   const normalized = text.replace(/[`\s]/g, "").toUpperCase();
   return normalized === "[NO_REPLY]" || normalized === "NO_REPLY";
+}
+
+export function shouldAllowSilentNoReply(userText: string): boolean {
+  const trimmed = userText.trim();
+  if (!trimmed) return true;
+  if (/[?？]/.test(trimmed)) return false;
+  if (/进度|怎么|为什么|啥|什么|吗|呢|行不行|能不能|可以吗|好了没|弄好了/.test(trimmed)) {
+    return false;
+  }
+  if (trimmed.length > 16) return false;
+  return true;
 }

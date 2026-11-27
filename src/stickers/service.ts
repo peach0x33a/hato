@@ -21,13 +21,13 @@ export interface VisionTaggingResult {
   style: string;
 }
 
-const VISION_TAGGER_SYSTEM_PROMPT = `你是一个表情包语义标注助手。请观察这张表情包/贴纸图片，并结合给定的附注/emoji/贴纸包名，提取用于聊天检索的结构化中文文本特征。
-严格只输出一个 JSON 对象，不要 markdown 代码块，不要多余解释：
+const VISION_TAGGER_SYSTEM_PROMPT = `You are a sticker/meme semantic tagging assistant. Inspect the sticker image together with any provided note, emoji, or pack name, and extract structured Simplified Chinese metadata for chat retrieval.
+Output ONLY a single valid JSON object with no Markdown code fences and no extra commentary:
 {
-  "caption": "画面主体、动作神态、以及图中文字的准确描述（不超过60字）",
-  "emotions": ["情绪标签1", "情绪标签2", "情绪标签3"],
-  "scenes": ["适用聊天语境1", "适用聊天语境2"],
-  "style": "画风或角色类型（如：二次元萌系 / 熊猫头沙雕 / 猫咪表情 / Q版贴纸）"
+  "caption": "Accurate Chinese description of the subject, pose/expression, and any text in the image (max 60 Chinese chars)",
+  "emotions": ["Chinese emotion tag 1", "Chinese emotion tag 2", "Chinese emotion tag 3"],
+  "scenes": ["Chinese chat context 1", "Chinese chat context 2"],
+  "style": "Chinese art style or character type (e.g., 二次元萌系 / 熊猫头沙雕 / 猫咪表情 / Q版贴纸)"
 }`;
 
 export function extractStickerSetName(input: string): string {

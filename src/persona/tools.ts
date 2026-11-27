@@ -11,6 +11,7 @@ import {
   resolveSkillsDir,
   resolveTavilySearchConfig,
   resolveWebFetchConfig,
+  resolveWebToolLimitsConfig,
   type HatoConfig,
 } from "../config/app.js";
 import type { ScopedProxyRouter } from "../config/proxy.js";
@@ -77,6 +78,15 @@ const InspectTicketsParams = obj({
     bool({
       description:
         "Set true when the user explicitly asks to see detailed execution logs, output report, or generated file paths",
+    }),
+  ),
+});
+
+const CancelTicketParams = obj({
+  ticket_id: opt(
+    str({
+      description:
+        "Optional specific ticket ID (e.g. t_1234abcd) to cancel. Omit to cancel all currently active/running background tasks for this user.",
     }),
   ),
 });
@@ -369,6 +379,8 @@ export function createPersonaReadOnlyTools(params: {
   enableReadSkillTool?: boolean;
   extraTools?: readonly AgentTool<any>[];
   onBeforeInspectTickets?: (input: { ticketId?: string; includeDetails: boolean }) => string | null;
+  onBeforeWebTool?: (toolName: "web_search" | "web_fetch") => string | null;
+  onAfterWebTool?: (toolName: "web_search" | "web_fetch", ok: boolean) => void;
   onDelegate?: (input: { hint: string; urgency?: "normal" | "high"; deliverFiles?: boolean }) => {
     ticketId: string;
     status: string;
@@ -386,6 +398,10 @@ export function createPersonaReadOnlyTools(params: {
     ticketId: string;
     status: string;
   };
+  onCancelTicket?: (input: { ticketId?: string }) => Promise<{
+    stopped: Array<{ id: string; briefTitle: string }>;
+    message: string;
+  }>;
   onSendFile?: (input: {
     path: string;
     caption?: string;
@@ -728,6 +744,13 @@ export function createPersonaReadOnlyTools(params: {
       "Real-time web search via Tavily for news, facts, documentation, or current info. Call only when external or up-to-date facts are needed.",
     parameters: WebSearchParams,
     async execute(_toolCallId, input, signal) {
+      const blockedMsg = params.onBeforeWebTool?.("web_search");
+      if (blockedMsg) {
+        return {
+          content: [{ type: "text", text: blockedMsg }],
+          details: { ok: false, blocked: true, error: blockedMsg },
+        };
+      }
       const searchConfig = resolveTavilySearchConfig(params.getHatoConfig());
       const out = await runTavilySearch({
         config: searchConfig,
@@ -743,6 +766,7 @@ export function createPersonaReadOnlyTools(params: {
         },
         signal,
       });
+      params.onAfterWebTool?.("web_search", out.ok);
       return {
         content: [{ type: "text", text: out.formattedText }],
         details: {
@@ -761,6 +785,13 @@ export function createPersonaReadOnlyTools(params: {
       "Lightweight HTTP/HTTPS text fetch without launching a browser. Prefer this for static articles/docs; use browser_task only for JS-rendered, authenticated, or interactive pages.",
     parameters: WebFetchParams,
     async execute(_toolCallId, input, signal) {
+      const blockedMsg = params.onBeforeWebTool?.("web_fetch");
+      if (blockedMsg) {
+        return {
+          content: [{ type: "text", text: blockedMsg }],
+          details: { ok: false, blocked: true, error: blockedMsg },
+        };
+      }
       const fetchConfig = resolveWebFetchConfig(params.getHatoConfig());
       const out = await runWebFetch({
         config: fetchConfig,
@@ -771,6 +802,7 @@ export function createPersonaReadOnlyTools(params: {
         },
         signal,
       });
+      params.onAfterWebTool?.("web_fetch", out.ok);
       return {
         content: [{ type: "text", text: out.text }],
         details: {
@@ -792,7 +824,7 @@ export function createPersonaReadOnlyTools(params: {
       const resolved = resolve(input.path.trim());
       if (isSensitiveEnvFilePath(resolved)) {
         return {
-          content: [{ type: "text", text: `禁止读取敏感配置文件: ${resolved}` }],
+          content: [{ type: "text", text: `Access denied: reading sensitive config file is prohibited (${resolved})` }],
           details: { ok: false, path: resolved },
         };
       }
@@ -810,7 +842,7 @@ export function createPersonaReadOnlyTools(params: {
       }
       if (isSensitiveEnvFilePath(realTarget)) {
         return {
-          content: [{ type: "text", text: `禁止读取敏感配置文件: ${resolved}` }],
+          content: [{ type: "text", text: `Access denied: reading sensitive config file is prohibited (${resolved})` }],
           details: { ok: false, path: resolved },
         };
       }
@@ -857,7 +889,7 @@ export function createPersonaReadOnlyTools(params: {
       });
       if (!inWorkspace && !inInbound && !inNotebook && !knownArtifact) {
         return {
-          content: [{ type: "text", text: `路径不在工单产物、工作区或媒体/小本本范围内: ${resolved}` }],
+          content: [{ type: "text", text: `Access denied: path is outside allowed ticket artifacts, workspaces, media, or notebook directories (${resolved})` }],
           details: { ok: false, path: resolved },
         };
       }
@@ -1246,7 +1278,7 @@ export function createPersonaReadOnlyTools(params: {
           content: [
             {
               type: "text",
-              text: `已转交后台异步处理 (internal_id=${accepted.ticketId}, status=${accepted.status})。任务将在后台执行，完成后系统会自动回调通知你结果；请勿调用 inspect_tickets 轮询等待，也不要重复派单。请立即用自然日常口吻简短回应“这就去弄，好了告诉你”（不要报出工单号或说“派出工单”）并结束本轮。`,
+              text: `Queued for asynchronous background execution (internal_id=${accepted.ticketId}, status=${accepted.status}). The system will automatically wake you up with the result upon completion. Do NOT call inspect_tickets to poll/wait and do NOT dispatch duplicate tasks. Give the user a brief, natural acknowledgment (without mentioning internal ticket IDs) and end this turn immediately.`,
             },
           ],
           details: accepted,
@@ -1279,7 +1311,7 @@ export function createPersonaReadOnlyTools(params: {
           content: [
             {
               type: "text",
-              text: `已开始后台异步生图 (internal_id=${accepted.ticketId}, status=${accepted.status})。完成后系统会自动通知你，请勿调用 inspect_tickets 轮询等待；请用自然日常口吻简短回应（例如“这就去画，画好了马上发给你”），不要报出内部工单号，并立即结束本轮。`,
+              text: `Queued for asynchronous image generation (internal_id=${accepted.ticketId}, status=${accepted.status}). The system will automatically notify you when finished. Do NOT call inspect_tickets to poll/wait. Give the user a brief, natural acknowledgment (without mentioning internal ticket IDs) and end this turn immediately.`,
             },
           ],
           details: accepted,
@@ -1289,13 +1321,34 @@ export function createPersonaReadOnlyTools(params: {
     tools.push(imageGenTool);
   }
 
+  if (params.onCancelTicket) {
+    const cancelTicketFn = params.onCancelTicket;
+    const cancelTicketTool: AgentTool<typeof CancelTicketParams> = {
+      name: "cancel_ticket",
+      label: "Cancel Background Task",
+      description:
+        "Cancel a specific running/queued background task (by ticket_id) or all active background tasks for the current user. Call immediately when the user asks to stop/cancel a task or corrects a misunderstood background task.",
+      parameters: CancelTicketParams,
+      async execute(_toolCallId, input) {
+        const res = await cancelTicketFn({
+          ticketId: input.ticket_id?.trim() || undefined,
+        });
+        return {
+          content: [{ type: "text", text: res.message }],
+          details: res,
+        };
+      },
+    };
+    tools.push(cancelTicketTool);
+  }
+
   if (params.onSendFile) {
     const sendFileFn = params.onSendFile;
     const sendFileTool: AgentTool<typeof SendFileParams> = {
       name: "send_file",
       label: "Send File",
       description:
-        "Send a local file to the current chat or a target channel (tg / qq). Call when the user requests a file or when delivering a generated artifact.",
+        "Send a local file to the current chat or a target channel (tg / qq). Call when the user requests a file or when delivering a generated artifact. If you provide a caption, do not repeat the same wording in your follow-up chat bubbles.",
       parameters: SendFileParams,
       async execute(_toolCallId, input) {
         const resolved = resolve(input.path.trim());

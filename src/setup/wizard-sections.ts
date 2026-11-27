@@ -1428,9 +1428,10 @@ export async function promptFullContextStep(baseConfig: HatoConfig): Promise<Hat
       options: [
         { value: "cache", label: "cache（缓存模式：无新消息后预摘要并在闲置后归档）" },
         { value: "scheduled", label: "scheduled（定时模式：每日固定时间清空归档，活跃时顺延）" },
+        { value: "idle", label: "idle（静默模式：无对话指定分钟数后直接清空热区，不发摘要请求）" },
       ],
     }),
-  ) as "cache" | "scheduled";
+  ) as "cache" | "scheduled" | "idle";
 
   let preCompactAfterMinutes = baseConfig.context.pre_compact_after_minutes;
   let idleCommitAfterMinutes = baseConfig.context.idle_commit_after_minutes;
@@ -1446,6 +1447,13 @@ export async function promptFullContextStep(baseConfig: HatoConfig): Promise<Hat
     });
     idleCommitAfterMinutes = await promptNumber({
       message: "闲置归档提交时间（分钟，idle_commit_after_minutes）",
+      defaultValue: idleCommitAfterMinutes,
+      min: 1,
+      integer: true,
+    });
+  } else if (clearMode === "idle") {
+    idleCommitAfterMinutes = await promptNumber({
+      message: "无对话静默清空时间（分钟，idle_commit_after_minutes）",
       defaultValue: idleCommitAfterMinutes,
       min: 1,
       integer: true,

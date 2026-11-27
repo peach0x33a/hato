@@ -732,7 +732,25 @@ export function SettingsPanel({
         return <BrowserSection browserCfg={browserCfg} setBrowserCfg={setBrowserCfg} />;
 
       case "search":
-        return <SearchSection searchCfg={searchCfg} setSearchCfg={setSearchCfg} />;
+        return (
+          <SearchSection
+            searchCfg={searchCfg}
+            setSearchCfg={setSearchCfg}
+            webLimits={{
+              max_tool_calls_per_turn: draft.web?.max_tool_calls_per_turn,
+              max_consecutive_failures: draft.web?.max_consecutive_failures,
+            }}
+            setWebLimits={(patch) =>
+              setDraft((prev) => ({
+                ...prev,
+                web: {
+                  ...prev.web,
+                  ...patch,
+                },
+              }))
+            }
+          />
+        );
 
       case "secrets":
         return (

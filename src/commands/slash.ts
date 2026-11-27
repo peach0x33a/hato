@@ -73,6 +73,10 @@ export interface SlashCommandDeps {
   forgetMemory?(canonicalUserId: string, query: string): Promise<ForgetRunSummary>;
   renderMarkdownImage?(markdown: string, options?: { theme?: MarkdownRenderTheme }): Promise<Buffer>;
   notebookService?: NotebookService | null;
+  stopTickets?(
+    canonicalUserId: string,
+    ticketId?: string,
+  ): Promise<{ stopped: Array<{ id: string; briefTitle: string }>; message: string }>;
 }
 
 export interface SlashCommandInput {
@@ -280,6 +284,27 @@ export function createDefaultSlashCommandRegistry(): SlashCommandRegistry {
         if (res.hadSummary) parts.push("前情摘要");
         const detail = parts.length > 0 ? `（已清理 ${parts.join("与")}）` : "（当前已是空白上下文）";
         return `已开启新对话，当前上下文已清空${detail}。`;
+      },
+    })
+    .register({
+      command: "stop",
+      aliases: ["cancel"],
+      description: "停止指定或全部运行中的后台任务",
+      helpLine: "- `/stop [ticket_id]`：停止指定或全部运行中的后台任务（别名 `/cancel`）",
+      async execute(ctx) {
+        if (!ctx.deps.stopTickets) {
+          return "当前运行时暂未接入 `/stop` 停止任务能力。";
+        }
+        const ticketId = ctx.args[0]?.trim() || undefined;
+        const res = await ctx.deps.stopTickets(ctx.canonicalUserId, ticketId);
+        if (ticketId) {
+          return res.message;
+        }
+        if (res.stopped.length === 0) {
+          return "当前没有运行中的后台任务。";
+        }
+        const lines = res.stopped.map((t) => `- \`${t.id}\` ${t.briefTitle}`);
+        return `已停止 ${res.stopped.length} 个后台任务：\n${lines.join("\n")}`;
       },
     })
     .register({

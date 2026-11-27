@@ -71,7 +71,7 @@ test("inspect_tickets respects onBeforeInspectTickets guard (Option A)", async (
   // 2) Newly dispatched ticket in the same turn has 0 poll allowance
   const delRes = await delegateTool.execute("c_del", { hint: "check vps" });
   const delText = (delRes.content[0] as { text: string }).text;
-  assert.match(delText, /异步/);
+  assert.match(delText, /asynchronous/);
 
   const pollNewRes = await inspectTool.execute("c_poll_new", { ticket_id: "t_new12345" });
   assert.equal((pollNewRes.details as any).blocked, true);

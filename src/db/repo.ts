@@ -1,5 +1,5 @@
 import { randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
-import { and, asc, desc, eq, gt, gte, inArray, lt, lte, ne, or, type SQL } from "drizzle-orm";
+import { and, asc, desc, eq, gt, gte, inArray, lt, lte, ne, or, sql, type SQL } from "drizzle-orm";
 import type { HatoDb } from "./client.js";
 import { computeTurnMetrics, type TraceStepRecord } from "../stats/metrics.js";
 import {
@@ -193,14 +193,58 @@ export class HatoRepository {
   }
 
   findMessageByPlatformId(channel: ChannelName, platformMsgId: string): RawMessageRecord | null {
-    const row = this.db
+    const exact = this.db
       .select()
       .from(rawMessages)
       .where(and(eq(rawMessages.channel, channel), eq(rawMessages.platformMsgId, platformMsgId)))
       .limit(1)
       .get();
 
-    return row ? toRawMessageRecord(row) : null;
+    if (exact) return toRawMessageRecord(exact);
+
+    const multi = this.db
+      .select()
+      .from(rawMessages)
+      .where(
+        and(
+          eq(rawMessages.channel, channel),
+          sql`instr(',' || ${rawMessages.platformMsgId} || ',', ',' || ${platformMsgId} || ',') > 0`,
+        ),
+      )
+      .limit(1)
+      .get();
+
+    return multi ? toRawMessageRecord(multi) : null;
+  }
+
+  updateLatestAssistantPlatformMsgId(
+    canonicalUserId: string,
+    channel: ChannelName,
+    platformMsgIds: readonly string[],
+  ): void {
+    const cleaned = platformMsgIds.map((id) => id.trim()).filter(Boolean);
+    if (cleaned.length === 0) return;
+
+    const latest = this.db
+      .select({ id: rawMessages.id })
+      .from(rawMessages)
+      .where(
+        and(
+          eq(rawMessages.canonicalUserId, canonicalUserId),
+          eq(rawMessages.channel, channel),
+          eq(rawMessages.role, "assistant"),
+        ),
+      )
+      .orderBy(desc(rawMessages.createdAt), desc(rawMessages.id))
+      .limit(1)
+      .get();
+
+    if (!latest) return;
+    this.db
+      .update(rawMessages)
+      .set({ platformMsgId: cleaned.join(",") })
+      .where(eq(rawMessages.id, latest.id))
+      .run();
   }
 
   getWorkingMemory(canonicalUserId: string): WorkingMemoryState {

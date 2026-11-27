@@ -111,25 +111,27 @@ export function GeneralSection({
           <div className="w-full sm:w-64">
             <ConsoleSelect
               size="sm"
-              value={draft.context.clear_mode ?? "cache"}
+              value={draft.context.clear_mode ?? "idle"}
               onValueChange={(v) =>
                 setDraft((p) => ({
                   ...p,
                   context: {
                     ...p.context,
-                    clear_mode: v === "scheduled" ? "scheduled" : "cache",
+                    clear_mode:
+                      v === "scheduled" ? "scheduled" : v === "idle" ? "idle" : "cache",
                   },
                 }))
               }
               options={[
                 { value: "cache", label: "缓存模式（趁缓存未过期归档）" },
                 { value: "scheduled", label: "定时模式（每日定时清空归档）" },
+                { value: "idle", label: "静默模式（无对话超时直接清空，不发请求）" },
               ]}
             />
           </div>
         </SettingsRow>
 
-        {(draft.context.clear_mode ?? "cache") === "scheduled" ? (
+        {(draft.context.clear_mode ?? "idle") === "scheduled" ? (
           <>
             <SettingsRow
               title="每日清空时间"
@@ -173,30 +175,40 @@ export function GeneralSection({
           </>
         ) : (
           <>
+            {(draft.context.clear_mode ?? "idle") === "cache" ? (
+              <SettingsRow
+                title="热缓存预摘要时间（分钟）"
+                description="无新消息后趁提示词缓存未失效生成过渡摘要草稿"
+              >
+                <div className="w-full sm:w-40">
+                  <ConsoleInput
+                    size="sm"
+                    type="number"
+                    min={1}
+                    value={String(draft.context.pre_compact_after_minutes)}
+                    onChange={(v) => {
+                      const num = Math.max(1, Number(v) || 50);
+                      setDraft((p) => ({
+                        ...p,
+                        context: { ...p.context, pre_compact_after_minutes: num },
+                      }));
+                    }}
+                    placeholder="50"
+                  />
+                </div>
+              </SettingsRow>
+            ) : null}
             <SettingsRow
-              title="热缓存预摘要时间（分钟）"
-              description="无新消息后趁提示词缓存未失效生成过渡摘要草稿"
-            >
-              <div className="w-full sm:w-40">
-                <ConsoleInput
-                  size="sm"
-                  type="number"
-                  min={1}
-                  value={String(draft.context.pre_compact_after_minutes)}
-                  onChange={(v) => {
-                    const num = Math.max(1, Number(v) || 50);
-                    setDraft((p) => ({
-                      ...p,
-                      context: { ...p.context, pre_compact_after_minutes: num },
-                    }));
-                  }}
-                  placeholder="50"
-                />
-              </div>
-            </SettingsRow>
-            <SettingsRow
-              title="闲置归档提交时间（分钟）"
-              description="无新消息后将旧热区写入长期记忆并提交压缩摘要"
+              title={
+                (draft.context.clear_mode ?? "idle") === "idle"
+                  ? "无对话静默清空时间（分钟）"
+                  : "闲置归档提交时间（分钟）"
+              }
+              description={
+                (draft.context.clear_mode ?? "idle") === "idle"
+                  ? "无新消息超过该时长后直接清空并归档热区，不发起摘要请求"
+                  : "无新消息后将旧热区写入长期记忆并提交压缩摘要"
+              }
             >
               <div className="w-full sm:w-40">
                 <ConsoleInput

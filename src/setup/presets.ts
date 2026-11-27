@@ -104,6 +104,8 @@ export function createDefaultHatoConfig(): HatoConfig {
       proxies: [],
     },
     web: {
+      max_tool_calls_per_turn: 6,
+      max_consecutive_failures: 2,
       search: {
         provider: "tavily",
         enabled: true,
@@ -169,7 +171,7 @@ export function createDefaultHatoConfig(): HatoConfig {
       min_messages_to_compact: 10,
       pre_compact_after_minutes: 50,
       idle_commit_after_minutes: 60,
-      clear_mode: "cache",
+      clear_mode: "idle",
       compaction_mode: "curator",
       scheduled_clear_time: "01:00",
       scheduled_defer_minutes: 30,

@@ -104,11 +104,15 @@ function mergeMessages(messages: InboundMessage[]): InboundBatch {
   const images: ImageContent[] = [];
   const platformMsgIds: string[] = [];
   let replyToPlatformMsgId: string | undefined;
+  let replyToText: string | undefined;
 
   for (const msg of messages) {
     platformMsgIds.push(msg.platformMsgId);
     if (msg.replyToPlatformMsgId) {
       replyToPlatformMsgId = msg.replyToPlatformMsgId;
+      replyToText = msg.replyToText;
+    } else if (msg.replyToText && !replyToText) {
+      replyToText = msg.replyToText;
     }
     if (msg.text.trim()) {
       texts.push(msg.text.trim());
@@ -129,6 +133,7 @@ function mergeMessages(messages: InboundMessage[]): InboundBatch {
     platformMsgIds,
     latestPlatformMsgId: last.platformMsgId,
     replyToPlatformMsgId,
+    ...(replyToText ? { replyToText } : {}),
     combinedText: texts.join("\n"),
     attachments,
     images: images.length > 0 ? images : undefined,
@@ -154,11 +159,15 @@ export function mergeInboundBatches(batches: readonly InboundBatch[]): InboundBa
   const images: ImageContent[] = [];
   const platformMsgIds: string[] = [];
   let replyToPlatformMsgId: string | undefined;
+  let replyToText: string | undefined;
 
   for (const batch of batches) {
     platformMsgIds.push(...batch.platformMsgIds);
     if (batch.replyToPlatformMsgId) {
       replyToPlatformMsgId = batch.replyToPlatformMsgId;
+      replyToText = batch.replyToText;
+    } else if (batch.replyToText && !replyToText) {
+      replyToText = batch.replyToText;
     }
     if (batch.combinedText.trim()) {
       texts.push(batch.combinedText.trim());
@@ -179,6 +188,7 @@ export function mergeInboundBatches(batches: readonly InboundBatch[]): InboundBa
     platformMsgIds,
     latestPlatformMsgId: last.latestPlatformMsgId,
     replyToPlatformMsgId,
+    ...(replyToText ? { replyToText } : {}),
     combinedText: texts.join("\n"),
     attachments,
     images: images.length > 0 ? images : undefined,

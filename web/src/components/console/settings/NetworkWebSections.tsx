@@ -243,11 +243,50 @@ export function BrowserSection({ browserCfg, setBrowserCfg }: BrowserSectionProp
 export interface SearchSectionProps {
   searchCfg: NonNullable<NonNullable<HatoConfig["web"]>["search"]>;
   setSearchCfg: (patch: Partial<NonNullable<NonNullable<HatoConfig["web"]>["search"]>>) => void;
+  webLimits: { max_tool_calls_per_turn?: number; max_consecutive_failures?: number };
+  setWebLimits: (patch: { max_tool_calls_per_turn?: number; max_consecutive_failures?: number }) => void;
 }
 
-export function SearchSection({ searchCfg, setSearchCfg }: SearchSectionProps) {
+export function SearchSection({
+  searchCfg,
+  setSearchCfg,
+  webLimits,
+  setWebLimits,
+}: SearchSectionProps) {
   return (
     <div className="flex flex-col gap-6">
+      <SettingsCardGroup title="网页工具护栏">
+        <SettingsRow
+          title="单轮最大调用次数"
+          description="主脑单轮最多允许调用 web_search / web_fetch 的总次数（默认 6）"
+        >
+          <div className="w-full sm:w-32">
+            <NumericConsoleInput
+              size="sm"
+              value={webLimits.max_tool_calls_per_turn ?? 6}
+              fallback={6}
+              min={1}
+              max={30}
+              onCommit={(max_tool_calls_per_turn) => setWebLimits({ max_tool_calls_per_turn })}
+            />
+          </div>
+        </SettingsRow>
+        <SettingsRow
+          title="连续失败熔断阈值"
+          description="单轮内网页检索/抓取连续失败达到该次数后自动熔断（默认 2）"
+        >
+          <div className="w-full sm:w-32">
+            <NumericConsoleInput
+              size="sm"
+              value={webLimits.max_consecutive_failures ?? 2}
+              fallback={2}
+              min={1}
+              max={10}
+              onCommit={(max_consecutive_failures) => setWebLimits({ max_consecutive_failures })}
+            />
+          </div>
+        </SettingsRow>
+      </SettingsCardGroup>
       <SettingsCardGroup title="Tavily 搜索">
         <SettingsRow
           title="启用联网搜索"
