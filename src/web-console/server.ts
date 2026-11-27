@@ -175,6 +175,10 @@ export interface WebConsoleServerDeps {
     proactiveChannel: ProactiveChannelOption;
     error?: string;
   }>;
+  tryHandleConfirmText?: (
+    canonicalUserId: string,
+    text: string,
+  ) => Promise<{ handled: boolean; reply?: string }>;
 }
 
 /**
@@ -190,6 +194,7 @@ export class WebConsoleServer {
   private readonly modelsDevRegistry: ModelsDevRegistry;
   private readonly configMutation: ConfigMutationService<WebConsoleReloadResult>;
   private readonly webChatGateway: WebChatGateway;
+  private readonly chatEventClients = new Set<ServerResponse>();
   private readonly tgProfileCache = new Map<
     string,
     { expiresAt: number; profile: TelegramUserProfileResult }
@@ -244,11 +249,25 @@ export class WebConsoleServer {
         const ticketCoordinator = deps.getTicketCoordinator?.();
 
         await actorLock.run(uid, async () => {
+          if (deps.tryHandleConfirmText) {
+            const confirmRes = await deps
+              .tryHandleConfirmText(uid, batch.combinedText)
+              .catch(() => ({ handled: false as const }));
+            if (confirmRes.handled) {
+              emit({
+                type: "assistant_bubbles",
+                bubbles: [confirmRes.reply || "已处理确认操作。"],
+              });
+              return;
+            }
+          }
+
           if (ticketCoordinator) {
             const routed = await ticketCoordinator
               .tryRouteInboundToTicket(batch)
               .catch(() => ({ handledByTicket: false as const }));
             if (routed.handledByTicket) {
+              personaRuntime.refreshTranscriptFromDb();
               const ackBubbles = [`已收到补充说明，正在继续执行工单 ${routed.ticketId ?? ""}…`];
               emit({ type: "assistant_bubbles", bubbles: ackBubbles });
               return;
@@ -364,6 +383,10 @@ export class WebConsoleServer {
   }
 
   async stop(): Promise<void> {
+    for (const client of this.chatEventClients) {
+      if (!client.writableEnded) client.end();
+    }
+    this.chatEventClients.clear();
     const srv = this.server;
     this.server = null;
     this.boundPort = null;
@@ -494,6 +517,10 @@ export class WebConsoleServer {
         }
         if (pathname === "/api/chat/send" && method === "POST") {
           await this.webChatGateway.handleSend(req, res);
+          return;
+        }
+        if (pathname === "/api/chat/events" && method === "GET") {
+          this.handleChatEventsStream(req, res);
           return;
         }
         if (pathname === "/api/config" && method === "GET") {
@@ -2186,6 +2213,42 @@ export class WebConsoleServer {
     const cleanup = () => {
       clearInterval(keepAlive);
       unsubLogs();
+      if (!res.writableEnded) res.end();
+    };
+    req.once("close", cleanup);
+    res.once("close", cleanup);
+  }
+
+  notifyChatHistoryUpdated(reason: string, ticketId?: string): void {
+    const payload = JSON.stringify({ type: "refresh_history", reason, ...(ticketId ? { ticketId } : {}) });
+    for (const client of this.chatEventClients) {
+      if (client.writableEnded) {
+        this.chatEventClients.delete(client);
+        continue;
+      }
+      client.write(`data: ${payload}\n\n`);
+    }
+  }
+
+  private handleChatEventsStream(req: IncomingMessage, res: ServerResponse): void {
+    res.writeHead(200, {
+      "Content-Type": "text/event-stream; charset=utf-8",
+      "Cache-Control": "no-cache, no-transform",
+      Connection: "keep-alive",
+    });
+    res.write(": connected\n\n");
+    this.chatEventClients.add(res);
+
+    const keepAlive = setInterval(() => {
+      if (!res.writableEnded) {
+        res.write(": ping\n\n");
+      }
+    }, 15_000);
+    keepAlive.unref();
+
+    const cleanup = () => {
+      clearInterval(keepAlive);
+      this.chatEventClients.delete(res);
       if (!res.writableEnded) res.end();
     };
     req.once("close", cleanup);

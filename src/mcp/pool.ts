@@ -100,6 +100,8 @@ export class McpClientPool {
     await Promise.all(eagerTargets.map((entry) => this.ensureConnected(entry.name)));
   }
 
+  private readonly personalRetryAtMs = new Map<string, number>();
+
   /**
    * Return `AgentTool[]` for all connected & enabled servers belonging to the requested zone.
    */
@@ -110,11 +112,20 @@ export class McpClientPool {
       );
     }
 
+    const now = Date.now();
     const tools: AgentTool<any>[] = [];
     for (const name of [...this.servers.keys()].sort()) {
       const server = this.servers.get(name);
+      if (!server || !server.enabled || server.zone !== "personal") continue;
       const entry = this.connected.get(name);
-      if (!server || !server.enabled || server.zone !== "personal" || !entry) continue;
+      if (!entry) {
+        const nextRetryAt = this.personalRetryAtMs.get(name) ?? 0;
+        if (now >= nextRetryAt) {
+          this.personalRetryAtMs.set(name, now + 60_000);
+          void this.ensureConnected(name).catch(() => undefined);
+        }
+        continue;
+      }
 
       for (const mcpTool of entry.tools) {
         if (!isMcpToolPermitted(server, mcpTool.name)) continue;
@@ -352,8 +363,7 @@ export class McpClientPool {
   ): AgentTool<TSchema> {
     const namespacedName = formatMcpToolName(server.name, mcpTool.name);
     const parameters = normalizeMcpInputSchema(mcpTool.inputSchema) as unknown as TSchema;
-    const requiresConfirm =
-      server.zone === "worker" && server.confirmTools.includes(mcpTool.name);
+    const requiresConfirm = server.confirmTools.includes(mcpTool.name);
 
     return {
       name: namespacedName,

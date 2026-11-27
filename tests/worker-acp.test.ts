@@ -153,8 +153,8 @@ test("ExternalCliRunner blocks confirm_before actions via ACP request_permission
   ctx.mandate.confirm_before = ["DROP TABLE"];
   try {
     const res = await ctx.runner.execute(ctx.ticket, ctx.mandate);
-    assert.equal(res.status, "needs_input");
-    assert.match(res.question ?? "", /DROP TABLE/);
+    assert.equal(res.status, "awaiting_confirm");
+    assert.match(res.confirm_action ?? "", /DROP TABLE/);
   } finally {
     await ctx.runner.abortAll();
     ctx.cleanup();

@@ -1456,6 +1456,52 @@ export const api = {
     });
     return () => controller.abort();
   },
+  subscribeChatEvents(
+    onEvent: (event: { type: "refresh_history"; reason: string; ticketId?: string }) => void,
+    onError?: (err: Error) => void,
+  ): () => void {
+    let closed = false;
+    let controller: AbortController | null = null;
+    let reconnectTimer: number | null = null;
+
+    const connect = async (attempt = 0) => {
+      if (closed) return;
+      controller = new AbortController();
+      try {
+        await consumeSseStream<{ type: "refresh_history"; reason: string; ticketId?: string }>(
+          "/api/chat/events",
+          {
+            method: "GET",
+            headers: authHeaders(),
+            signal: controller.signal,
+          },
+          (ev) => {
+            attempt = 0;
+            onEvent(ev);
+          },
+        );
+      } catch (err) {
+        if (closed || controller.signal.aborted) return;
+        if (onError) {
+          onError(err instanceof Error ? err : new Error(String(err)));
+        }
+      }
+      if (closed) return;
+      const delayMs = Math.min(15_000, 1_500 * Math.pow(2, Math.min(attempt, 3)));
+      reconnectTimer = window.setTimeout(() => {
+        void connect(attempt + 1);
+      }, delayMs);
+    };
+
+    void connect(0);
+    return () => {
+      closed = true;
+      if (reconnectTimer !== null) {
+        window.clearTimeout(reconnectTimer);
+      }
+      controller?.abort();
+    };
+  },
   subscribeTraceStream(
     onEvent: (event: TraceStreamEvent) => void,
     onError?: (err: Error) => void,

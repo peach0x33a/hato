@@ -1,4 +1,4 @@
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { basename, resolve } from "node:path";
 import { ActorLock, EventBus } from "./bus/actor-bus.js";
 import { BrowserRuntime } from "./browser/runtime.js";
@@ -351,8 +351,14 @@ async function main(): Promise<void> {
   personaRuntime.setDelegateHandler((input) => ticketCoordinator.enqueueDelegation(input));
   personaRuntime.setImageGenHandler((input) => imageGenRunner.enqueue(input));
   personaRuntime.setStopTicketsHandler(stopTickets);
-  personaRuntime.setSensitiveFileConfirmHandler((input) =>
-    confirmationService.requestConfirm({
+  personaRuntime.setSensitiveFileConfirmHandler(async (input) => {
+    if (input.channel === "web") {
+      return {
+        ok: false,
+        message: "Web Console 暂不支持直接发送文件附件，请在 Telegram 或 QQ 渠道触发。",
+      };
+    }
+    return confirmationService.requestConfirm({
       canonicalUserId: input.canonicalUserId,
       channel: input.channel,
       kind: "send_env_file",
@@ -368,8 +374,8 @@ async function main(): Promise<void> {
         text: input.text,
       },
       returnMessage: `目标文件 ${basename(input.path)} 属于敏感 .env 凭据文件，已发送二次确认请求，需主人显式确认后才会发出。`,
-    }),
-  );
+    });
+  });
   personaRuntime.setSelfConfigConfirmHandler((input) =>
     confirmationService.requestConfirm({
       canonicalUserId: input.canonicalUserId,
@@ -405,9 +411,21 @@ async function main(): Promise<void> {
         return { ok: false, message: `未找到表情包 ${stickerId}` };
       }
       if (channel === "web") {
+        if (existsSync(rec.localPath)) {
+          const sent = await personaRuntime
+            .sendPhotoInActiveTurn(readFileSync(rec.localPath))
+            .catch(() => false);
+          if (sent) {
+            stickerStore.recordUsed(canonicalUserId, rec.id);
+            return {
+              ok: true,
+              message: `已发送表情包 ${rec.id} 到 Web Console`,
+            };
+          }
+        }
         return {
           ok: false,
-          message: `Web Console 暂不支持发送贴纸气泡，本地路径为: ${rec.localPath}`,
+          message: `Web Console 当前无活跃图片通道，本地路径为: ${rec.localPath}`,
         };
       }
       const outbound = strictChannel
@@ -434,14 +452,27 @@ async function main(): Promise<void> {
     },
     onSave: async ({ canonicalUserId, path, packUrl, note, source }) => {
       if (packUrl) {
+        const originChannel = personaRuntime.getActiveTurnOriginChannel();
         const res = await stickerService.importTelegramPack({
           canonicalUserId,
           setNameOrUrl: packUrl,
           onComplete: (summary) => {
-            const tgOut = resolveStrictOutboundTarget("tg");
             const msg = `贴纸包「${summary.title}」导入完成：新增 ${summary.imported} 张，跳过重复 ${summary.skipped} 张${summary.failed > 0 ? `，失败 ${summary.failed} 张` : ""}。`;
-            if (tgOut) {
-              void tgOut.adapter.sendText(tgOut.targetId, msg).catch(() => undefined);
+            if (originChannel === "web") {
+              repo.appendRawMessage({
+                canonicalUserId,
+                channel: "web",
+                role: "executed_event",
+                content: msg,
+                createdAt: Date.now(),
+              });
+              personaRuntime.refreshTranscriptFromDb();
+              webConsoleServer?.notifyChatHistoryUpdated("sticker_import");
+              return;
+            }
+            const out = resolveOutboundTarget(originChannel);
+            if (out) {
+              void out.adapter.sendText(out.targetId, msg).catch(() => undefined);
             }
           },
         });
@@ -847,6 +878,9 @@ async function main(): Promise<void> {
     void bus.emit({ type: "user_batch", batch });
   });
 
+  let ensureTelegramStartedRef: (() => Promise<void>) | null = null;
+  let ensureQqStartedRef: (() => Promise<void>) | null = null;
+
   const reloadAll = async () => {
     const prevSnapshot = captureReloadSnapshot(hatoConfig, modelRegistry, personaRuntime);
 
@@ -867,6 +901,24 @@ async function main(): Promise<void> {
     markdownRenderer.updateBrowserConfig(resolveWebBrowserConfig(nextConfig));
     tgAdapter?.updateConfig(nextConfig);
     qqAdapter?.updateConfig(nextConfig);
+
+    if (nextConfig.gateway.telegram.enabled && !tgAdapter && ensureTelegramStartedRef) {
+      await ensureTelegramStartedRef().catch((err) => {
+        logWarn("TG", `hot-reload start failed: ${summarizeError(err)}`);
+      });
+    } else if (!nextConfig.gateway.telegram.enabled && tgAdapter) {
+      await tgAdapter.stop().catch(() => undefined);
+      tgAdapter = null;
+    }
+
+    if (nextConfig.gateway.qq.enabled && !qqAdapter && ensureQqStartedRef) {
+      await ensureQqStartedRef().catch((err) => {
+        logWarn("QQ", `hot-reload start failed: ${summarizeError(err)}`);
+      });
+    } else if (!nextConfig.gateway.qq.enabled && qqAdapter) {
+      await qqAdapter.stop().catch(() => undefined);
+      qqAdapter = null;
+    }
 
     const nextSnapshot = captureReloadSnapshot(nextConfig, modelRegistry, personaRuntime);
     const changes = collectReloadDiff(prevSnapshot, nextSnapshot);
@@ -1025,6 +1077,7 @@ async function main(): Promise<void> {
         .tryRouteInboundToTicket(mergedBatch)
         .catch(() => ({ handledByTicket: false as const }));
       if (routedToTicket.handledByTicket) {
+        personaRuntime.refreshTranscriptFromDb();
         return;
       }
 
@@ -1185,11 +1238,14 @@ async function main(): Promise<void> {
     }
 
     if (effectivePreferred === "qq") {
-      if (qqAdapter && qqTargetId) {
+      if (qqAdapter && qqTargetId && qqAdapter.getStatus().online) {
         return { channel: "qq", adapter: qqAdapter, targetId: qqTargetId };
       }
       if (allowFallbackFromQq && tgAdapter && tgTargetId) {
         return { channel: "tg", adapter: tgAdapter, targetId: tgTargetId };
+      }
+      if (qqAdapter && qqTargetId) {
+        return { channel: "qq", adapter: qqAdapter, targetId: qqTargetId };
       }
       return null;
     }
@@ -1220,7 +1276,9 @@ async function main(): Promise<void> {
       );
       const artifactPartition = partitionTicketArtifacts({
         artifacts: result.artifacts,
-        canAutoSend: Boolean(outbound?.adapter.sendFile),
+        canAutoSend: Boolean(
+          outbound?.adapter.capabilities.supportsDirectFileUpload && outbound?.adapter.sendFile,
+        ),
         deliverFiles,
       });
       const artifactImages = await loadArtifactImagesForModel(result.artifacts);
@@ -1247,6 +1305,12 @@ async function main(): Promise<void> {
           fallbackMessage: cleanFallbackMessage,
           promptInstruction: `[系统事件：后台任务 "${briefTitle}" (${result.ticket_id}) 已结束，状态=${result.status}。请用自然日常口吻直接告诉用户结果要点（除非出错或用户要求，不要主动报工单号，也不要倾倒冗长执行日志）：${result.narration_hint}${artifactNames}${caveatText}${secretsNote}]`,
           images: artifactImages,
+          ...(outbound?.adapter.sendPhoto
+            ? {
+                sendPhotoToUser: (photo, caption) =>
+                  outbound.adapter.sendPhoto!(outbound.targetId, photo, caption),
+              }
+            : {}),
         });
       } finally {
         if (narrationKey) {
@@ -1319,6 +1383,9 @@ async function main(): Promise<void> {
         });
         personaRuntime.refreshTranscriptFromDb();
       }
+      if (!outbound) {
+        webConsoleServer?.notifyChatHistoryUpdated("ticket_result", result.ticket_id);
+      }
     });
   });
 
@@ -1333,6 +1400,12 @@ async function main(): Promise<void> {
         eventSummary: `工单 ${ticketId} (${briefTitle}) 需要补充信息: ${question}`,
         fallbackMessage: question,
         promptInstruction: `[系统事件：后台工单 "${briefTitle}" (${ticketId}) 需要用户补充以下信息后继续：${question}。请自然转达给用户。]`,
+        ...(outbound?.adapter.sendPhoto
+          ? {
+              sendPhotoToUser: (photo, caption) =>
+                outbound.adapter.sendPhoto!(outbound.targetId, photo, caption),
+            }
+          : {}),
       });
       const outboundBubbles = bubbles.filter((b) => b.trim() && !isNoReplyOutput(b));
       if (outbound && outboundBubbles.length > 0) {
@@ -1344,18 +1417,28 @@ async function main(): Promise<void> {
         if (Array.isArray(sentIds) && sentIds.length > 0) {
           repo.updateLatestAssistantPlatformMsgId(canonicalUserId, outbound.channel, sentIds);
         }
+      } else if (!outbound) {
+        webConsoleServer?.notifyChatHistoryUpdated("ticket_needs_input", ticketId);
       }
     });
   });
 
   bus.on("ticket_confirm_required", async ({ canonicalUserId, originChannel, ticketId, briefTitle, promptText }) => {
     const outbound = originChannel === "web" ? null : resolveOutboundTarget(originChannel);
-    if (outbound?.adapter.sendConfirm) {
+    if (outbound?.adapter.capabilities.supportsInlineConfirm && outbound.adapter.sendConfirm) {
       await outbound.adapter.sendConfirm(outbound.targetId, {
         ticketId,
         promptText: `工单 ${ticketId} (${briefTitle}) 请求确认高危操作：\n${promptText}`,
       });
       return;
+    }
+    if (outbound) {
+      await outbound.adapter
+        .sendText(
+          outbound.targetId,
+          `工单 ${ticketId} (${briefTitle}) 请求确认高危操作：\n${promptText}\n\n请回复「确认 ${ticketId}」继续执行，或回复「取消 ${ticketId}」中止。`,
+        )
+        .catch(() => undefined);
     }
     await actorLock.run(canonicalUserId, async () => {
       repo.appendRawMessage({
@@ -1367,6 +1450,9 @@ async function main(): Promise<void> {
       });
       personaRuntime.refreshTranscriptFromDb();
     });
+    if (!outbound || originChannel === "web") {
+      webConsoleServer?.notifyChatHistoryUpdated("ticket_confirm_required", ticketId);
+    }
   });
 
   bus.on("executed_event", async ({ canonicalUserId, channel, summary, occurredAtMs, silent }) => {
@@ -1503,6 +1589,7 @@ async function main(): Promise<void> {
     tgAdapter = adapter;
   };
 
+  ensureTelegramStartedRef = ensureTelegramStarted;
   if (hatoConfig.gateway.telegram.enabled) {
     await ensureTelegramStarted();
   }
@@ -1621,6 +1708,7 @@ async function main(): Promise<void> {
     qqAdapter = adapter;
   };
 
+  ensureQqStartedRef = ensureQqStarted;
   if (hatoConfig.gateway.qq.enabled) {
     await ensureQqStarted();
   }
@@ -1658,82 +1746,87 @@ async function main(): Promise<void> {
         ...(qqAdapter ? qqAdapter.getStatus() : { running: false, online: false }),
       },
     }),
-    toggleGateway: async (channel, enabled) => {
-      const prevConfig = hatoConfig;
-      try {
-        const nextConfig: HatoConfig = {
-          ...hatoConfig,
-          gateway: {
-            ...hatoConfig.gateway,
-            ...(channel === "tg"
-              ? { telegram: { ...hatoConfig.gateway.telegram, enabled } }
-              : { qq: { ...hatoConfig.gateway.qq, enabled } }),
-          },
-        };
-        if (enabled) {
-          hatoConfig = nextConfig;
-          if (channel === "tg") {
-            await ensureTelegramStarted();
+    toggleGateway: (channel, enabled) =>
+      configMutation.runExclusive(async () => {
+        const prevConfig = hatoConfig;
+        try {
+          const nextConfig: HatoConfig = {
+            ...hatoConfig,
+            gateway: {
+              ...hatoConfig.gateway,
+              ...(channel === "tg"
+                ? { telegram: { ...hatoConfig.gateway.telegram, enabled } }
+                : { qq: { ...hatoConfig.gateway.qq, enabled } }),
+            },
+          };
+          if (enabled) {
+            hatoConfig = nextConfig;
+            if (channel === "tg") {
+              await ensureTelegramStarted();
+            } else {
+              await ensureQqStarted();
+            }
           } else {
-            await ensureQqStarted();
+            hatoConfig = nextConfig;
+            if (channel === "tg" && tgAdapter) {
+              await tgAdapter.stop();
+              tgAdapter = null;
+            } else if (channel === "qq" && qqAdapter) {
+              await qqAdapter.stop();
+              qqAdapter = null;
+            }
           }
-        } else {
-          hatoConfig = nextConfig;
-          if (channel === "tg" && tgAdapter) {
-            await tgAdapter.stop();
-            tgAdapter = null;
-          } else if (channel === "qq" && qqAdapter) {
-            await qqAdapter.stop();
-            qqAdapter = null;
-          }
+          writeHatoConfig(HATO_CONFIG_PATH, nextConfig, { backup: true });
+          personaRuntime.updateConfig(hatoConfig);
+          return { ok: true };
+        } catch (err) {
+          hatoConfig = prevConfig;
+          return { ok: false, error: err instanceof Error ? err.message : String(err) };
         }
-        writeHatoConfig(HATO_CONFIG_PATH, nextConfig, { backup: true });
+      }),
+    unbindHome: (opts) =>
+      configMutation.runExclusive(async () => {
+        const res = unbindHomeChannel({
+          channel: opts.channel,
+          hatoConfigPath: HATO_CONFIG_PATH,
+          repo,
+          canonicalUserId: hatoConfig.owner.canonical_user_id,
+          currentConfig: hatoConfig,
+          clearChannelWhitelist: opts.clearChannelWhitelist,
+        });
+        hatoConfig = res.updatedConfig;
         personaRuntime.updateConfig(hatoConfig);
-        return { ok: true };
-      } catch (err) {
-        hatoConfig = prevConfig;
-        return { ok: false, error: err instanceof Error ? err.message : String(err) };
-      }
-    },
-    unbindHome: async (opts) => {
-      const res = unbindHomeChannel({
-        channel: opts.channel,
-        hatoConfigPath: HATO_CONFIG_PATH,
-        repo,
-        canonicalUserId: hatoConfig.owner.canonical_user_id,
-        currentConfig: hatoConfig,
-        clearChannelWhitelist: opts.clearChannelWhitelist,
-      });
-      hatoConfig = res.updatedConfig;
-      personaRuntime.updateConfig(hatoConfig);
-      tgAdapter?.updateConfig(hatoConfig);
-      qqAdapter?.updateConfig(hatoConfig);
-      logInfo(
-        "HATO",
-        `unbound ${opts.channel} home channel via Web Console (prev=${res.previousHome.channel}:${res.previousHome.targetId ?? ""}, clearedWhitelist=${res.clearedWhitelist})`,
-      );
-      return {
-        ok: true,
-        previousHome: res.previousHome,
-        home: resolvePlatformHomeBinding(opts.channel, hatoConfig, repo),
-        clearedWhitelist: res.clearedWhitelist,
-      };
-    },
-    setProactiveChannel: async (proactiveChannel: ProactiveChannelOption) => {
-      const res = updateProactiveChannel({
-        hatoConfigPath: HATO_CONFIG_PATH,
-        repo,
-        canonicalUserId: hatoConfig.owner.canonical_user_id,
-        proactiveChannel,
-        currentConfig: hatoConfig,
-      });
-      hatoConfig = res.updatedConfig;
-      personaRuntime.updateConfig(hatoConfig);
-      tgAdapter?.updateConfig(hatoConfig);
-      qqAdapter?.updateConfig(hatoConfig);
-      logInfo("HATO", `updated default proactive_channel=${proactiveChannel} via Web Console`);
-      return { ok: true, proactiveChannel };
-    },
+        tgAdapter?.updateConfig(hatoConfig);
+        qqAdapter?.updateConfig(hatoConfig);
+        logInfo(
+          "HATO",
+          `unbound ${opts.channel} home channel via Web Console (prev=${res.previousHome.channel}:${res.previousHome.targetId ?? ""}, clearedWhitelist=${res.clearedWhitelist})`,
+        );
+        return {
+          ok: true,
+          previousHome: res.previousHome,
+          home: resolvePlatformHomeBinding(opts.channel, hatoConfig, repo),
+          clearedWhitelist: res.clearedWhitelist,
+        };
+      }),
+    setProactiveChannel: (proactiveChannel: ProactiveChannelOption) =>
+      configMutation.runExclusive(async () => {
+        const res = updateProactiveChannel({
+          hatoConfigPath: HATO_CONFIG_PATH,
+          repo,
+          canonicalUserId: hatoConfig.owner.canonical_user_id,
+          proactiveChannel,
+          currentConfig: hatoConfig,
+        });
+        hatoConfig = res.updatedConfig;
+        personaRuntime.updateConfig(hatoConfig);
+        tgAdapter?.updateConfig(hatoConfig);
+        qqAdapter?.updateConfig(hatoConfig);
+        logInfo("HATO", `updated default proactive_channel=${proactiveChannel} via Web Console`);
+        return { ok: true, proactiveChannel };
+      }),
+    tryHandleConfirmText: (canonicalUserId, text) =>
+      confirmationService.tryHandleConfirmText(canonicalUserId, text),
   });
   await webConsoleServer.start();
 
@@ -1824,11 +1917,34 @@ async function main(): Promise<void> {
       if (nonEmpty.length === 0) {
         return "no_reply";
       }
-      const sentIds = await outbound.adapter.sendBubbles(
-        outbound.targetId,
-        nonEmpty,
-        hatoConfig.gateway.bubbles.delay_ms_range,
-      );
+      let sentIds: string[] | void;
+      try {
+        sentIds = await outbound.adapter.sendBubbles(
+          outbound.targetId,
+          nonEmpty,
+          hatoConfig.gateway.bubbles.delay_ms_range,
+        );
+      } catch (err) {
+        const tgTargetId = resolveTgTarget();
+        if (
+          outbound.channel === "qq" &&
+          hatoConfig.gateway.qq.fallback_channel === "tg" &&
+          tgAdapter &&
+          tgTargetId
+        ) {
+          logWarn("QQ", `proactive send failed, falling back to TG: ${summarizeError(err)}`);
+          sentIds = await tgAdapter.sendBubbles(
+            tgTargetId,
+            nonEmpty,
+            hatoConfig.gateway.bubbles.delay_ms_range,
+          );
+          if (Array.isArray(sentIds) && sentIds.length > 0) {
+            repo.updateLatestAssistantPlatformMsgId(canonicalUserId, "tg", sentIds);
+          }
+          return "sent";
+        }
+        throw err;
+      }
       if (Array.isArray(sentIds) && sentIds.length > 0) {
         repo.updateLatestAssistantPlatformMsgId(canonicalUserId, outbound.channel, sentIds);
       }
@@ -1854,7 +1970,25 @@ async function main(): Promise<void> {
           : `退出码=${exitCode}\n${(stderrTail || stdoutTail).trim()}`;
       if (!body) return;
       const deliveredText = `[定时脚本: ${name}] ${exitCode === 0 ? "执行输出" : "执行异常"}\n${body}`;
-      const sentMsgId = await outbound.adapter.sendText(outbound.targetId, deliveredText);
+      let deliveredChannel: "tg" | "qq" = outbound.channel;
+      let sentMsgId: string | undefined;
+      try {
+        sentMsgId = await outbound.adapter.sendText(outbound.targetId, deliveredText);
+      } catch (err) {
+        const tgTargetId = resolveTgTarget();
+        if (
+          outbound.channel === "qq" &&
+          hatoConfig.gateway.qq.fallback_channel === "tg" &&
+          tgAdapter &&
+          tgTargetId
+        ) {
+          logWarn("QQ", `script output send failed, falling back to TG: ${summarizeError(err)}`);
+          deliveredChannel = "tg";
+          sentMsgId = await tgAdapter.sendText(tgTargetId, deliveredText);
+        } else {
+          throw err;
+        }
+      }
       const maxContextChars = 2000;
       const persistedContent =
         deliveredText.length > maxContextChars
@@ -1862,7 +1996,7 @@ async function main(): Promise<void> {
           : deliveredText;
       repo.appendRawMessage({
         canonicalUserId: hatoConfig.owner.canonical_user_id,
-        channel: outbound.channel,
+        channel: deliveredChannel,
         platformMsgId: sentMsgId ?? null,
         role: "executed_event",
         content: persistedContent,

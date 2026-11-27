@@ -357,6 +357,10 @@ export function SettingsPanel({
         ? { ...draft, worker: { ...draft.worker, default_backend: effectiveBackend } }
         : draft;
     try {
+      const consoleChanged =
+        nextDraft.web?.console?.enabled !== initialConfig.web?.console?.enabled ||
+        nextDraft.web?.console?.host !== initialConfig.web?.console?.host ||
+        nextDraft.web?.console?.port !== initialConfig.web?.console?.port;
       const res = await api.saveHatoConfig(nextDraft);
       setSaveState("success");
       setDraft(nextDraft);
@@ -364,7 +368,11 @@ export function SettingsPanel({
       void loadCliProbes(true);
       onToast({
         title: "设置已保存",
-        description: res.changes?.length ? res.changes.join("；") : "配置已生效",
+        description: consoleChanged
+          ? "配置已保存（Web 控制台监听设置需重启服务生效）"
+          : res.changes?.length
+            ? res.changes.join("；")
+            : "配置已生效",
         status: "success",
       });
       setTimeout(() => setSaveState("idle"), 1600);
@@ -494,55 +502,6 @@ export function SettingsPanel({
     optionKey: string,
     nextVal: string | boolean | undefined,
   ) => {
-    if (backend === "codex-cli" && optionKey === "codex_mode") {
-      if (nextVal === undefined) {
-        patchBackendConfig(backend, { sandbox: undefined, approval: undefined });
-      } else if (nextVal === "host") {
-        patchBackendConfig(backend, { sandbox: undefined, approval: "host" });
-      } else if (nextVal === "approve-for-me") {
-        patchBackendConfig(backend, { sandbox: "workspace-write", approval: "approve-for-me" });
-      } else if (nextVal === "danger-full-access") {
-        patchBackendConfig(backend, { sandbox: "danger-full-access", approval: "bypass" });
-      } else {
-        patchBackendConfig(backend, { sandbox: nextVal, approval: undefined });
-      }
-      return;
-    }
-
-    if (backend === "antigravity-cli" && optionKey === "mode") {
-      if (nextVal === undefined) {
-        patchBackendConfig(backend, { mode: undefined, skip_permissions: undefined });
-      } else if (nextVal === "skip-permissions") {
-        patchBackendConfig(backend, { mode: "auto", skip_permissions: true });
-      } else {
-        patchBackendConfig(backend, { mode: nextVal, skip_permissions: false });
-      }
-      return;
-    }
-
-    if (backend === "claude-code" && optionKey === "permission_mode") {
-      if (nextVal === undefined) {
-        patchBackendConfig(backend, { permission_mode: undefined, skip_permissions: undefined });
-      } else if (nextVal === "bypassPermissions") {
-        patchBackendConfig(backend, { permission_mode: "bypassPermissions", skip_permissions: true });
-      } else {
-        patchBackendConfig(backend, { permission_mode: nextVal, skip_permissions: false });
-      }
-      return;
-    }
-
-    if (backend === "opencode-v2" && optionKey === "permission_mode") {
-      if (nextVal === undefined) {
-        patchBackendConfig(backend, { permission_mode: undefined, auto: undefined });
-      } else {
-        patchBackendConfig(backend, {
-          permission_mode: nextVal,
-          auto: nextVal === "auto" || nextVal === "full_access",
-        });
-      }
-      return;
-    }
-
     patchBackendConfig(backend, { [optionKey]: nextVal });
   };
 

@@ -366,7 +366,7 @@ export function GeneralSection({
         </SettingsRow>
         <SettingsRow
           title="启用 Web 控制台"
-          description="关闭后将停止本地管理界面服务"
+          description="关闭后将停止本地管理界面服务（修改需重启服务生效）"
         >
           <Switch
             ariaLabel="启用 Web 控制台"
@@ -374,7 +374,7 @@ export function GeneralSection({
             onCheckedChange={(on) => setConsoleCfg({ enabled: on })}
           />
         </SettingsRow>
-        <SettingsRow title="监听地址" description="默认仅本机可访问，公网暴露建议配合访问令牌">
+        <SettingsRow title="监听地址" description="默认仅本机可访问，公网暴露建议配合访问令牌（修改需重启服务生效）">
           <div className="w-full sm:w-52">
             <ConsoleInput
               size="sm"

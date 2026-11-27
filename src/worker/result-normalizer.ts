@@ -15,6 +15,7 @@ export interface NormalizeExternalCliResultParams {
   stderrText: string;
   structuredError?: string;
   permissionDeniedReason?: string;
+  confirmRequired?: { key: string; reason: string };
   stopReason?: string;
   timedOut?: boolean;
 }
@@ -87,6 +88,19 @@ export function normalizeExternalCliResult(
       artifacts: newFiles,
       required_secrets: [],
       caveats: ["执行超时被中止"],
+    };
+  }
+
+  if (params.confirmRequired) {
+    return {
+      ticket_id: params.ticketId,
+      status: "awaiting_confirm",
+      narration_hint: params.confirmRequired.reason,
+      verbatim_blocks: [],
+      artifacts: [],
+      required_secrets: [],
+      caveats: [],
+      confirm_action: params.confirmRequired.reason,
     };
   }
 

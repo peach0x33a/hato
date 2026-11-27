@@ -411,6 +411,7 @@ export class StickerService {
       .filter(Boolean)
       .join("\n");
 
+    const visionThinking = registry.resolveSlotThinkingLevel("vision");
     const proxyRouter = this.deps.getProxyRouter();
     const message: AssistantMessage = await proxyRouter.runWithScope(
       `llm-calling.${resolved.providerSlug}`,
@@ -437,7 +438,10 @@ export class StickerService {
                   },
                 ],
               },
-              { apiKey },
+              {
+                apiKey,
+                ...(visionThinking !== "off" ? { reasoning: visionThinking } : {}),
+              },
             ),
           { slot: "STICKER" },
         ),

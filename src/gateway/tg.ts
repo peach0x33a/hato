@@ -73,8 +73,10 @@ export class TelegramAdapter implements ChannelAdapter {
     proactiveSupported: true,
   };
 
-  private readonly bot: Bot;
+  private bot: Bot;
   private config: HatoConfig;
+  private currentBotToken: string;
+  private currentBaseUrl: string;
   private running = false;
   private connectedUsername: string | null = null;
   private lastCommandSyncSignature: string | null = null;
@@ -82,19 +84,51 @@ export class TelegramAdapter implements ChannelAdapter {
 
   constructor(private readonly deps: TelegramAdapterDeps) {
     this.config = deps.config;
-    this.bot = new Bot(deps.botToken, {
+    this.currentBotToken = deps.botToken;
+    this.currentBaseUrl = deps.config.gateway.telegram.base_url;
+    this.bot = this.createBot(this.currentBotToken, this.currentBaseUrl);
+  }
+
+  private createBot(botToken: string, baseUrl: string): Bot {
+    const bot = new Bot(botToken, {
       client: {
-        apiRoot: deps.config.gateway.telegram.base_url,
+        apiRoot: baseUrl,
         timeoutSeconds: TG_CLIENT_TIMEOUT_SECONDS,
-        fetch: deps.proxyRouter.createScopedFetch("gateway.telegram"),
+        fetch: this.deps.proxyRouter.createScopedFetch("gateway.telegram"),
       },
     });
-
+    const prevBot = this.bot;
+    this.bot = bot;
     this.registerHandlers();
+    if (prevBot && prevBot !== bot) {
+      this.lastCommandSyncSignature = null;
+    }
+    return bot;
   }
 
   updateConfig(next: HatoConfig): void {
     this.config = next;
+    const nextToken =
+      process.env[next.gateway.telegram.bot_token_env]?.trim() || this.currentBotToken;
+    const nextBaseUrl = next.gateway.telegram.base_url;
+    const needsRebuild =
+      nextToken !== this.currentBotToken || nextBaseUrl !== this.currentBaseUrl;
+
+    if (needsRebuild) {
+      const wasRunning = this.running;
+      this.currentBotToken = nextToken;
+      this.currentBaseUrl = nextBaseUrl;
+      if (wasRunning) {
+        void this.stop().then(() => {
+          this.createBot(nextToken, nextBaseUrl);
+          return this.start();
+        });
+      } else {
+        this.createBot(nextToken, nextBaseUrl);
+      }
+      return;
+    }
+
     if (this.running) {
       void this.syncBotCommands().catch((err) => {
         logWarn("TG", `dynamic command sync failed on config update: ${summarizeError(err)}`);
@@ -167,9 +201,6 @@ export class TelegramAdapter implements ChannelAdapter {
 
   async start(): Promise<void> {
     if (this.running) return;
-    if (this.config.gateway.telegram.mode === "webhook") {
-      throw new Error("Telegram webhook mode is not wired yet; set gateway.telegram.mode = 'polling'");
-    }
     this.running = true;
     this.reconnectAbort = new AbortController();
     void this.runPollingLoop();
@@ -427,8 +458,12 @@ export class TelegramAdapter implements ChannelAdapter {
         await ctx.answerCallbackQuery();
         return;
       }
+      await ctx.answerCallbackQuery({ text: "已收到，正在处理…" }).catch(() => undefined);
       const feedback = await this.deps.onConfirmAction(match[2]!, match[1] === "yes", uid);
-      await ctx.answerCallbackQuery({ text: feedback });
+      await ctx.editMessageReplyMarkup({ reply_markup: undefined }).catch(() => undefined);
+      if (feedback) {
+        await ctx.reply(feedback).catch(() => undefined);
+      }
     });
 
     this.bot.on("message", async (ctx) => {
@@ -485,6 +520,13 @@ export class TelegramAdapter implements ChannelAdapter {
   }): Promise<boolean> {
     if (params.chatType !== "private") return false;
     if (this.config.owner.channels.tg.user_ids.length > 0 || !this.deps.onClaimHome) return false;
+
+    if (/^\/help(?:@\w+)?(?:\s|$)/i.test(params.text.trim())) {
+      await params.replyFn(
+        "当前 Bot 尚未绑定主人账号，仅支持使用终端启动日志中的配对码执行绑定：\n- `/sethome <配对码>`",
+      );
+      return true;
+    }
 
     const parsed = parseSethomeCommand(params.text);
     if (!parsed.isSethome) return false;
@@ -578,6 +620,54 @@ export class TelegramAdapter implements ChannelAdapter {
       }
     }
 
+    const MAX_DOC_BYTES = 20 * 1024 * 1024;
+    if (msg.document && (!msg.document.file_size || msg.document.file_size <= MAX_DOC_BYTES)) {
+      const downloaded = await this.downloadTelegramFileBuffer(msg.document.file_id);
+      if (downloaded) {
+        const extOrName = downloaded.filePath || msg.document.file_name || ".bin";
+        const docAtt = attachments?.find((a) => a.kind === "file" && !a.localPath);
+        if (docAtt) {
+          docAtt.localPath = saveInboundMediaBuffer(dataDir, downloaded.buffer, extOrName);
+        }
+        if (msg.document.mime_type?.startsWith("image/")) {
+          const img = await convertBufferToModelImage({
+            buffer: downloaded.buffer,
+            filePath: extOrName,
+          });
+          if (img) images.push(img);
+        }
+      }
+    }
+
+    const audioSource = msg.voice ?? msg.audio;
+    if (audioSource && (!audioSource.file_size || audioSource.file_size <= MAX_DOC_BYTES)) {
+      const downloaded = await this.downloadTelegramFileBuffer(audioSource.file_id);
+      if (downloaded) {
+        const audioAtt = attachments?.find((a) => a.kind === "audio" && !a.localPath);
+        if (audioAtt) {
+          audioAtt.localPath = saveInboundMediaBuffer(
+            dataDir,
+            downloaded.buffer,
+            downloaded.filePath || ".ogg",
+          );
+        }
+      }
+    }
+
+    if (msg.video && (!msg.video.file_size || msg.video.file_size <= MAX_DOC_BYTES)) {
+      const downloaded = await this.downloadTelegramFileBuffer(msg.video.file_id);
+      if (downloaded) {
+        const videoAtt = attachments?.find((a) => a.kind === "file" && !a.localPath);
+        if (videoAtt) {
+          videoAtt.localPath = saveInboundMediaBuffer(
+            dataDir,
+            downloaded.buffer,
+            downloaded.filePath || msg.video.file_name || ".mp4",
+          );
+        }
+      }
+    }
+
     return images;
   }
 
@@ -665,6 +755,20 @@ function extractTelegramAttachments(ctx: Context): InboundAttachment[] {
   }
   if (msg.voice) {
     list.push({ kind: "audio", mimeType: msg.voice.mime_type });
+  }
+  if (msg.audio) {
+    list.push({
+      kind: "audio",
+      filename: msg.audio.file_name,
+      mimeType: msg.audio.mime_type,
+    });
+  }
+  if (msg.video) {
+    list.push({
+      kind: "file",
+      filename: msg.video.file_name,
+      mimeType: msg.video.mime_type,
+    });
   }
   if (msg.sticker) {
     list.push({

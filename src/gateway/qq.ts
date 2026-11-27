@@ -271,6 +271,18 @@ export class QqAdapter implements ChannelAdapter {
   updateConfig(nextConfig: HatoConfig): void {
     this.config = nextConfig;
     this.client.updateBaseUrl(nextConfig.gateway.qq.base_url);
+    const nextAppId = nextConfig.gateway.qq.app_id.trim();
+    const nextSecret = process.env[nextConfig.gateway.qq.client_secret_env]?.trim() ?? "";
+    if (nextAppId && nextSecret) {
+      const credsChanged = this.client.updateCredentials(nextAppId, nextSecret);
+      if (credsChanged && this.ws && !this.stopped) {
+        try {
+          this.ws.close(4001, "Credentials updated");
+        } catch {
+          // ignore
+        }
+      }
+    }
   }
 
   getStatus(): { running: boolean; online: boolean; sessionId?: string } {
@@ -544,10 +556,17 @@ export class QqAdapter implements ChannelAdapter {
     const gatewayUrl = await this.client.getGatewayUrl();
     const token = await this.client.getToken();
     const proxyRes = this.proxyRouter.resolveScope("gateway.qq");
-    const proxyUrl =
-      proxyRes.mode === "proxy" && /^https?:\/\//i.test(proxyRes.url)
-        ? proxyRes.url
-        : undefined;
+    let proxyUrl: string | undefined;
+    if (proxyRes.mode === "proxy") {
+      if (/^https?:\/\//i.test(proxyRes.url)) {
+        proxyUrl = proxyRes.url;
+      } else {
+        logWarn(
+          "QQ",
+          `QQ WebSocket 仅支持 http:// / https:// 代理，当前 scope gateway.qq 配置为 ${proxyRes.url}（REST 请求仍走该代理，WebSocket 将直连）`,
+        );
+      }
+    }
 
     return await new Promise<boolean>((resolvePromise, rejectPromise) => {
       const ws = new WebSocket(gatewayUrl, (proxyUrl ? { proxy: proxyUrl } : undefined) as any);

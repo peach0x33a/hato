@@ -16,6 +16,8 @@ import type { LiveTraceTracker } from "../stats/live-trace.js";
 import { computeTurnMetrics } from "../stats/metrics.js";
 import { logError, logInfo, summarizeError } from "../utils/logger.js";
 import type { TicketActivitySink, WorkerExecutionDispatcher } from "../contracts/worker.js";
+import { isValidCronExpression, matchesCronExpression } from "./script-scheduler.js";
+import { parseLocalDateTimeToEpochMs } from "../time/clock.js";
 import type { NeutralRouter } from "./router.js";
 import {
   parseWorkerMandate,
@@ -105,7 +107,8 @@ export class TicketCoordinator {
       (r) =>
         r.status === "routing" ||
         r.status === "running" ||
-        r.status === "waiting_user_confirm",
+        r.status === "awaiting_confirm" ||
+        r.status === "needs_input",
     );
     const stopped: Array<{ id: string; briefTitle: string }> = [];
     for (const row of active) {
@@ -193,7 +196,7 @@ export class TicketCoordinator {
       return { handledByTicket: false };
     }
 
-    this.deps.repo.appendRawMessage({
+    const appendedReply = this.deps.repo.appendRawMessage({
       canonicalUserId: batch.canonicalUserId,
       channel: batch.originChannel,
       platformMsgId: batch.latestPlatformMsgId,
@@ -205,10 +208,34 @@ export class TicketCoordinator {
     });
 
     const cfg = this.deps.getHatoConfig();
+    const replyText = decision.objective_reply?.trim() || batch.combinedText;
+
+    this.deps.repo.updateTicket(target.id, {
+      contextToMsgId: appendedReply.id,
+    });
+
+    if (!target.mandateJson) {
+      this.deps.repo.updateTicket(target.id, {
+        status: "routing",
+        progressNote: "收到补充回复，正在重新规划任务",
+      });
+      const detach = this.deps.runDetached ?? (<T>(fn: () => T) => fn());
+      const job = detach(() =>
+        this.processDelegation(target.id, {
+          canonicalUserId: target.canonicalUserId,
+          originChannel: target.originChannel as ChannelName,
+          hint: `${target.briefTitle}\n用户补充：${replyText}`,
+        }).catch((err) => {
+          logError("DISPATCH", `re-route ${target.id} failed`, err);
+        }),
+      );
+      this.trackPending(job);
+      return { handledByTicket: true, ticketId: target.id };
+    }
+
     const mandate =
       parseWorkerMandate(target.mandateJson) ??
       buildDefaultMandate(cfg, target.id);
-    const replyText = decision.objective_reply?.trim() || batch.combinedText;
 
     this.deps.repo.updateTicket(target.id, {
       status: "running",
@@ -280,6 +307,7 @@ export class TicketCoordinator {
         mandate,
         ticket.originChannel as ChannelName,
         "用户已确认批准该高危操作，请继续完成任务。",
+        true,
       ).catch((err) => {
         logError("DISPATCH", `confirmed resume ${ticketId} failed`, err);
       }),
@@ -318,6 +346,11 @@ export class TicketCoordinator {
       urgency: params.urgency,
     });
 
+    const latest = this.deps.repo.getTicket(ticketId);
+    if (!latest || latest.status === "cancelled") {
+      return;
+    }
+
     await this.applyRouterDecision(
       ticketId,
       params.canonicalUserId,
@@ -334,6 +367,11 @@ export class TicketCoordinator {
     decision: RouterDecision,
     deliverFiles?: boolean,
   ): Promise<void> {
+    const preCheck = this.deps.repo.getTicket(ticketId);
+    if (!preCheck || preCheck.status === "cancelled") {
+      return;
+    }
+
     if (decision.decision === "schedule_op") {
       let applied = false;
       if (decision.target_type === "script") {
@@ -349,13 +387,27 @@ export class TicketCoordinator {
           });
         }
       } else if (decision.target_type === "open_loop") {
-        const nextStatus =
-          decision.action === "delete"
-            ? "cancelled"
-            : decision.action === "pause"
-              ? "paused"
-              : "pending";
-        applied = this.deps.repo.updateOpenLoopStatus(decision.target_id, nextStatus);
+        if (decision.action === "reschedule") {
+          const tz = this.deps.getHatoConfig().owner.timezone;
+          const nextDueAt = decision.cron_expr
+            ? resolveNextDueAtFromExpr(decision.cron_expr, tz)
+            : null;
+          applied =
+            nextDueAt !== null
+              ? this.deps.repo.updateOpenLoop(decision.target_id, {
+                  status: "pending",
+                  dueAt: nextDueAt,
+                })
+              : this.deps.repo.updateOpenLoopStatus(decision.target_id, "pending");
+        } else {
+          const nextStatus =
+            decision.action === "delete"
+              ? "cancelled"
+              : decision.action === "pause"
+                ? "paused"
+                : "pending";
+          applied = this.deps.repo.updateOpenLoopStatus(decision.target_id, nextStatus);
+        }
       }
 
       const summary = applied
@@ -379,9 +431,15 @@ export class TicketCoordinator {
     }
 
     if (decision.decision === "needs_input") {
+      const recentMsgs = this.deps.repo.listRecentMessages(canonicalUserId, 20);
+      const fromMsgId = recentMsgs[0]?.id ?? null;
+      const toMsgId = recentMsgs[recentMsgs.length - 1]?.id ?? null;
       this.deps.repo.updateTicket(ticketId, {
         status: "needs_input",
         briefTitle: decision.brief_title,
+        contextId: `ctx_${ticketId}`,
+        ...(fromMsgId ? { contextFromMsgId: fromMsgId } : {}),
+        ...(toMsgId ? { contextToMsgId: toMsgId } : {}),
         progressNote: "等待补充信息",
         resultJson: JSON.stringify({
           ticket_id: ticketId,
@@ -461,6 +519,7 @@ export class TicketCoordinator {
             this.deps.repo.updateTicket(ticketId, { externalSessionId: sid });
           },
           onProgress: (note) => {
+            if (this.deps.repo.getTicket(ticketId)?.status === "cancelled") return;
             this.deps.repo.updateTicket(ticketId, { progressNote: note });
             this.emitTicketLiveMeta(ticketId);
             if (extLiveTraceId) {
@@ -504,6 +563,7 @@ export class TicketCoordinator {
     mandate: WorkerMandate,
     originChannel: ChannelName,
     userReply: string,
+    approvedConfirm = false,
   ): Promise<void> {
     this.emitTicketLiveMeta(ticket.ticketId);
     const extLiveTraceId =
@@ -526,10 +586,12 @@ export class TicketCoordinator {
     const workerStartPerf = performance.now();
     try {
       result = await this.deps.dispatcher.resume(ticket, mandate, userReply, {
+        ...(approvedConfirm ? { approvedConfirm: true } : {}),
         onSessionId: (sid) => {
           this.deps.repo.updateTicket(ticket.ticketId, { externalSessionId: sid });
         },
         onProgress: (note) => {
+          if (this.deps.repo.getTicket(ticket.ticketId)?.status === "cancelled") return;
           this.deps.repo.updateTicket(ticket.ticketId, { progressNote: note });
           this.emitTicketLiveMeta(ticket.ticketId);
           if (extLiveTraceId) {
@@ -785,4 +847,33 @@ function buildMandateFromRouterDecision(
     allowed_mcp_servers: decision.allowed_mcp_servers ?? [],
     confirm_before: decision.confirm_before ?? [],
   };
+}
+
+function resolveNextDueAtFromExpr(expr: string, timeZone: string, nowMs = Date.now()): number | null {
+  const trimmed = expr.trim();
+  if (!trimmed) return null;
+
+  if (isValidCronExpression(trimmed)) {
+    const startMinuteMs = Math.floor(nowMs / 60_000) * 60_000 + 60_000;
+    const maxLookaheadMinutes = 31 * 24 * 60;
+    for (let i = 0; i < maxLookaheadMinutes; i += 1) {
+      const candidate = startMinuteMs + i * 60_000;
+      if (matchesCronExpression(trimmed, candidate, timeZone)) {
+        return candidate;
+      }
+    }
+    return null;
+  }
+
+  const localParsed = parseLocalDateTimeToEpochMs(trimmed, timeZone);
+  if (localParsed !== null && Number.isFinite(localParsed)) {
+    return localParsed;
+  }
+
+  const isoParsed = Date.parse(trimmed);
+  if (Number.isFinite(isoParsed)) {
+    return isoParsed;
+  }
+
+  return null;
 }

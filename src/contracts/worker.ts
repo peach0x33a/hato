@@ -80,6 +80,7 @@ export interface TicketExecutionHandle {
 export interface ExecutionProgressCallback {
   onProgress?: (note: string) => void;
   onSessionId?: (sessionId: string) => void;
+  approvedConfirm?: boolean;
 }
 
 export interface ExecutionRunner {

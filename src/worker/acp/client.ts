@@ -109,7 +109,7 @@ export class AcpSessionConnection {
   private readonly child: ChildProcess;
   private readonly connection: ClientConnection;
   private readonly mapper = new AcpEventMapper();
-  private readonly callbacks: AcpClientCallbacks;
+  private callbacks: AcpClientCallbacks;
   private readonly stderrChunks: string[] = [];
   private stderrChars = 0;
   private exitCode: number | null = null;
@@ -122,6 +122,7 @@ export class AcpSessionConnection {
   private activeTextDeltas: string[] = [];
   private activeTextChars = 0;
   private activePermissionDenied: string | undefined;
+  private activeConfirmRequired: { key: string; reason: string } | undefined;
   private lastProgressAt = 0;
 
   public capabilities: AgentCapabilities = {};
@@ -166,7 +167,9 @@ export class AcpSessionConnection {
 
     const { writable, readable } = createLoggedByteStreams({
       child: this.child,
-      onLog: this.callbacks.onProtocolLog,
+      onLog: (direction, line) => {
+        this.callbacks.onProtocolLog?.(direction, line);
+      },
     });
     const stream = ndJsonStream(writable, readable);
 
@@ -224,8 +227,16 @@ export class AcpSessionConnection {
     return this.stderrChunks.join("");
   }
 
+  updateCallbacks(next: AcpClientCallbacks): void {
+    this.callbacks = next;
+  }
+
   recordPermissionDenied(reason: string): void {
     this.activePermissionDenied = reason;
+  }
+
+  recordConfirmRequired(confirm: { key: string; reason: string }): void {
+    this.activeConfirmRequired = confirm;
   }
 
   async initialize(timeoutMs = 10_000): Promise<InitializeResponse> {
@@ -369,6 +380,7 @@ export class AcpSessionConnection {
     finalText: string;
     stopReason?: string;
     permissionDeniedReason?: string;
+    confirmRequired?: { key: string; reason: string };
     timedOut: boolean;
     structuredError?: string;
   }> {
@@ -380,6 +392,7 @@ export class AcpSessionConnection {
     this.activeTextDeltas = [];
     this.activeTextChars = 0;
     this.activePermissionDenied = undefined;
+    this.activeConfirmRequired = undefined;
 
     let timedOut = false;
     const controller = new AbortController();
@@ -404,6 +417,7 @@ export class AcpSessionConnection {
         finalText: this.activeTextDeltas.join(""),
         stopReason: res.stopReason,
         permissionDeniedReason: this.activePermissionDenied,
+        confirmRequired: this.activeConfirmRequired,
         timedOut,
       };
     } catch (err) {
@@ -412,6 +426,7 @@ export class AcpSessionConnection {
       return {
         finalText: this.activeTextDeltas.join(""),
         permissionDeniedReason: this.activePermissionDenied,
+        confirmRequired: this.activeConfirmRequired,
         timedOut,
         structuredError: timedOut ? undefined : errMsg,
       };

@@ -195,7 +195,7 @@ const SetThinkingLevelParams = obj({
   scope: opt(
     oneOf(["persist", "turn"], {
       description:
-        "Whether to persist across turns ('persist', default) or apply only to the current turn ('turn', persona slot only)",
+        "Whether to apply only to the current turn ('turn', default for persona) or persist across turns ('persist')",
     }),
   ),
   reason: opt(str({ description: "Optional brief reason for adjusting thinking intensity" })),

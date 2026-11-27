@@ -86,7 +86,7 @@ test("evaluateAcpPermissionRequest enforces confirm_before and read_only vs yolo
   if (confirmDenied.response.outcome.outcome === "selected") {
     assert.equal(confirmDenied.response.outcome.optionId, "reject");
   }
-  assert.match(confirmDenied.deniedReason ?? "", /git push/);
+  assert.match(confirmDenied.confirmRequired?.reason ?? "", /git push/);
 
   const readOnlyDenied = evaluateAcpPermissionRequest({
     request: baseReq,

@@ -95,11 +95,17 @@ export class QqTokenSource {
   private inflight: Promise<string> | null = null;
 
   constructor(
-    private readonly appId: string,
-    private readonly clientSecret: string,
+    private appId: string,
+    private clientSecret: string,
     private readonly proxyRouter: ScopedProxyRouter,
     private readonly tokenUrl = QQ_TOKEN_URL,
   ) {}
+
+  updateCredentials(appId: string, clientSecret: string): void {
+    this.appId = appId;
+    this.clientSecret = clientSecret;
+    this.invalidate();
+  }
 
   invalidate(): void {
     this.token = "";
@@ -206,14 +212,25 @@ export class QqOpenApiClient {
       params.tokenUrl,
     );
     this.appId = params.appId;
+    this.clientSecret = params.clientSecret;
     this.proxyRouter = params.proxyRouter;
   }
 
-  private readonly appId: string;
+  private appId: string;
+  private clientSecret: string;
   private readonly proxyRouter: ScopedProxyRouter;
 
   updateBaseUrl(baseUrl: string): void {
     this.baseUrl = (baseUrl || QQ_DEFAULT_BASE_URL).replace(/\/+$/, "");
+  }
+
+  updateCredentials(appId: string, clientSecret: string): boolean {
+    const changed = appId !== this.appId || clientSecret !== this.clientSecret;
+    if (!changed) return false;
+    this.appId = appId;
+    this.clientSecret = clientSecret;
+    this.tokens.updateCredentials(appId, clientSecret);
+    return true;
   }
 
   async getToken(): Promise<string> {

@@ -141,7 +141,7 @@ export const HatoConfigSchema = Type.Object({
       enabled: Type.Boolean(),
       base_url: Type.String({ minLength: 1 }),
       bot_token_env: Type.String({ minLength: 1 }),
-      mode: Type.Union([Type.Literal("polling"), Type.Literal("webhook")]),
+      mode: Type.Literal("polling"),
     }),
     qq: Type.Object({
       enabled: Type.Boolean(),
@@ -213,7 +213,7 @@ export const HatoConfigSchema = Type.Object({
     hindsight: Type.Optional(
       Type.Object({
         base_url: Type.String({ minLength: 1 }),
-        embedding_dimensions: Type.Number({ minimum: 1 }),
+        embedding_dimensions: Type.Optional(Type.Number({ minimum: 1 })),
         banks: Type.Object({
           persona: Type.String({ minLength: 1 }),
           tech: Type.String({ minLength: 1 }),
@@ -243,12 +243,14 @@ export const HatoConfigSchema = Type.Object({
     ),
     vm_workdir: Type.Optional(Type.String()),
     workspace_ttl_days: Type.Number({ minimum: 1 }),
-    sandbox: Type.Object({
-      image: Type.String({ minLength: 1 }),
-      memory_limit: Type.String({ minLength: 1 }),
-      cpus: Type.String({ minLength: 1 }),
-      pids_limit: Type.Number({ minimum: 1 }),
-    }),
+    sandbox: Type.Optional(
+      Type.Object({
+        image: Type.String({ minLength: 1 }),
+        memory_limit: Type.String({ minLength: 1 }),
+        cpus: Type.String({ minLength: 1 }),
+        pids_limit: Type.Number({ minimum: 1 }),
+      }),
+    ),
     external_cli: Type.Object({
       allowed_repos: Type.Array(Type.String()),
       reuse_host_auth_and_provider: Type.Optional(Type.Boolean()),
@@ -262,6 +264,7 @@ export const HatoConfigSchema = Type.Object({
           enabled: Type.Optional(Type.Boolean()),
           command: Type.Optional(Type.String({ minLength: 1 })),
           acp_args: Type.Optional(Type.Array(Type.String())),
+          permission_preset: Type.Optional(ExternalCliPermissionPresetSchema),
           sandbox: Type.Optional(Type.String({ minLength: 1 })),
           approval: Type.Optional(Type.String({ minLength: 1 })),
           effort: Type.Optional(Type.String({ minLength: 1 })),
@@ -273,6 +276,7 @@ export const HatoConfigSchema = Type.Object({
           enabled: Type.Optional(Type.Boolean()),
           command: Type.Optional(Type.String({ minLength: 1 })),
           acp_args: Type.Optional(Type.Array(Type.String())),
+          permission_preset: Type.Optional(ExternalCliPermissionPresetSchema),
           mode: Type.Optional(Type.String({ minLength: 1 })),
           skip_permissions: Type.Optional(Type.Boolean()),
           sandbox: Type.Optional(Type.Boolean()),
@@ -285,6 +289,7 @@ export const HatoConfigSchema = Type.Object({
           enabled: Type.Optional(Type.Boolean()),
           command: Type.Optional(Type.String({ minLength: 1 })),
           acp_args: Type.Optional(Type.Array(Type.String())),
+          permission_preset: Type.Optional(ExternalCliPermissionPresetSchema),
           permission_mode: Type.Optional(Type.String({ minLength: 1 })),
           auto: Type.Optional(Type.Boolean()),
           agent: Type.Optional(Type.String()),
@@ -297,6 +302,7 @@ export const HatoConfigSchema = Type.Object({
           enabled: Type.Optional(Type.Boolean()),
           command: Type.Optional(Type.String({ minLength: 1 })),
           acp_args: Type.Optional(Type.Array(Type.String())),
+          permission_preset: Type.Optional(ExternalCliPermissionPresetSchema),
           effort: Type.Optional(Type.String({ minLength: 1 })),
           model: Type.Optional(Type.String({ minLength: 1 })),
         }),
@@ -306,6 +312,7 @@ export const HatoConfigSchema = Type.Object({
           enabled: Type.Optional(Type.Boolean()),
           command: Type.Optional(Type.String({ minLength: 1 })),
           acp_args: Type.Optional(Type.Array(Type.String())),
+          permission_preset: Type.Optional(ExternalCliPermissionPresetSchema),
           permission_mode: Type.Optional(Type.String({ minLength: 1 })),
           skip_permissions: Type.Optional(Type.Boolean()),
           effort: Type.Optional(Type.String({ minLength: 1 })),
@@ -696,6 +703,24 @@ export const EXTERNAL_CLI_BACKENDS = [
   "external-pi",
   "claude-code",
 ] as const;
+
+export function resolveBackendPermissionPreset(
+  config: HatoConfig,
+  backend: (typeof EXTERNAL_CLI_BACKENDS)[number],
+): ExternalCliPermissionPreset {
+  const ext = config.worker.external_cli;
+  const perBackend =
+    backend === "codex-cli"
+      ? ext.codex_cli?.permission_preset
+      : backend === "antigravity-cli"
+        ? ext.antigravity_cli?.permission_preset
+        : backend === "opencode-v2"
+          ? ext.opencode_v2?.permission_preset
+          : backend === "external-pi"
+            ? ext.external_pi?.permission_preset
+            : ext.claude_code?.permission_preset;
+  return perBackend ?? ext.permission_preset ?? "auto_safe";
+}
 
 /**
  * Determine whether a worker backend is currently enabled in HatoConfig.

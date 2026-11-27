@@ -66,27 +66,112 @@ function describeToolCall(request: RequestPermissionRequest): string {
   return parts.join(" ") || "受限工具操作";
 }
 
+export interface WorkerMcpPolicy {
+  name: string;
+  allowedTools: string[];
+  deniedTools: string[];
+  confirmTools: string[];
+}
+
+function matchMcpToolCall(
+  request: RequestPermissionRequest,
+  policies: readonly WorkerMcpPolicy[],
+): { policy: WorkerMcpPolicy; toolName: string } | null {
+  const candidates = [request.toolCall.name, request.toolCall.title].filter(
+    (s): s is string => typeof s === "string" && s.trim().length > 0,
+  );
+  for (const raw of candidates) {
+    const trimmed = raw.trim();
+    // Match `mcp__<server>__<tool>` or `<server>:<tool>` or `<server>/<tool>`
+    for (const policy of policies) {
+      const prefixUnderscore = `mcp__${policy.name}__`;
+      if (trimmed.startsWith(prefixUnderscore)) {
+        return { policy, toolName: trimmed.slice(prefixUnderscore.length) };
+      }
+      const prefixColon = `${policy.name}:`;
+      if (trimmed.startsWith(prefixColon)) {
+        return { policy, toolName: trimmed.slice(prefixColon.length) };
+      }
+      const prefixSlash = `${policy.name}/`;
+      if (trimmed.startsWith(prefixSlash)) {
+        return { policy, toolName: trimmed.slice(prefixSlash.length) };
+      }
+    }
+  }
+  return null;
+}
+
 /**
  * Evaluate an ACP `session/request_permission` request against Hato's mandate
- * (`confirm_before`, `execution_mode`) and configured `permission_preset`.
+ * (`confirm_before`, `execution_mode`), Worker MCP tool policies, and configured `permission_preset`.
  */
 export function evaluateAcpPermissionRequest(params: {
   request: RequestPermissionRequest;
   permissionPreset: ExternalCliPermissionPreset;
   executionMode: WorkerExecutionMode;
   confirmBefore: readonly string[];
-}): { response: RequestPermissionResponse; deniedReason?: string } {
-  const { request, permissionPreset, executionMode, confirmBefore } = params;
+  approvedConfirmKeys?: ReadonlySet<string>;
+  workerMcpPolicies?: readonly WorkerMcpPolicy[];
+}): {
+  response: RequestPermissionResponse;
+  deniedReason?: string;
+  confirmRequired?: { key: string; reason: string };
+} {
+  const {
+    request,
+    permissionPreset,
+    executionMode,
+    confirmBefore,
+    approvedConfirmKeys,
+    workerMcpPolicies,
+  } = params;
   const description = describeToolCall(request);
   const lowerDesc = description.toLowerCase();
+
+  if (workerMcpPolicies && workerMcpPolicies.length > 0) {
+    const matchedMcp = matchMcpToolCall(request, workerMcpPolicies);
+    if (matchedMcp) {
+      const { policy, toolName } = matchedMcp;
+      if (policy.deniedTools.includes(toolName)) {
+        return {
+          response: buildDenyResponse(request.options),
+          deniedReason: `MCP 工具 ${policy.name}:${toolName} 已被 denied_tools 策略禁止`,
+        };
+      }
+      if (policy.allowedTools.length > 0 && !policy.allowedTools.includes(toolName)) {
+        return {
+          response: buildDenyResponse(request.options),
+          deniedReason: `MCP 工具 ${policy.name}:${toolName} 不在 allowed_tools 白名单内`,
+        };
+      }
+      if (policy.confirmTools.includes(toolName)) {
+        const confirmKey = `mcp:${policy.name}:${toolName}`;
+        if (!approvedConfirmKeys?.has(confirmKey)) {
+          return {
+            response: buildDenyResponse(request.options),
+            confirmRequired: {
+              key: confirmKey,
+              reason: `调用高危 MCP 工具 ${policy.name}:${toolName} (${description})`,
+            },
+          };
+        }
+      }
+    }
+  }
 
   for (const rule of confirmBefore) {
     const trimmed = rule.trim().toLowerCase();
     if (trimmed && lowerDesc.includes(trimmed)) {
-      return {
-        response: buildDenyResponse(request.options),
-        deniedReason: `命中高危确认规则 (${rule}): ${description}`,
-      };
+      const confirmKey = `rule:${trimmed}`;
+      if (!approvedConfirmKeys?.has(confirmKey) && !approvedConfirmKeys?.has(rule)) {
+        return {
+          response: buildDenyResponse(request.options),
+          confirmRequired: {
+            key: confirmKey,
+            reason: `命中高危确认规则 (${rule}): ${description}`,
+          },
+        };
+      }
     }
   }
 

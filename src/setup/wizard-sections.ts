@@ -663,13 +663,12 @@ export async function promptFullGatewayStep(
     tgMode = guardCancel(
       await p.select({
         message: "Telegram 接收模式 (gateway.telegram.mode)",
-        initialValue: tgMode,
+        initialValue: "polling",
         options: [
           { value: "polling", label: "polling（长轮询，无需公网域名）" },
-          { value: "webhook", label: "webhook" },
         ],
       }),
-    ) as "polling" | "webhook";
+    ) as "polling";
 
     const existingIdsText = tgUserIds.map(String).join(", ");
     const bindMode = guardCancel(
@@ -1227,7 +1226,7 @@ export async function promptSlotsStep(
   const persona = await pickTarget("persona", targets[0]!);
   const currentlyAllSame =
     !initialSlots ||
-    (["router", "curator", "worker", "hindsight_llm"] as const).every(
+    (["router", "curator", "worker"] as const).every(
       (s) => !initialSlots[s] || initialSlots[s] === persona,
     );
 
@@ -1235,7 +1234,7 @@ export async function promptSlotsStep(
     targets.length === 1 ||
     guardCancel(
       await p.confirm({
-        message: `其余 4 个必选槽位（router / curator / worker / hindsight_llm）是否也设为 "${persona}"？`,
+        message: `其余 3 个必选槽位（router / curator / worker）是否也设为 "${persona}"？`,
         initialValue: currentlyAllSame,
       }),
     );
@@ -1246,14 +1245,12 @@ export async function promptSlotsStep(
         router: persona,
         curator: persona,
         worker: persona,
-        hindsight_llm: persona,
       }
     : {
         persona,
         router: await pickTarget("router", persona),
         curator: await pickTarget("curator", persona),
         worker: await pickTarget("worker", persona),
-        hindsight_llm: await pickTarget("hindsight_llm", persona),
       };
 
   let visionTarget: string | undefined =

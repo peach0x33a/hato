@@ -1,4 +1,7 @@
-import { resolveWorkerExternalCliConfig, type HatoConfig } from "../../config/app.js";
+import {
+  resolveBackendPermissionPreset,
+  type HatoConfig,
+} from "../../config/app.js";
 import type { ExternalCliBackend } from "../cli-probe.js";
 import type { AcpBackendProfile, AcpLaunchSpec, WorkerExecutionMode } from "./types.js";
 
@@ -16,13 +19,13 @@ export const ACP_BACKEND_PROFILES: Record<ExternalCliBackend, AcpBackendProfile>
     baseArgs: ["acp"],
     installHint: "请安装 Antigravity CLI (agy) 并确保其在 PATH 中，或在设置中指定 command。",
     buildLaunchArgs(config, executionMode) {
-      const ext = resolveWorkerExternalCliConfig(config);
+      const preset = resolveBackendPermissionPreset(config, "antigravity-cli");
       const agy = config.worker.external_cli.antigravity_cli;
       const args = [...this.baseArgs];
       const shouldSkipPerms =
         executionMode === "vm_unrestricted" ||
         agy?.skip_permissions === true ||
-        (agy?.skip_permissions === undefined && ext.permissionPreset === "yolo");
+        (agy?.skip_permissions === undefined && preset === "yolo");
       if (shouldSkipPerms) {
         args.push("--dangerously-skip-permissions");
       }
@@ -39,7 +42,11 @@ export const ACP_BACKEND_PROFILES: Record<ExternalCliBackend, AcpBackendProfile>
       return config.worker.external_cli.antigravity_cli?.effort?.trim() || undefined;
     },
     desiredMode(config) {
-      return config.worker.external_cli.antigravity_cli?.mode?.trim() || undefined;
+      const explicit = config.worker.external_cli.antigravity_cli?.mode?.trim();
+      if (explicit) return explicit;
+      return resolveBackendPermissionPreset(config, "antigravity-cli") === "read_only"
+        ? "plan"
+        : undefined;
     },
   },
 
@@ -59,7 +66,13 @@ export const ACP_BACKEND_PROFILES: Record<ExternalCliBackend, AcpBackendProfile>
       return config.worker.external_cli.opencode_v2?.effort?.trim() || undefined;
     },
     desiredMode(config) {
-      return config.worker.external_cli.opencode_v2?.agent?.trim() || undefined;
+      const oc = config.worker.external_cli.opencode_v2;
+      if (oc?.agent?.trim()) return oc.agent.trim();
+      if (oc?.permission_mode?.trim()) return oc.permission_mode.trim();
+      if (oc?.auto === false) return "plan";
+      return resolveBackendPermissionPreset(config, "opencode-v2") === "read_only"
+        ? "plan"
+        : undefined;
     },
   },
 
@@ -82,7 +95,12 @@ export const ACP_BACKEND_PROFILES: Record<ExternalCliBackend, AcpBackendProfile>
     desiredMode(config, executionMode) {
       const cc = config.worker.external_cli.claude_code;
       if (cc?.permission_mode?.trim()) return cc.permission_mode.trim();
-      if (executionMode === "vm_unrestricted" || cc?.skip_permissions) return "bypassPermissions";
+      const preset = resolveBackendPermissionPreset(config, "claude-code");
+      if (executionMode === "vm_unrestricted" || cc?.skip_permissions || preset === "yolo") {
+        return "bypassPermissions";
+      }
+      if (preset === "read_only") return "plan";
+      if (preset === "auto_safe") return "acceptEdits";
       return undefined;
     },
   },
@@ -95,7 +113,14 @@ export const ACP_BACKEND_PROFILES: Record<ExternalCliBackend, AcpBackendProfile>
       "请安装 Codex ACP Bridge: npm i -g @agentclientprotocol/codex-acp，或在配置中自定义 command。",
     buildLaunchArgs(config) {
       const cx = config.worker.external_cli.codex_cli;
-      return [...this.baseArgs, ...readExtraAcpArgs(cx)];
+      const extra = readExtraAcpArgs(cx);
+      const args = [...this.baseArgs];
+      const sandbox = cx?.sandbox?.trim();
+      if (sandbox && !extra.some((a) => a.includes("sandbox_mode"))) {
+        args.push("-c", `sandbox_mode=${sandbox}`);
+      }
+      args.push(...extra);
+      return args;
     },
     desiredModel(config) {
       return config.worker.external_cli.codex_cli?.model?.trim() || undefined;
@@ -103,8 +128,13 @@ export const ACP_BACKEND_PROFILES: Record<ExternalCliBackend, AcpBackendProfile>
     desiredEffort(config) {
       return config.worker.external_cli.codex_cli?.effort?.trim() || undefined;
     },
-    desiredMode(config) {
-      return config.worker.external_cli.codex_cli?.approval?.trim() || undefined;
+    desiredMode(config, executionMode) {
+      const cx = config.worker.external_cli.codex_cli;
+      if (cx?.approval?.trim()) return cx.approval.trim();
+      const preset = resolveBackendPermissionPreset(config, "codex-cli");
+      if (executionMode === "vm_unrestricted" || preset === "yolo") return "never";
+      if (preset === "read_only") return "read-only";
+      return undefined;
     },
   },
 

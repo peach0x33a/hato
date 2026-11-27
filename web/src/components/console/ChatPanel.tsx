@@ -341,6 +341,17 @@ export function ChatPanel({
   }, [selectedSessionId]);
 
   useEffect(() => {
+    if (selectedSessionId) return;
+    const unsubscribe = api.subscribeChatEvents((evt) => {
+      if (evt.type === "refresh_history" && !streamingRef.current) {
+        setSessionEpoch((n) => n + 1);
+        void syncTicketsAndHistoryRef.current(null, true);
+      }
+    });
+    return () => unsubscribe();
+  }, [selectedSessionId]);
+
+  useEffect(() => {
     if (selectedSessionId || activeTickets.length === 0) return;
     const timer = window.setInterval(() => {
       void syncTicketsAndHistory(null);
@@ -426,16 +437,77 @@ export function ChatPanel({
     setSlashBusy(true);
     try {
       let replyText = "";
+      let handledAsChat = false;
+      const localUserId = `local-slash-user-${Date.now()}`;
+      const localAssistantId = `local-slash-assistant-${Date.now()}`;
+      const ensureChatBubblesInserted = () => {
+        if (handledAsChat) return;
+        handledAsChat = true;
+        setItems((prev) => [
+          ...prev,
+          {
+            id: localUserId,
+            role: "user",
+            bubbles: [cmd],
+            images: [],
+            createdAt: Date.now(),
+          },
+          {
+            id: localAssistantId,
+            role: "assistant",
+            bubbles: [],
+            images: [],
+            createdAt: Date.now(),
+          },
+        ]);
+      };
+
       await api.sendChatStream({ text: cmd, images: [] }, (evt: ChatSseEvent) => {
         if (evt.type === "slash_reply") {
           replyText = evt.text;
+        } else if (evt.type === "photo") {
+          setItems((prev) => [
+            ...prev,
+            {
+              id: `local-slash-photo-${Date.now()}`,
+              role: "assistant",
+              bubbles: evt.caption ? [evt.caption] : [],
+              images: [evt.dataUrl],
+              createdAt: Date.now(),
+            },
+          ]);
+        } else if (evt.type === "early_bubbles") {
+          ensureChatBubblesInserted();
+          setItems((prev) =>
+            prev.map((m) =>
+              m.id === localAssistantId
+                ? { ...m, bubbles: [...m.bubbles, ...evt.bubbles] }
+                : m,
+            ),
+          );
+        } else if (evt.type === "assistant_bubbles") {
+          ensureChatBubblesInserted();
+          setItems((prev) =>
+            prev.map((m) =>
+              m.id === localAssistantId
+                ? {
+                    ...m,
+                    bubbles: [...m.bubbles, ...evt.bubbles],
+                    telemetry: evt.telemetry,
+                  }
+                : m,
+            ),
+          );
         } else if (evt.type === "error") {
           throw new Error(evt.message);
         }
       });
 
       const lower = cmd.toLowerCase();
-      if (lower.startsWith("/new")) {
+      if (handledAsChat) {
+        setSessionEpoch((n) => n + 1);
+        void syncTicketsAndHistory(selectedSessionId);
+      } else if (lower.startsWith("/new")) {
         setItems([]);
         setSummaryText("");
         setLatestTrace(null);

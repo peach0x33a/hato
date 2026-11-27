@@ -264,9 +264,17 @@ export function createDefaultSlashCommandRegistry(): SlashCommandRegistry {
       helpLine: "- `/help`：查看可用系统指令说明",
       availableWhenUnbound: true,
       async execute(ctx) {
+        const memoryAvailable = Boolean(
+          ctx.deps.getMemoryStatus || ctx.deps.syncMemory || ctx.deps.forgetMemory,
+        );
+        const visibleSpecs = ctx.registry.listSpecs().filter((spec) => {
+          if (spec.command === "sethome" && !ctx.deps.setHomeChannel) return false;
+          if (spec.requiresMemory && !memoryAvailable) return false;
+          return true;
+        });
         return [
           "可用系统指令（不进入对话历史）：",
-          ...ctx.registry.listSpecs().map((spec) => spec.helpLine),
+          ...visibleSpecs.map((spec) => spec.helpLine),
         ].join("\n");
       },
     })
@@ -514,9 +522,9 @@ export function createDefaultSlashCommandRegistry(): SlashCommandRegistry {
       helpLine: "- `/forget <关键词>`：级联删除匹配到的长期记忆",
       requiresMemory: true,
       async execute(ctx) {
-        const query = ctx.args.join(" ").trim();
+        const query = ctx.args.join(" ").trim() || ctx.replyToText?.trim() || "";
         if (!query) {
-          return "用法: `/forget <关键词或记忆ID>`";
+          return "用法: `/forget <关键词或记忆ID>`（也可回复目标消息并发送 `/forget`）";
         }
         if (!ctx.deps.forgetMemory) {
           return "当前运行时暂未接入 `/forget` 级联遗忘能力。";

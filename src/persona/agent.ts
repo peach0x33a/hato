@@ -158,6 +158,7 @@ export class PersonaRuntime {
   private reloadHandler: (() => Promise<void>) | null = null;
   private syncedCompactedUntilTs = 0;
   private pendingTranscriptRefresh = false;
+  private pendingToolSync = false;
   private turnPendingExecutedEvents: RawMessageRecord[] = [];
   private stopTicketsHandler:
     | ((
@@ -447,12 +448,23 @@ export class PersonaRuntime {
       this.syncTools();
       this.refreshTranscriptFromDb();
     } else {
+      this.pendingToolSync = true;
       this.pendingTranscriptRefresh = true;
     }
   }
 
   setReloadHandler(handler: (() => Promise<void>) | null): void {
     this.reloadHandler = handler;
+  }
+
+  getActiveTurnOriginChannel(): InboundBatch["originChannel"] {
+    return this.activeTurnOriginChannel;
+  }
+
+  async sendPhotoInActiveTurn(photo: Buffer, caption?: string): Promise<boolean> {
+    if (!this.activePhotoSender) return false;
+    await this.activePhotoSender(photo, caption);
+    return true;
   }
 
   setDelegateHandler(
@@ -1146,8 +1158,9 @@ export class PersonaRuntime {
       },
       onSetThinkingLevel: (input) => {
         const targetSlot = input.slot ?? "persona";
+        const requestedScope = input.scope ?? "turn";
         const scope: "persist" | "turn" =
-          input.scope === "turn" && targetSlot === "persona" ? "turn" : "persist";
+          requestedScope === "turn" && targetSlot === "persona" ? "turn" : "persist";
         if (scope === "turn") {
           const resolved = this.modelRegistry.resolveSlot("persona");
           const effective = this.modelRegistry.resolveSlotThinkingLevel(
@@ -1607,6 +1620,10 @@ export class PersonaRuntime {
       this.activeTurnRecalledIds.clear();
       this.turnPendingExecutedEvents = [];
       if (this.pendingTranscriptRefresh) {
+        if (this.pendingToolSync) {
+          this.pendingToolSync = false;
+          this.syncTools();
+        }
         this.refreshTranscriptFromDb();
       } else {
         const retainedUserMsg =
@@ -1749,6 +1766,10 @@ export class PersonaRuntime {
     }
 
     if (this.pendingTranscriptRefresh) {
+      if (this.pendingToolSync) {
+        this.pendingToolSync = false;
+        this.syncTools();
+      }
       this.turnPendingExecutedEvents = [];
       this.refreshTranscriptFromDb();
     } else {
@@ -1865,6 +1886,7 @@ export class PersonaRuntime {
     fallbackToSummary?: boolean;
     fallbackMessage?: string;
     persistEvent?: boolean;
+    sendPhotoToUser?: SendPhotoToUserFn;
   }): Promise<string[]> {
     this.activeTurnOriginChannel = params.channel;
     const resolved = this.modelRegistry.resolveSlot("persona");
@@ -1924,6 +1946,12 @@ export class PersonaRuntime {
     this.lastTimeCardSnapshot = frozenEphemeral.tailText;
     this.activeTurnTailPinnedOnMessage = true;
     this.activeTurnEphemeralTail = null;
+    this.activePhotoSender = params.sendPhotoToUser ?? null;
+    this.browserRuntime?.setPhotoSender(
+      params.sendPhotoToUser
+        ? (photo, caption) => params.sendPhotoToUser!(photo, caption)
+        : null,
+    );
 
     let promptErr: unknown = null;
     try {
@@ -1941,6 +1969,8 @@ export class PersonaRuntime {
       promptErr = err;
     } finally {
       telemetry.unsubscribe();
+      this.activePhotoSender = null;
+      this.browserRuntime?.setPhotoSender(null);
       this.activeTurnTailPinnedOnMessage = false;
       this.activeCallStartPerf = null;
       if (!promptErr && !this.agent.state.errorMessage && this.activeTurnEphemeralTail) {
@@ -2072,6 +2102,10 @@ export class PersonaRuntime {
     });
 
     if (this.pendingTranscriptRefresh) {
+      if (this.pendingToolSync) {
+        this.pendingToolSync = false;
+        this.syncTools();
+      }
       this.turnPendingExecutedEvents = [];
       this.refreshTranscriptFromDb();
     } else {
@@ -2362,6 +2396,10 @@ export class PersonaRuntime {
         return stream.result();
       });
     } catch (err) {
+      const errMsg = err instanceof Error ? err.message : String(err);
+      if (errMsg.toLowerCase().includes("cachedcontent")) {
+        this.googleExplicitCache.invalidateForModel(resolved.providerSlug, resolved.model.id);
+      }
       const latencyMs = Math.max(1, Math.round(performance.now() - callStartPerf));
       try {
         this.repo.insertTurnTrace({
@@ -2622,6 +2660,17 @@ export class PersonaRuntime {
               identity: DEFAULT_AGENT_IDENTITY,
               ...(supportsCustomFetchOption(resolved.model.api) ? { fetch: scopedFetch } : {}),
               reasoning: compactionThinking === "off" ? undefined : compactionThinking,
+              onPayload: async (payload, targetModel) => {
+                if (targetModel.api !== "google-generative-ai" || !resolved.explicitCache) {
+                  return undefined;
+                }
+                return this.googleExplicitCache.preparePayload({
+                  model: targetModel,
+                  apiKey,
+                  payload,
+                  ttlMinutes: resolved.cacheTtlMinutes,
+                });
+              },
             }),
           {
             policy: resolveLlmRetryConfig(this.hatoConfig),
@@ -2641,6 +2690,10 @@ export class PersonaRuntime {
         return stream.result();
       });
     } catch (err) {
+      const errMsg = err instanceof Error ? err.message : String(err);
+      if (errMsg.toLowerCase().includes("cachedcontent")) {
+        this.googleExplicitCache.invalidateForModel(resolved.providerSlug, resolved.model.id);
+      }
       const latencyMs = Math.max(1, Math.round(performance.now() - callStartPerf));
       try {
         this.repo.insertTurnTrace({

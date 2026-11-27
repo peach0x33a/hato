@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 import { parse as parseToml } from "smol-toml";
 import {
+  resolveBackendPermissionPreset,
   resolveWorkerExternalCliConfig,
   type HatoConfig,
 } from "../config/app.js";
@@ -646,7 +647,14 @@ export async function probeAllExternalClis(
 
       const agentVersion = handshake.agentInfo?.version ?? undefined;
       const agentName = handshake.agentInfo?.name ?? undefined;
-      const extCfg = resolveWorkerExternalCliConfig(config);
+      const backendPreset = resolveBackendPermissionPreset(config, spec.backend);
+      const parsedMajorVersion = agentVersion
+        ? Number.parseInt(agentVersion.replace(/^v/i, "").split(".")[0] ?? "", 10)
+        : Number.NaN;
+      const opencodeV2Verified =
+        spec.backend === "opencode-v2"
+          ? available && (Number.isNaN(parsedMajorVersion) || parsedMajorVersion >= 2)
+          : undefined;
 
       const options: CliOptionChoice[] = [
         {
@@ -654,23 +662,19 @@ export async function probeAllExternalClis(
           label: "权限预设",
           kind: "enum",
           choices: ["yolo", "auto_safe", "read_only", "follow_host", "custom"],
-          effectiveHatoValue: extCfg.permissionPreset,
+          effectiveHatoValue: backendPreset,
         },
-        ...(launch.desiredEffort
-          ? [
-              {
-                key: "effort",
-                label: "思考强度",
-                kind: "enum" as const,
-                choices:
-                  spec.backend === "codex-cli"
-                    ? readCodexSupportedEfforts(homeDir, launch.desiredModel)
-                    : ["low", "medium", "high", "xhigh", "max"],
-                hostDefault: hostDefaults.defaults.effort,
-                effectiveHatoValue: launch.desiredEffort,
-              },
-            ]
-          : []),
+        {
+          key: "effort",
+          label: "思考强度",
+          kind: "enum",
+          choices:
+            spec.backend === "codex-cli"
+              ? readCodexSupportedEfforts(homeDir, launch.desiredModel)
+              : ["low", "medium", "high", "xhigh", "max"],
+          hostDefault: hostDefaults.defaults.effort,
+          effectiveHatoValue: launch.desiredEffort,
+        },
       ];
 
       return {
@@ -682,7 +686,7 @@ export async function probeAllExternalClis(
         installed,
         available,
         version: agentVersion,
-        ...(spec.backend === "opencode-v2" ? { v2Verified: available } : {}),
+        ...(opencodeV2Verified !== undefined ? { v2Verified: opencodeV2Verified } : {}),
         ...(reason ? { reason } : {}),
         hostConfigPath: hostDefaults.configPath,
         hostSummary: hostDefaults.summary,

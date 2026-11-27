@@ -7,7 +7,7 @@ import type { ChannelCapabilities, InboundBatch } from "./types.js";
 
 export const WEB_CHANNEL_CAPABILITIES: ChannelCapabilities = {
   channel: "web",
-  maxBubblesPerTurn: 0,
+  maxBubblesPerTurn: 3,
   supportsInlineConfirm: true,
   supportsDirectFileUpload: false,
   proactiveSupported: false,
@@ -78,7 +78,12 @@ export class WebChatGateway {
     }
 
     const visibleMessages = rawMessages.filter(
-      (m) => !(m.role === "executed_event" && /^\[?工单\s/.test(m.content)),
+      (m) =>
+        !(
+          m.role === "executed_event" &&
+          /^\[?工单\s/.test(m.content) &&
+          !m.content.includes("等待确认执行")
+        ),
     );
 
     const messages = visibleMessages.map((m) => ({
@@ -113,9 +118,19 @@ export class WebChatGateway {
     const body = (await this.deps.readJsonBody(req)) as {
       text?: unknown;
       images?: Array<{ data?: unknown; mimeType?: unknown }>;
+      replyToPlatformMsgId?: unknown;
+      replyToText?: unknown;
     };
 
     const text = typeof body.text === "string" ? body.text.trim() : "";
+    const replyToPlatformMsgId =
+      typeof body.replyToPlatformMsgId === "string" && body.replyToPlatformMsgId.trim()
+        ? body.replyToPlatformMsgId.trim()
+        : undefined;
+    const replyToText =
+      typeof body.replyToText === "string" && body.replyToText.trim()
+        ? body.replyToText.trim()
+        : undefined;
     const rawImages = Array.isArray(body.images) ? body.images : [];
     const loadedImages: ImageContent[] = rawImages
       .filter(
@@ -205,6 +220,8 @@ export class WebChatGateway {
         originPlatformUserId: uid,
         platformMsgIds: [msgId],
         latestPlatformMsgId: msgId,
+        ...(replyToPlatformMsgId ? { replyToPlatformMsgId } : {}),
+        ...(replyToText ? { replyToText } : {}),
         combinedText: text,
         attachments,
         images: loadedImages.length > 0 ? loadedImages : undefined,

@@ -190,6 +190,7 @@ export const SCOPE_OPTIONS = [
   { value: "memory", label: "memory（长期记忆）" },
   { value: "mcp", label: "mcp（远程 MCP 服务）" },
   { value: "worker", label: "worker（后台任务）" },
+  { value: "updates", label: "updates（版本更新检查）" },
 ];
 
 export const BACKEND_DISPLAY_NAMES: Record<ExternalCliProbeEntry["backend"], string> = {

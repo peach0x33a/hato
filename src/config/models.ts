@@ -218,7 +218,7 @@ export const ModelsFileSchema = Type.Object({
     router: Type.String({ minLength: 3 }),
     curator: Type.String({ minLength: 3 }),
     worker: Type.String({ minLength: 3 }),
-    hindsight_llm: Type.String({ minLength: 3 }),
+    hindsight_llm: Type.Optional(Type.String({ minLength: 3 })),
     vision: Type.Optional(Type.String({ minLength: 3 })),
   }),
   slot_thinking: Type.Optional(
@@ -565,7 +565,13 @@ function buildValidatedModelsCatalog(
   }
 
   for (const slot of MODEL_SLOTS) {
-    const rawTarget = rawParsed.slots[slot] ?? (slot === "vision" ? rawParsed.slots.persona : undefined);
+    const rawTarget =
+      rawParsed.slots[slot] ??
+      (slot === "vision"
+        ? rawParsed.slots.persona
+        : slot === "hindsight_llm"
+          ? rawParsed.slots.curator
+          : undefined);
     if (!rawTarget) {
       throw new Error(`Missing target for slot "${slot}" in ${sourceLabel}`);
     }
@@ -705,7 +711,11 @@ export class ModelRegistry {
     const rawTarget =
       this.slotOverrides[slot] ??
       this.fileConfig.slots[slot] ??
-      (slot === "vision" ? this.slotOverrides.persona ?? this.fileConfig.slots.persona : undefined);
+      (slot === "vision"
+        ? this.slotOverrides.persona ?? this.fileConfig.slots.persona
+        : slot === "hindsight_llm"
+          ? this.slotOverrides.curator ?? this.fileConfig.slots.curator
+          : undefined);
     if (!rawTarget) {
       throw new Error(`Slot "${slot}" is not configured`);
     }

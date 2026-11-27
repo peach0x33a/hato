@@ -1,10 +1,13 @@
-import { cpSync, mkdirSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, symlinkSync } from "node:fs";
+import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import type { McpServer } from "@agentclientprotocol/sdk";
 import {
   resolveExternalCliCustomEnv,
+  resolveWorkerExternalCliConfig,
   type HatoConfig,
 } from "../config/app.js";
+import type { ScopedProxyRouter } from "../config/proxy.js";
 import {
   resolveMcpHttpHeaders,
   resolveMcpServerEntries,
@@ -35,6 +38,7 @@ export interface PrepareExternalCliOverlayParams {
   selectedSkills: readonly SkillEntry[];
   contextMcp?: ContextMcpSpec;
   workerProxyEnv?: Readonly<Record<string, string>>;
+  proxyRouter?: ScopedProxyRouter;
   runtimeRootDir?: string;
   baseEnv?: Readonly<Record<string, string | undefined>>;
 }
@@ -70,6 +74,61 @@ const SAFE_SYSTEM_ENV_KEYS = [
   "XDG_STATE_HOME",
 ] as const;
 
+const HOST_PROVIDER_AUTH_ENV_KEYS = [
+  "OPENAI_API_KEY",
+  "ANTHROPIC_API_KEY",
+  "GEMINI_API_KEY",
+  "GOOGLE_API_KEY",
+  "OPENROUTER_API_KEY",
+] as const;
+
+function prepareIsolatedCliEnvOverrides(params: {
+  runtimeRootDir: string;
+  ticketId: string;
+  realHome: string;
+  reuseHostAuthAndProvider: boolean;
+  inheritHostMcp: boolean;
+  executionMode: WorkerExecutionMode;
+}): Record<string, string> {
+  if (params.executionMode === "vm_unrestricted" || params.inheritHostMcp) {
+    return {};
+  }
+  const shadowHome = resolve(
+    params.runtimeRootDir,
+    "isolated-home",
+    sanitizeTicketToken(params.ticketId),
+  );
+  const shadowConfigHome = join(shadowHome, ".config");
+  mkdirSync(shadowConfigHome, { recursive: true });
+
+  if (params.reuseHostAuthAndProvider) {
+    const authFiles = [
+      [".codex", "auth.json"],
+      [".claude", ".credentials.json"],
+      [".config", "opencode", "auth.json"],
+      [".gemini", "oauth_creds.json"],
+      [".gemini", "google_accounts.json"],
+    ];
+    for (const parts of authFiles) {
+      const src = join(params.realHome, ...parts);
+      if (!existsSync(src)) continue;
+      const dst = join(shadowHome, ...parts);
+      mkdirSync(dirname(dst), { recursive: true });
+      try {
+        if (!existsSync(dst)) symlinkSync(src, dst);
+      } catch {
+        // best-effort symlink
+      }
+    }
+  }
+
+  return {
+    HOME: shadowHome,
+    XDG_CONFIG_HOME: shadowConfigHome,
+    CODEX_HOME: join(shadowHome, ".codex"),
+  };
+}
+
 /**
  * Construct a clean subprocess environment containing only safe OS vars, optional worker proxy vars,
  * and explicit tool/MCP env entries—never leaking Hato secrets such as TG_BOT_TOKEN.
@@ -78,6 +137,7 @@ export function buildCleanWorkerEnv(params: {
   baseEnv?: Readonly<Record<string, string | undefined>>;
   workerProxyEnv?: Readonly<Record<string, string>>;
   extraEnv?: Readonly<Record<string, string>>;
+  stripHostProviderKeys?: boolean;
 }): Record<string, string> {
   const source = params.baseEnv ?? process.env;
   const out: Record<string, string> = {};
@@ -97,6 +157,13 @@ export function buildCleanWorkerEnv(params: {
   if (params.extraEnv) {
     for (const [k, v] of Object.entries(params.extraEnv)) {
       out[k] = v;
+    }
+  }
+  if (params.stripHostProviderKeys) {
+    for (const key of HOST_PROVIDER_AUTH_ENV_KEYS) {
+      if (!params.extraEnv || !(key in params.extraEnv)) {
+        delete out[key];
+      }
     }
   }
   return out;
@@ -158,21 +225,54 @@ export function prepareExternalCliOverlay(
     params.executionMode ??
     (params.hatoConfig.worker.execution_mode === "vm_unrestricted" ? "vm_unrestricted" : "isolated");
 
+  const extCfg = resolveWorkerExternalCliConfig(params.hatoConfig);
   const launch = resolveAcpLaunchSpec(params.backend, params.hatoConfig, executionMode);
+  const launchArgs = [...launch.args];
+  if (
+    params.isHostRepo &&
+    stagedSkillsDir &&
+    (params.backend === "claude-code" ||
+      params.backend === "codex-cli" ||
+      params.backend === "antigravity-cli") &&
+    !launchArgs.includes("--add-dir")
+  ) {
+    launchArgs.push("--add-dir", stagedSkillsDir);
+  }
+  if (
+    executionMode !== "vm_unrestricted" &&
+    !extCfg.inheritHostMcp &&
+    params.backend === "claude-code" &&
+    !launchArgs.includes("--strict-mcp-config")
+  ) {
+    launchArgs.push("--strict-mcp-config");
+  }
+
   const customEnv = resolveExternalCliCustomEnv(params.hatoConfig);
+  const realHome = params.baseEnv?.HOME?.trim() || homedir();
+  const isolatedHomeEnv = prepareIsolatedCliEnvOverrides({
+    runtimeRootDir,
+    ticketId: params.ticketId,
+    realHome,
+    reuseHostAuthAndProvider: extCfg.reuseHostAuthAndProvider,
+    inheritHostMcp: extCfg.inheritHostMcp,
+    executionMode,
+  });
+
   const mcpServers = buildAcpMcpServers({
     contextMcp: params.contextMcp,
     workerServers: authorizedWorkerServers,
+    proxyRouter: params.proxyRouter,
   });
 
   return {
     backend: params.backend,
     command: launch.command,
-    args: launch.args,
+    args: launchArgs,
     env: buildCleanWorkerEnv({
       baseEnv: params.baseEnv,
       workerProxyEnv: params.workerProxyEnv,
-      extraEnv: customEnv,
+      extraEnv: { ...customEnv, ...isolatedHomeEnv },
+      stripHostProviderKeys: !extCfg.reuseHostAuthAndProvider,
     }),
     mcpServers,
     stagedSkillsDir,
@@ -199,6 +299,7 @@ function selectAuthorizedWorkerMcpServers(
 export function buildAcpMcpServers(params: {
   contextMcp?: ContextMcpSpec;
   workerServers: readonly ResolvedMcpServerConfig[];
+  proxyRouter?: ScopedProxyRouter;
 }): McpServer[] {
   const servers: McpServer[] = [];
 
@@ -213,11 +314,15 @@ export function buildAcpMcpServers(params: {
 
   for (const srv of params.workerServers) {
     if (srv.transport === "stdio" && srv.command) {
+      const scopedProxyEnv = params.proxyRouter
+        ? params.proxyRouter.getWorkerProxyEnv(srv.proxyScope || `mcp.${srv.name}`)
+        : {};
+      const mergedEnv = { ...scopedProxyEnv, ...resolveMcpServerEnv(srv) };
       servers.push({
         name: srv.name,
         command: srv.command,
         args: srv.args,
-        env: Object.entries(resolveMcpServerEnv(srv)).map(([name, value]) => ({ name, value })),
+        env: Object.entries(mergedEnv).map(([name, value]) => ({ name, value })),
       });
     } else if (srv.transport === "http" && srv.url) {
       servers.push({

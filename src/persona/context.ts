@@ -97,7 +97,8 @@ export function buildSystemInjectedPromptText(
 
 /**
  * Assemble Layer 1 static system prompt from persona markdown, static relationship facts,
- * the deterministic Level 1 Personal Skills index, the on-demand tool index, and active bubble rules.
+ * the deterministic Level 1 Personal Skills index, and active bubble rules.
+ * Note: Persona exposes the full canonically-sorted toolset for KV-cache prefix stability.
  */
 export function buildStaticSystemPrompt(
   basePersonaPrompt: string,

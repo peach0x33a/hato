@@ -4,11 +4,12 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   isWorkerBackendEnabled,
+  resolveBackendPermissionPreset,
   resolveSkillsDir,
   resolveWorkerExternalCliConfig,
   type HatoConfig,
 } from "../config/app.js";
-import type { McpConfig } from "../config/mcp.js";
+import { resolveMcpServerEntries, type McpConfig } from "../config/mcp.js";
 import type { ScopedProxyRouter } from "../config/proxy.js";
 import { computeContextToken, getProcessContextSecret } from "../dispatch/context-slice.js";
 import type { WorkerMandate, WorkerResult } from "../dispatch/schema.js";
@@ -61,6 +62,8 @@ export class ExternalCliRunner implements ExecutionRunner {
   private readonly activeConnections = new Map<string, AcpSessionConnection>();
   private readonly pooledSessions = new Map<string, PooledAcpSession>();
   private readonly abortedTickets = new Set<string>();
+  private readonly pendingConfirmKeyByTicket = new Map<string, string>();
+  private readonly approvedConfirmKeysByTicket = new Map<string, Set<string>>();
 
   constructor(private readonly deps: ExternalCliRunnerDeps) {}
 
@@ -83,6 +86,24 @@ export class ExternalCliRunner implements ExecutionRunner {
     userReply: string,
     callbacks?: ExecutionProgressCallback,
   ): Promise<WorkerResult> {
+    if (callbacks?.approvedConfirm) {
+      let approved = this.approvedConfirmKeysByTicket.get(ticket.ticketId);
+      if (!approved) {
+        approved = new Set();
+        this.approvedConfirmKeysByTicket.set(ticket.ticketId, approved);
+      }
+      const pendingKey = this.pendingConfirmKeyByTicket.get(ticket.ticketId);
+      if (pendingKey) {
+        approved.add(pendingKey);
+        this.pendingConfirmKeyByTicket.delete(ticket.ticketId);
+      } else {
+        for (const rule of mandate.confirm_before) {
+          const trimmed = rule.trim().toLowerCase();
+          if (trimmed) approved.add(`rule:${trimmed}`);
+        }
+      }
+    }
+
     if (!ticket.externalSessionId && !this.pooledSessions.has(ticket.ticketId)) {
       return this.runAcp({
         mode: "start",
@@ -213,15 +234,33 @@ export class ExternalCliRunner implements ExecutionRunner {
 
     const selectedSkills = selectWorkerSkills(resolveSkillsDir(hatoConfig), mandate.skills);
     const workerProxyEnv =
-      mandate.network === "egress"
-        ? this.deps.proxyRouter.getWorkerProxyEnv("worker")
-        : this.deps.proxyRouter.getWorkerProxyEnv("llm-calling");
+      mandate.network === "none"
+        ? {
+            HTTP_PROXY: "http://127.0.0.1:0",
+            HTTPS_PROXY: "http://127.0.0.1:0",
+            ALL_PROXY: "socks5://127.0.0.1:0",
+            NO_PROXY: "",
+          }
+        : mandate.network === "egress"
+          ? this.deps.proxyRouter.getWorkerProxyEnv("worker")
+          : this.deps.proxyRouter.getWorkerProxyEnv("llm-calling");
 
     const contextMcp = buildContextMcpSpec({
       hatoConfig,
       ticketId: ticket.ticketId,
       contextId: ticket.contextId,
     });
+
+    const mcpConfig = this.deps.getMcpConfig();
+    const allowSet = new Set(mandate.allowed_mcp_servers.map((n) => n.trim()).filter(Boolean));
+    const workerMcpPolicies = resolveMcpServerEntries(mcpConfig, "worker")
+      .filter((srv) => srv.enabled && allowSet.has(srv.name))
+      .map((srv) => ({
+        name: srv.name,
+        allowedTools: srv.allowedTools,
+        deniedTools: srv.disabledTools,
+        confirmTools: srv.confirmTools,
+      }));
 
     const overlay = prepareExternalCliOverlay({
       backend,
@@ -230,11 +269,12 @@ export class ExternalCliRunner implements ExecutionRunner {
       isHostRepo: mandate.is_host_repo,
       executionMode,
       hatoConfig,
-      mcpConfig: this.deps.getMcpConfig(),
+      mcpConfig,
       allowedMcpServers: mandate.allowed_mcp_servers,
       selectedSkills,
       contextMcp,
       workerProxyEnv,
+      proxyRouter: mandate.network === "none" ? undefined : this.deps.proxyRouter,
     });
 
     const extCfg = resolveWorkerExternalCliConfig(hatoConfig);
@@ -272,14 +312,73 @@ export class ExternalCliRunner implements ExecutionRunner {
       // best-effort protocol trace logging
     });
 
+    const permissionPreset = resolveBackendPermissionPreset(hatoConfig, backend);
+    const approvedConfirmKeys = this.approvedConfirmKeysByTicket.get(ticket.ticketId);
+    let conn!: AcpSessionConnection;
+    const turnCallbacks = {
+      onSessionId: (sessionId: string) => {
+        callbacks?.onSessionId?.(sessionId);
+      },
+      onProgress: (note: string) => {
+        callbacks?.onProgress?.(note);
+      },
+      onActivity: (patch: Parameters<typeof workerActivityHub.upsert>[1]) => {
+        workerActivityHub.upsert(ticket.ticketId, patch, { persistDir: activityPersistDir });
+      },
+      onProtocolLog: (direction: "rx" | "tx", line: string) => {
+        logStream.write(`[${direction}] ${line}\n`);
+      },
+      onStderr: (strChunk: string) => {
+        const filteredLines = strChunk
+          .split(/\r?\n/)
+          .filter(
+            (l) =>
+              l.trim().length > 0 &&
+              !l.includes("UNDICI-EHPA") &&
+              !l.includes("--trace-warnings"),
+          )
+          .join("\n");
+        if (filteredLines) {
+          workerActivityHub.upsert(
+            ticket.ticketId,
+            {
+              stepKey: `stderr_${runEpoch}`,
+              kind: "stderr",
+              state: "done",
+              title: "CLI 诊断输出",
+              appendOutput: `${filteredLines}\n`,
+            },
+            { persistDir: activityPersistDir },
+          );
+        }
+      },
+      onPermissionRequest: (request: Parameters<typeof evaluateAcpPermissionRequest>[0]["request"]) => {
+        const decision = evaluateAcpPermissionRequest({
+          request,
+          permissionPreset,
+          executionMode,
+          confirmBefore: mandate.confirm_before,
+          approvedConfirmKeys,
+          workerMcpPolicies,
+        });
+        if (decision.confirmRequired) {
+          this.pendingConfirmKeyByTicket.set(ticket.ticketId, decision.confirmRequired.key);
+          conn.recordConfirmRequired(decision.confirmRequired);
+        } else if (decision.deniedReason) {
+          conn.recordPermissionDenied(decision.deniedReason);
+        }
+        return decision.response;
+      },
+    };
+
     const pooled =
       params.mode === "resume" ? this.takePooledSession(ticket.ticketId, backend) : null;
 
-    let conn: AcpSessionConnection;
     let promptText: string;
 
     if (pooled) {
       conn = pooled.conn;
+      conn.updateCallbacks(turnCallbacks);
       promptText = params.userReply ?? "";
       logInfo("WORKER", `reusing pooled ACP session=${pooled.sessionId} ticket=${ticket.ticketId}`);
     } else {
@@ -289,56 +388,7 @@ export class ExternalCliRunner implements ExecutionRunner {
         cwd: mandate.workspace_dir,
         env: overlay.env,
         spawnProcess: this.deps.spawnProcess,
-        callbacks: {
-          onSessionId: (sessionId) => {
-            callbacks?.onSessionId?.(sessionId);
-          },
-          onProgress: (note) => {
-            callbacks?.onProgress?.(note);
-          },
-          onActivity: (patch) => {
-            workerActivityHub.upsert(ticket.ticketId, patch, { persistDir: activityPersistDir });
-          },
-          onProtocolLog: (direction, line) => {
-            logStream.write(`[${direction}] ${line}\n`);
-          },
-          onStderr: (strChunk) => {
-            const filteredLines = strChunk
-              .split(/\r?\n/)
-              .filter(
-                (l) =>
-                  l.trim().length > 0 &&
-                  !l.includes("UNDICI-EHPA") &&
-                  !l.includes("--trace-warnings"),
-              )
-              .join("\n");
-            if (filteredLines) {
-              workerActivityHub.upsert(
-                ticket.ticketId,
-                {
-                  stepKey: `stderr_${runEpoch}`,
-                  kind: "stderr",
-                  state: "done",
-                  title: "CLI 诊断输出",
-                  appendOutput: `${filteredLines}\n`,
-                },
-                { persistDir: activityPersistDir },
-              );
-            }
-          },
-          onPermissionRequest: (request) => {
-            const decision = evaluateAcpPermissionRequest({
-              request,
-              permissionPreset: extCfg.permissionPreset,
-              executionMode,
-              confirmBefore: mandate.confirm_before,
-            });
-            if (decision.deniedReason) {
-              conn.recordPermissionDenied(decision.deniedReason);
-            }
-            return decision.response;
-          },
-        },
+        callbacks: turnCallbacks,
       });
       promptText = "";
     }
@@ -349,6 +399,7 @@ export class ExternalCliRunner implements ExecutionRunner {
       finalText: string;
       stopReason?: string;
       permissionDeniedReason?: string;
+      confirmRequired?: { key: string; reason: string };
       timedOut: boolean;
       structuredError?: string;
     } = {
@@ -446,6 +497,7 @@ export class ExternalCliRunner implements ExecutionRunner {
       stderrText,
       structuredError: promptResult.structuredError,
       permissionDeniedReason: promptResult.permissionDeniedReason,
+      confirmRequired: promptResult.confirmRequired,
       stopReason: promptResult.stopReason,
       timedOut: promptResult.timedOut,
     });
@@ -457,6 +509,8 @@ export class ExternalCliRunner implements ExecutionRunner {
     ) {
       this.parkPooledSession(ticket.ticketId, backend, conn, conn.sessionId);
     } else {
+      this.pendingConfirmKeyByTicket.delete(ticket.ticketId);
+      this.approvedConfirmKeysByTicket.delete(ticket.ticketId);
       await conn.close().catch(() => undefined);
     }
 

@@ -1,4 +1,4 @@
-import { execFile, spawn } from "node:child_process";
+import { execFile, spawn, type ChildProcess } from "node:child_process";
 import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, realpathSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, join, resolve, sep } from "node:path";
@@ -324,6 +324,7 @@ export function foldStaleWorkerToolOutputs(
 export class BuiltinPiRunner implements ExecutionRunner {
   private readonly sessions = new Map<string, BuiltinSessionState>();
   private readonly activeAborts = new Set<string>();
+  private readonly activeChildren = new Map<string, Set<ChildProcess>>();
 
   constructor(
     private readonly deps: {
@@ -348,6 +349,7 @@ export class BuiltinPiRunner implements ExecutionRunner {
     ticket: TicketExecutionHandle,
     mandate: WorkerMandate,
     callbacks?: ExecutionProgressCallback,
+    options?: { extraUserReply?: string },
   ): Promise<WorkerResult> {
     this.pruneExpiredSessions();
     mkdirSync(mandate.workspace_dir, { recursive: true });
@@ -375,7 +377,11 @@ export class BuiltinPiRunner implements ExecutionRunner {
       activeCallStartPerf: null,
       lookedBackTotal: 0,
       lastActiveAt: Date.now(),
-      approvedConfirmKeys: new Set(),
+      approvedConfirmKeys: new Set(
+        callbacks?.approvedConfirm
+          ? mandate.confirm_before.map((r) => `rule:${r.trim().toLowerCase()}`)
+          : [],
+      ),
     };
 
     const systemPrompt =
@@ -440,6 +446,7 @@ export class BuiltinPiRunner implements ExecutionRunner {
       `工作目录：${mandate.workspace_dir}`,
       skillLines,
       "请先调用 `read_task_context` 拉取任务上下文，完成工作后调用 `finish_task`。",
+      options?.extraUserReply ? `[USER 补充回复]\n${options.extraUserReply}` : "",
     ]
       .filter(Boolean)
       .join("\n");
@@ -456,12 +463,17 @@ export class BuiltinPiRunner implements ExecutionRunner {
     this.pruneExpiredSessions();
     const existing = this.sessions.get(ticket.ticketId);
     if (!existing) {
-      return this.execute(ticket, mandate, callbacks);
+      return this.execute(ticket, mandate, callbacks, { extraUserReply: userReply });
     }
 
     if (existing.pendingConfirmKey) {
       existing.approvedConfirmKeys.add(existing.pendingConfirmKey);
       existing.pendingConfirmKey = undefined;
+    }
+    if (callbacks?.approvedConfirm) {
+      for (const rule of mandate.confirm_before) {
+        existing.approvedConfirmKeys.add(`rule:${rule.trim().toLowerCase()}`);
+      }
     }
     existing.lastActiveAt = Date.now();
 
@@ -780,6 +792,26 @@ export class BuiltinPiRunner implements ExecutionRunner {
     this.activeAborts.add(ticketId);
     const session = this.sessions.get(ticketId);
     session?.agent.abort();
+    const children = this.activeChildren.get(ticketId);
+    if (children) {
+      for (const child of children) {
+        try {
+          child.kill("SIGTERM");
+        } catch {
+          // ignore
+        }
+        const killFallback = setTimeout(() => {
+          if (!child.killed && child.exitCode === null) {
+            try {
+              child.kill("SIGKILL");
+            } catch {
+              // ignore
+            }
+          }
+        }, 1500);
+        killFallback.unref();
+      }
+    }
   }
 
   async abortAll(): Promise<void> {
@@ -962,6 +994,20 @@ export class BuiltinPiRunner implements ExecutionRunner {
       return realTarget;
     };
 
+    const checkConfirmBeforeRule = (actionDesc: string): string | null => {
+      if (isVmUnrestricted || mandate.confirm_before.length === 0) return null;
+      const lowerDesc = actionDesc.toLowerCase();
+      for (const rule of mandate.confirm_before) {
+        const trimmed = rule.trim().toLowerCase();
+        if (!trimmed || !lowerDesc.includes(trimmed)) continue;
+        const confirmKey = `rule:${trimmed}`;
+        if (!state.approvedConfirmKeys.has(confirmKey) && !state.approvedConfirmKeys.has(rule)) {
+          return rule;
+        }
+      }
+      return null;
+    };
+
     const tools: AgentTool<any>[] = [
       {
         name: "read_task_context",
@@ -1031,6 +1077,18 @@ export class BuiltinPiRunner implements ExecutionRunner {
         parameters: WriteFileParams,
         execute: async (_id, input) => {
           const abs = resolveSafeWorkspacePath(input.path);
+          const matchedRule = checkConfirmBeforeRule(`write_file ${input.path}`);
+          if (matchedRule) {
+            const confirmKey = `rule:${matchedRule.trim().toLowerCase()}`;
+            params.onRequestConfirm(
+              `写入文件 "${input.path}" 命中高危确认规则 (${matchedRule})`,
+              confirmKey,
+            );
+            return {
+              content: [{ type: "text", text: "已向主人发起高危操作确认请求，工单已挂起等待确认。" }],
+              details: { awaiting_confirm: true },
+            };
+          }
           mkdirSync(resolve(abs, ".."), { recursive: true });
           writeFileSync(abs, input.content, "utf8");
           return {
@@ -1050,8 +1108,29 @@ export class BuiltinPiRunner implements ExecutionRunner {
           if (isCommandReferencingProtectedEnv(input.command, workspaceRoot)) {
             throw new Error("安全策略禁止通过命令读取或修改 Hato 的 .env 密钥文件");
           }
+          const matchedRule = checkConfirmBeforeRule(`run_command ${input.command}`);
+          if (matchedRule) {
+            const confirmKey = `rule:${matchedRule.trim().toLowerCase()}`;
+            params.onRequestConfirm(
+              `执行命令 "${input.command.slice(0, 120)}" 命中高危确认规则 (${matchedRule})`,
+              confirmKey,
+            );
+            return {
+              content: [{ type: "text", text: "已向主人发起高危操作确认请求，工单已挂起等待确认。" }],
+              details: { awaiting_confirm: true },
+            };
+          }
           const proxyEnv =
-            mandate.network === "egress" ? this.deps.proxyRouter.getWorkerProxyEnv() : {};
+            mandate.network === "none"
+              ? {
+                  HTTP_PROXY: "http://127.0.0.1:0",
+                  HTTPS_PROXY: "http://127.0.0.1:0",
+                  ALL_PROXY: "socks5://127.0.0.1:0",
+                  NO_PROXY: "",
+                }
+              : mandate.network === "egress"
+                ? this.deps.proxyRouter.getWorkerProxyEnv()
+                : {};
           const activityPersistDir = join(
             resolve(dirname(params.hatoConfig.paths.workspaces_dir), "worker-cli"),
             "activity",
@@ -1091,6 +1170,12 @@ export class BuiltinPiRunner implements ExecutionRunner {
               },
               stdio: ["ignore", "pipe", "pipe"],
             });
+            let ticketChildren = this.activeChildren.get(params.ticket.ticketId);
+            if (!ticketChildren) {
+              ticketChildren = new Set();
+              this.activeChildren.set(params.ticket.ticketId, ticketChildren);
+            }
+            ticketChildren.add(child);
 
             let stdoutBuf = "";
             let stderrBuf = "";
@@ -1131,6 +1216,11 @@ export class BuiltinPiRunner implements ExecutionRunner {
             }) => {
               if (settled) return;
               settled = true;
+              const tracked = this.activeChildren.get(params.ticket.ticketId);
+              if (tracked) {
+                tracked.delete(child);
+                if (tracked.size === 0) this.activeChildren.delete(params.ticket.ticketId);
+              }
               if (flushTimer) clearTimeout(flushTimer);
               if (timeoutHandle) clearTimeout(timeoutHandle);
               if (killTimer) clearTimeout(killTimer);
@@ -1559,9 +1649,13 @@ export class BuiltinPiRunner implements ExecutionRunner {
             input.name,
             input.reference_path,
           );
+          const refsSuffix =
+            loaded.references.length > 0
+              ? `\n\n[Available Reference Files]\n${loaded.references.map((r) => `- ${r}`).join("\n")}`
+              : "";
           return {
-            content: [{ type: "text", text: loaded.content }],
-            details: { name: loaded.name },
+            content: [{ type: "text", text: `${loaded.content}${refsSuffix}` }],
+            details: { name: loaded.name, references: loaded.references },
           };
         },
       });

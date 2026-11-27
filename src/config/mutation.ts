@@ -72,4 +72,8 @@ export class ConfigMutationService<TReload = unknown> {
   async reloadRuntime(): Promise<TReload> {
     return this.enqueue(() => this.deps.onReload());
   }
+
+  async runExclusive<T>(task: () => Promise<T> | T): Promise<T> {
+    return this.enqueue(async () => await task());
+  }
 }
